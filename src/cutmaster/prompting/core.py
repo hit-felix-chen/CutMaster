@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -133,6 +134,7 @@ class PromptPackage:
     context_keys: tuple[str, ...]
     modality: PromptModality
     output_artifact: str | None = None
+    retry_builder: Callable[[tuple[str, ...]], PromptPackage] | None = None
 
     @property
     def prompt_id(self) -> str:

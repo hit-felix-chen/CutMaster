@@ -524,9 +524,24 @@ def _sample_shot_frames(
             capture.set(cv2.CAP_PROP_POS_MSEC, local_time * 1000.0)
             ok, frame = capture.read()
             if not ok:
-                raise RuntimeError(
-                    f"Could not sample frame at {local_time:.3f}s from {clip_path}"
+                if not images:
+                    raise RuntimeError(
+                        f"Could not sample any frame from {clip_path}"
+                    )
+                repeated_frames = count - len(images)
+                log_event(
+                    "WARNING",
+                    "analyser",
+                    "fallback.apply",
+                    "Last decodable Shot frame repeated",
+                    clip_path=clip_path,
+                    failed_sample_time_sec=local_time,
+                    sampled_frames=len(images),
+                    repeated_frames=repeated_frames,
                 )
+                images.extend([images[-1]] * repeated_frames)
+                global_times.extend([global_times[-1]] * repeated_frames)
+                break
             ok, encoded = cv2.imencode(
                 ".jpg",
                 frame,

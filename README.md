@@ -82,7 +82,8 @@ Shot 区间，并将所有剩余 Shot 确定性地补成无对白 Segment。
 每个 Segment 会先保存为独立 MP4。VLM 标注以 Segment 为并发单位，共用
 `vlm.max_concurrency`；同一 Segment 内的 Shot 严格串行。每个请求只标注一个 Shot，
 输入是该 Shot 的 5 张均匀采样帧以及完整台词全局上下文。台词只能帮助理解叙事和
-名字，不能作为人物出镜、动作、地点或道具的视觉证据。每个 Shot 的最终结构化标注
+名字，不能作为人物出镜、动作、地点或道具的视觉证据。极短 Shot 不足 5 个可解码
+采样点时，以最后一个成功解码帧补足。每个 Shot 的最终结构化标注
 独立保存在 `shot_annotations/`，`analysis_history.json` 只保存轻量工作流状态，
 不记录模型调用、完整提示词、上下文快照或原始响应。
 

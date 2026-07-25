@@ -54,6 +54,24 @@ def test_prompt_embeds_contract_and_template_derived_from_same_schema() -> None:
     assert len(package.fingerprint) == 16
 
 
+def test_registry_rebuilds_prompt_with_accumulated_failure_reasons() -> None:
+    package = _shot_package()
+    assert package.retry_builder is not None
+
+    retried = package.retry_builder(
+        (
+            "Candidate is shorter than planned_duration_sec",
+            "Duplicate candidate range for slot_01",
+        )
+    )
+
+    assert '"attempt": 1' in retried.user_prompt
+    assert '"attempt": 2' in retried.user_prompt
+    assert "Candidate is shorter than planned_duration_sec" in retried.user_prompt
+    assert "Duplicate candidate range for slot_01" in retried.user_prompt
+    assert retried.user_prompt.count("<previous_attempt_failures>") == 1
+
+
 def test_same_contract_rejects_unlisted_enum_and_extra_fields() -> None:
     package = _shot_package()
     valid = {

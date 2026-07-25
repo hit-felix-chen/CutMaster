@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,89 @@ def test_error_summary_redacts_credentials_and_is_bounded() -> None:
     assert "token-value" not in summary
     assert "sk-abcdefghijklmnopqrstuvwxyz" not in summary
     assert len(summary) <= 500
+
+
+class _TTYBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("level", "ansi_code"),
+    [
+        ("DEBUG", "\x1b[36m"),
+        ("INFO", "\x1b[34m"),
+        ("SUCCESS", "\x1b[32m"),
+        ("WARNING", "\x1b[33m"),
+        ("ERROR", "\x1b[31m"),
+        ("CRITICAL", "\x1b[31m"),
+    ],
+)
+def test_console_colors_log_levels_but_file_stays_plain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    ansi_code: str,
+) -> None:
+    log_path = tmp_path / "cutmaster.log"
+    console = _TTYBuffer()
+    monkeypatch.setattr(sys, "stderr", console)
+    try:
+        configure_logging(log_path, console_level="DEBUG")
+        log_event(level, "orchestrator", "stage.progress", "Colored event")
+        console_line = console.getvalue()
+        file_line = log_path.read_text(encoding="utf-8")
+    finally:
+        logger.remove()
+        logger.configure(patcher=None)
+        logger.add(sys.__stderr__)
+
+    assert ansi_code in console_line
+    if level == "CRITICAL":
+        assert "\x1b[1m" in console_line
+    assert f"{level}" in console_line
+    assert "\x1b[" not in file_line
+    assert f"| {level}" in file_line
+
+
+def test_non_tty_console_disables_colors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_path = tmp_path / "cutmaster.log"
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", console)
+    try:
+        configure_logging(log_path)
+        log_event("WARNING", "orchestrator", "stage.progress", "Plain event")
+        console_line = console.getvalue()
+    finally:
+        logger.remove()
+        logger.configure(patcher=None)
+        logger.add(sys.__stderr__)
+
+    assert "\x1b[" not in console_line
+
+
+def test_explicit_console_color_survives_a_forwarding_pipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_path = tmp_path / "cutmaster.log"
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", console)
+    try:
+        configure_logging(log_path, console_color=True)
+        log_event("INFO", "orchestrator", "stage.progress", "Forwarded event")
+        console_line = console.getvalue()
+        file_line = log_path.read_text(encoding="utf-8")
+    finally:
+        logger.remove()
+        logger.configure(patcher=None)
+        logger.add(sys.__stderr__)
+
+    assert "\x1b[34m" in console_line
+    assert "\x1b[" not in file_line
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 import threading
 
+import numpy as np
 import pytest
 
 from cutmaster.configuration.schema import (
@@ -15,6 +16,7 @@ from cutmaster.analyser.service import (
     _detect_full_video_shots,
     _group_dialogue,
     _raw_segments,
+    _sample_shot_frames,
     _validate_dialogue_segments,
     _validate_shot_annotation,
     analyse_video_material,
@@ -58,6 +60,48 @@ def _dialogue(dialogue_id: int, start: float, end: float):
         "speaker": f"Speaker {dialogue_id}",
         "text": f"line {dialogue_id}",
     }
+
+
+def test_shot_sampling_repeats_last_decodable_frame(monkeypatch, tmp_path) -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.reads = 0
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return True
+
+        def set(self, _property, _value) -> None:
+            pass
+
+        def read(self):
+            self.reads += 1
+            if self.reads > 4:
+                return False, None
+            return True, np.full((8, 8, 3), self.reads, dtype=np.uint8)
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = FakeCapture()
+    monkeypatch.setattr(
+        "cutmaster.analyser.service.cv2.VideoCapture",
+        lambda _path: capture,
+    )
+
+    images, sampled_times = _sample_shot_frames(
+        tmp_path / "short.mp4",
+        0.0,
+        0.167,
+        10.0,
+        5,
+    )
+
+    assert len(images) == 5
+    assert len(sampled_times) == 5
+    assert images[-1] == images[-2]
+    assert sampled_times[-1] == sampled_times[-2]
+    assert capture.released
 
 
 def _group(index: int, dialogue_id: int, shot_index: int):

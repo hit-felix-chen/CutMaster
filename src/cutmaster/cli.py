@@ -38,7 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "run":
         return 2
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    configure_logging(args.output_dir / "cutmaster.log")
+    # Benchmark adapters commonly pipe child output before forwarding it to a real
+    # terminal, so isatty() alone cannot determine whether colors are visible.
+    configure_logging(args.output_dir / "cutmaster.log", console_color=True)
     config = load_config(args.config.resolve())
     request = RunRequest(
         video_path=args.video.resolve(),

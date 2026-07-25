@@ -62,6 +62,7 @@ def request_json_with_retries(
     *,
     operation: str,
     validate: Callable[[dict], T] | None = None,
+    on_retry: Callable[[BaseException, int], None] | None = None,
 ) -> T | dict:
     """Retry the complete request/parse/validation transaction."""
     attempts = max(1, config.max_retries + 1)
@@ -101,6 +102,8 @@ def request_json_with_retries(
                     f"{operation} failed after {attempts} attempts: {exc}"
                 ) from exc
             delay = min(2 ** (attempt - 1), 8)
+            if on_retry is not None:
+                on_retry(exc, attempt)
             log_event(
                 "WARNING",
                 "model",

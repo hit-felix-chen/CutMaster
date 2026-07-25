@@ -98,7 +98,9 @@ Each Segment is saved as an MP4 before annotation. Segments run concurrently
 under `vlm.max_concurrency`; Shots inside one Segment remain serial. Every Shot
 VLM call receives exactly five uniformly sampled frames and the complete
 transcript as global context. Transcript text is never accepted as visual
-evidence. Final structured Shot annotations are stored independently under
+evidence. If an extremely short Shot has fewer than five decodable sample
+positions, its last successfully decoded frame is repeated. Final structured
+Shot annotations are stored independently under
 `shot_annotations/`. `analysis_history.json` contains only lightweight workflow
 state and does not record model calls, full prompts, context snapshots, or raw
 responses.

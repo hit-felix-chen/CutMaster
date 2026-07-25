@@ -102,16 +102,21 @@ class WorkflowContext:
                 f"{package.prompt_id} expects modality={package.modality.value}"
             )
         snapshot = self.context_snapshot(list(package.context_keys))
-        contextual_prompt = package.user_prompt
-        if snapshot:
-            contextual_prompt = (
+        active_package = package
+        failure_reasons: list[str] = []
+
+        def contextual_prompt() -> str:
+            if not snapshot:
+                return active_package.user_prompt
+            return (
                 "# Maintained workflow context\n"
                 + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                 + "\n\n"
-                + package.user_prompt
+                + active_package.user_prompt
             )
 
         def request() -> str:
+            prompt = contextual_prompt()
             request_started = time.monotonic()
             modality = "text_and_images" if image_data_urls else "text"
             log_event(
@@ -119,21 +124,22 @@ class WorkflowContext:
                 "model",
                 "model.start",
                 "Model request started",
-                operation=package.operation,
-                prompt_id=package.prompt_id,
-                prompt_version=package.prompt_version,
-                contract_version=package.response_contract.version,
+                operation=active_package.operation,
+                prompt_id=active_package.prompt_id,
+                prompt_version=active_package.prompt_version,
+                contract_version=active_package.response_contract.version,
                 model=config.model,
                 modality=modality,
                 thinking=config.enable_thinking,
                 images=len(image_data_urls or []),
-                prompt_chars=len(contextual_prompt),
+                prompt_chars=len(prompt),
+                retry_failures=len(failure_reasons),
             )
             try:
                 raw = generate_text(
-                    contextual_prompt,
+                    prompt,
                     config,
-                    system_prompt=package.system_prompt,
+                    system_prompt=active_package.system_prompt,
                     image_data_urls=image_data_urls,
                 )
             except Exception as exc:
@@ -142,8 +148,8 @@ class WorkflowContext:
                     "model",
                     "model.fail",
                     "Model request failed",
-                    operation=package.operation,
-                    prompt_id=package.prompt_id,
+                    operation=active_package.operation,
+                    prompt_id=active_package.prompt_id,
                     model=config.model,
                     modality=modality,
                     elapsed_sec=time.monotonic() - request_started,
@@ -156,8 +162,8 @@ class WorkflowContext:
                 "model",
                 "model.complete",
                 "Model request completed",
-                operation=package.operation,
-                prompt_id=package.prompt_id,
+                operation=active_package.operation,
+                prompt_id=active_package.prompt_id,
                 model=config.model,
                 modality=modality,
                 elapsed_sec=time.monotonic() - request_started,
@@ -166,18 +172,25 @@ class WorkflowContext:
             return raw
 
         def validate(parsed: dict[str, Any]) -> T | dict[str, Any]:
-            structured = package.response_contract.validate_structure(parsed)
+            structured = active_package.response_contract.validate_structure(parsed)
             return (
                 validate_business(structured)
                 if validate_business is not None
                 else structured
             )
 
+        def rebuild_for_retry(error: BaseException, _attempt: int) -> None:
+            nonlocal active_package
+            failure_reasons.append(error_summary(error))
+            if package.retry_builder is not None:
+                active_package = package.retry_builder(tuple(failure_reasons))
+
         result = request_json_with_retries(
             request,
             config,
-            operation=package.operation,
+            operation=active_package.operation,
             validate=validate,
+            on_retry=rebuild_for_retry,
         )
         if package.output_artifact:
             self.set_artifact(package.output_artifact, result)

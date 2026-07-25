@@ -8,6 +8,7 @@ from cutmaster.prompting import (
     PromptTask,
     ResponseContract,
 )
+from cutmaster.prompting.registry import PromptRegistry
 from cutmaster.runtime.workflow_context import WorkflowContext
 
 
@@ -80,3 +81,84 @@ def test_context_never_loads_existing_state(tmp_path) -> None:
 
     assert context.data["schema_version"] == "2.0"
     assert context.get_artifact("legacy") is None
+
+
+def test_context_feeds_all_previous_failures_into_retry_prompts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    prompts = []
+    validations = 0
+    registry = PromptRegistry()
+
+    def build_package(_details):
+        return PromptPackage(
+            stage=PromptStage.PLANNER,
+            task=PromptTask.CANDIDATE_RETRIEVAL,
+            prompt_version="test",
+            operation="retrieve",
+            system_prompt="Return JSON",
+            user_prompt="Retrieve candidates",
+            response_contract=ResponseContract(
+                version="test",
+                schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["ok"],
+                    "properties": {"ok": {"type": "boolean"}},
+                },
+            ),
+            context_keys=(),
+            modality=PromptModality.TEXT,
+        )
+
+    registry.register(
+        PromptStage.PLANNER,
+        PromptTask.CANDIDATE_RETRIEVAL,
+        build_package,
+    )
+    package = registry.build(
+        PromptStage.PLANNER,
+        PromptTask.CANDIDATE_RETRIEVAL,
+        details=None,
+    )
+
+    def generate(prompt, *_args, **_kwargs):
+        prompts.append(prompt)
+        return '{"ok":true}'
+
+    def validate(parsed):
+        nonlocal validations
+        validations += 1
+        if validations == 1:
+            raise ValueError("Candidate is too short")
+        if validations == 2:
+            raise ValueError("Duplicate candidate range")
+        return parsed
+
+    monkeypatch.setattr(
+        "cutmaster.runtime.workflow_context.generate_text",
+        generate,
+    )
+    monkeypatch.setattr(
+        "cutmaster.runtime.model_gateway.time.sleep",
+        lambda _delay: None,
+    )
+
+    result = WorkflowContext(tmp_path / "history.json").call_prompt(
+        package=package,
+        config=LLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_retries=2,
+        ),
+        validate_business=validate,
+    )
+
+    assert result == {"ok": True}
+    assert "Candidate is too short" not in prompts[0]
+    assert "Candidate is too short" in prompts[1]
+    assert "Duplicate candidate range" not in prompts[1]
+    assert "Candidate is too short" in prompts[2]
+    assert "Duplicate candidate range" in prompts[2]

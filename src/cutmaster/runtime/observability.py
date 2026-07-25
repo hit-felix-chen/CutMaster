@@ -13,6 +13,18 @@ LOG_FORMAT = (
     "{extra[log_timestamp]} | {level:<8} | {extra[component]} | "
     "{extra[event]}{extra[fields_suffix]} | {message}{exception}"
 )
+CONSOLE_LOG_FORMAT = (
+    "{extra[log_timestamp]} | <level>{level:<8}</level> | {extra[component]} | "
+    "{extra[event]}{extra[fields_suffix]} | {message}{exception}"
+)
+LEVEL_COLORS = {
+    "DEBUG": "<cyan>",
+    "INFO": "<blue>",
+    "SUCCESS": "<green>",
+    "WARNING": "<yellow>",
+    "ERROR": "<red>",
+    "CRITICAL": "<red><bold>",
+}
 VALID_LEVELS = frozenset(
     {"DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
 )
@@ -148,16 +160,24 @@ def configure_logging(
     *,
     console_level: str = "INFO",
     file_level: str = "DEBUG",
+    console_color: bool | None = None,
 ) -> None:
     """Configure the process-wide operational log sinks."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     logger.remove()
     logger.configure(patcher=_patch_record)
+    for level, color in LEVEL_COLORS.items():
+        logger.level(level, color=color)
+    console_colorize = (
+        bool(getattr(sys.stderr, "isatty", lambda: False)())
+        if console_color is None
+        else console_color
+    )
     logger.add(
         sys.stderr,
         level=console_level,
-        format=LOG_FORMAT,
-        colorize=False,
+        format=CONSOLE_LOG_FORMAT,
+        colorize=console_colorize,
     )
     logger.add(
         file_path,
