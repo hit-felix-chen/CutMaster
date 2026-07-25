@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from cutmaster.models import (
+from cutmaster.configuration.schema import (
     ASRConfig,
     AppConfig,
     BeamSearchConfig,

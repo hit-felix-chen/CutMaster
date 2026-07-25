@@ -1,93 +1,19 @@
 from __future__ import annotations
 
-import json
-import platform
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
-from cutmaster.models import RenderConfig
-from cutmaster.observability import log_event
-from cutmaster.progress import progress_bar
+from cutmaster.configuration.schema import RenderConfig
+from cutmaster.editing.ffmpeg import (
+    RenderError,
+    encoder_args,
+    run_media_command,
+    select_encoder,
+)
+from cutmaster.runtime.observability import log_event
+from cutmaster.runtime.media_probe import check_media_tools, media_duration, probe_media
+from cutmaster.runtime.progress import progress_bar
 from cutmaster.timecode import parse_range
-
-
-class RenderError(RuntimeError):
-    pass
-
-
-def _run(command: list[str]) -> None:
-    log_event(
-        "DEBUG",
-        "renderer",
-        "stage.progress",
-        "Media command started",
-        executable=command[0],
-        arguments=len(command) - 1,
-    )
-    try:
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError as exc:
-        raise RenderError(f"FFmpeg command failed with exit code {exc.returncode}") from exc
-
-
-def check_media_tools() -> None:
-    missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
-    if missing:
-        raise RenderError(f"Missing required media tools: {', '.join(missing)}")
-
-
-def probe_media(path: Path) -> dict[str, Any]:
-    command = [
-        "ffprobe", "-v", "error", "-show_streams", "-show_format",
-        "-of", "json", str(path),
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    streams = data.get("streams") or []
-    video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
-    duration = float((data.get("format") or {}).get("duration") or video.get("duration") or 0.0)
-    return {
-        "duration": duration,
-        "width": int(video.get("width") or 0),
-        "height": int(video.get("height") or 0),
-        "has_audio": any(stream.get("codec_type") == "audio" for stream in streams),
-    }
-
-
-def media_duration(path: Path) -> float:
-    return float(probe_media(path)["duration"])
-
-
-def _available_encoders() -> str:
-    result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-encoders"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout + result.stderr
-
-
-def select_encoder(requested: str) -> str:
-    requested = requested.strip().lower()
-    if requested != "auto":
-        return requested
-    encoders = _available_encoders()
-    if platform.system() == "Darwin" and "h264_videotoolbox" in encoders:
-        return "h264_videotoolbox"
-    if "h264_nvenc" in encoders:
-        return "h264_nvenc"
-    return "libx264"
-
-
-def _encoder_args(encoder: str, threads: int) -> list[str]:
-    if encoder == "h264_videotoolbox":
-        return ["-c:v", encoder, "-q:v", "65"]
-    if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "fast", "-cq", "23"]
-    return ["-c:v", encoder, "-preset", "veryfast", "-crf", "23", "-threads", str(threads)]
 
 
 def _video_filter(config: RenderConfig) -> str:
@@ -120,12 +46,12 @@ def render_clip(
         "-frames:v",
         str(frame_count),
     ])
-    command.extend(_encoder_args(encoder, config.threads))
+    command.extend(encoder_args(encoder, config.threads))
     command.extend([
         "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
         "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(output),
     ])
-    _run(command)
+    run_media_command(command)
 
 
 def concatenate_clips(clips: list[Path], output: Path) -> None:
@@ -137,7 +63,7 @@ def concatenate_clips(clips: list[Path], output: Path) -> None:
         escaped = str(clip.resolve()).replace("'", "'\\''")
         lines.append(f"file '{escaped}'")
     concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _run([
+    run_media_command([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-f", "concat", "-safe", "0", "-i", str(concat_path),
         "-c", "copy", "-movflags", "+faststart", str(output),
@@ -170,7 +96,7 @@ def mix_bgm(
 ) -> None:
     duration = float(duration if duration is not None else media_duration(montage))
     audio_filter = build_final_audio_filter(config, duration)
-    _run([
+    run_media_command([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(montage), "-stream_loop", "-1", "-i", str(bgm),
         "-filter_complex", audio_filter,

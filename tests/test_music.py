@@ -1,6 +1,6 @@
 import numpy as np
 
-from cutmaster.music import _duration_range, _normalize, _section_boundaries
+from cutmaster.music.analysis import _duration_range, _normalize, _section_boundaries
 
 
 def test_music_energy_helpers() -> None:

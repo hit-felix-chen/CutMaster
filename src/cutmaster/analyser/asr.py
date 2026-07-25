@@ -9,8 +9,8 @@ from typing import Any, Iterable
 
 import requests
 
-from cutmaster.models import ASRConfig
-from cutmaster.observability import log_event
+from cutmaster.configuration.schema import ASRConfig
+from cutmaster.runtime.observability import log_event
 
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"

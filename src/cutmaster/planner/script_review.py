@@ -4,11 +4,11 @@ import itertools
 from pathlib import Path
 from typing import Any
 
-from cutmaster.models import LLMConfig
+from cutmaster.configuration.schema import LLMConfig
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planner import ScriptReviewDetails
-from cutmaster.workflow_context import WorkflowContext
-from cutmaster.sequence_selector import _score_candidate_path, path_to_script
+from cutmaster.runtime.workflow_context import WorkflowContext
+from cutmaster.planner.sequence_selection import _score_candidate_path, path_to_script
 from cutmaster.timecode import parse_range
 
 def _validate_patches(

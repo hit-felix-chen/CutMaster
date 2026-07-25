@@ -4,8 +4,8 @@ import subprocess
 
 import pytest
 
-from cutmaster.models import RenderConfig
-from cutmaster.renderer import build_final_audio_filter, concatenate_clips, render_clip
+from cutmaster.configuration.schema import RenderConfig
+from cutmaster.editing.renderer import build_final_audio_filter, concatenate_clips, render_clip
 
 
 def test_final_audio_filter_uses_only_bgm_when_source_is_muted() -> None:

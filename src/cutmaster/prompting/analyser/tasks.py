@@ -14,7 +14,7 @@ from cutmaster.prompting.core import (
     assemble_user_prompt,
 )
 from cutmaster.prompting.registry import prompt_registry
-from cutmaster.video_description import (
+from cutmaster.contracts.video import (
     CameraAngle,
     CameraMovement,
     InteriorExterior,

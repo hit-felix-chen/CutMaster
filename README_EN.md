@@ -80,7 +80,7 @@ analysis to succeed. PySceneDetect output, subtitles/dialogue, Segment boundarie
 each Segment clip, and every successful Shot VLM annotation are persisted as soon
 as they complete. After a later failure or interruption, the next run validates
 these artifacts and resumes at the first missing stage without repeating successful
-Shot calls. JSON histories and checkpoints use atomic replacement.
+Shot calls. Workflow-state files and checkpoints use atomic replacement.
 
 Full-video Shot detection, Segment clipping, per-Shot VLM annotation, candidate
 frame/motion processing, pairwise VLM scoring, source-window optimization, and
@@ -98,8 +98,10 @@ Each Segment is saved as an MP4 before annotation. Segments run concurrently
 under `vlm.max_concurrency`; Shots inside one Segment remain serial. Every Shot
 VLM call receives exactly five uniformly sampled frames and the complete
 transcript as global context. Transcript text is never accepted as visual
-evidence. `analysis_history.json` records context snapshots, prompts, frame
-labels, responses, and validation results.
+evidence. Final structured Shot annotations are stored independently under
+`shot_annotations/`. `analysis_history.json` contains only lightweight workflow
+state and does not record model calls, full prompts, context snapshots, or raw
+responses.
 
 ### Music profiling and abstract planning
 
@@ -137,8 +139,8 @@ salience, and duration feasibility. CutMaster retains both:
 
 The review LLM may only issue `keep/replace` patches using existing
 `candidate_id` values; it cannot invent timestamps. `planning_history.json`
-records selected context, every model call and status, structured results,
-script versions, and patches. Complete API, parse, and validation transactions
+stores planning artifacts, script versions, and patches without model-call
+payloads. Complete API, parse, and validation transactions
 are retried with exponential backoff, and partial results are never accepted.
 
 ### Visual-cut refinement
@@ -366,12 +368,13 @@ Each material-analysis cache directory contains:
 
 | Path | Contents |
 | --- | --- |
-| `shots.json` | Full-video PySceneDetect Shot boundaries |
+| `shots.json` | Full-video PySceneDetect Shot boundaries; FPS comes from ffprobe |
 | `source.srt`, `dialogues.json`, `dialogue_merged.srt` | ASR and reconstructed dialogue |
 | `segment_boundaries.json` | Dialogue groups, silent gaps, and Segment/Shot membership |
 | `segments/segment_XXXX.mp4` | Independently saved Segment video files |
+| `shot_annotations/shot_XXXXX.json` | Reusable final structured annotation for one Shot |
 | `video_description.json` | Structured Segment, Shot, scene, character, and dialogue descriptions |
-| `analysis_history.json` | Material-analysis LLM/VLM contexts and responses |
+| `analysis_history.json` | Lightweight material-analysis state without model-call content |
 | `analysis_manifest.json` | Cache input, model, schema, and detector signature |
 
 Each task output directory contains:
@@ -383,7 +386,7 @@ Each task output directory contains:
 | `edit_plan.json` | Accent-aligned abstract edit slots without source timestamps |
 | `candidate_pool.json` | Structured-video candidates, model scores, and local motion features |
 | `selection_diagnostics.json` | Independent-best and Beam Search paths with scores |
-| `planning_history.json` | Planning-stage workflow context, model calls, and versioned scripts/patches |
+| `planning_history.json` | Planning artifacts and versioned scripts/patches without model-call content |
 | `script_raw.json` | Final selected path with slot and candidate IDs |
 | `script_adapted.json` | Frame-grid output ranges, beat alignment, refined source ranges, and cut diagnostics |
 | `clips/clip_XXXX.mp4` | Normalized, video-only intermediate clips |
@@ -417,8 +420,8 @@ Each `script_adapted.json` item adds:
   and version model-call caches.
 - `analyser.py`: full-video Shot detection, dialogue Segment assembly,
   source splitting, parallel single-Shot VLM annotation, and material caching.
-- `workflow_context.py`: shared analyser/planner artifacts, model-call history,
-  checkpoints, and script-version persistence.
+- `runtime/workflow_context.py`: lightweight shared analyser/planner artifacts
+  and script-version persistence without model-call history.
 - `planner.py`: planning facade that exposes and coordinates four decoupled stages.
 - `slot_planner.py`: abstract Slot planning from the request, music profile, and
   structured source material.

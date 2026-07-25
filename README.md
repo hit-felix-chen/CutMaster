@@ -82,8 +82,9 @@ Shot 区间，并将所有剩余 Shot 确定性地补成无对白 Segment。
 每个 Segment 会先保存为独立 MP4。VLM 标注以 Segment 为并发单位，共用
 `vlm.max_concurrency`；同一 Segment 内的 Shot 严格串行。每个请求只标注一个 Shot，
 输入是该 Shot 的 5 张均匀采样帧以及完整台词全局上下文。台词只能帮助理解叙事和
-名字，不能作为人物出镜、动作、地点或道具的视觉证据。`analysis_history.json`
-记录模型上下文快照、完整提示词、帧标签、响应和校验结果。
+名字，不能作为人物出镜、动作、地点或道具的视觉证据。每个 Shot 的最终结构化标注
+独立保存在 `shot_annotations/`，`analysis_history.json` 只保存轻量工作流状态，
+不记录模型调用、完整提示词、上下文快照或原始响应。
 
 ### 音乐画像与抽象规划
 
@@ -112,7 +113,7 @@ CutMaster 对候选计算结构化语义相关性、真实画面相关性、主�
 - 每个 Slot 单独取最高分候选得到的独立最优路径；
 - 在原片时间严格单调且片段不重叠的硬约束下，将相邻连续性和音乐能量变化纳入路径分数的 Beam Search 全局路径。
 
-选择后，复核 LLM 只能使用候选池中已有的 `candidate_id` 进行 `keep/replace` 补丁，不能直接创造新时间戳。补丁会选择可共同成立的最大子集；冲突补丁会单独拒绝并记录原因，不再导致整批回滚。`planning_history.json` 会记录请求上下文、每次模型调用、视觉输入标签、响应状态、结构化结果、脚本版本、已接纳补丁和拒绝原因。CutMaster 对完整的 API 请求、JSON 解析和语义校验事务进行指数退避重试，不会接受残缺结果。
+选择后，复核 LLM 只能使用候选池中已有的 `candidate_id` 进行 `keep/replace` 补丁，不能直接创造新时间戳。补丁会选择可共同成立的最大子集；冲突补丁会单独拒绝并记录原因，不再导致整批回滚。`planning_history.json` 只保存规划产物、脚本版本、已接纳补丁和拒绝原因，不记录模型调用内容。CutMaster 对完整的 API 请求、JSON 解析和语义校验事务进行指数退避重试，不会接受残缺结果。
 
 ### 视觉切点优化
 
@@ -314,20 +315,21 @@ uv run cutmaster run \
 
 运行日志写入输出目录中的 `cutmaster.log`，采用稳定的
 `TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message` 单行格式。
-模型 prompt、原始响应和图片数据不会进入运行日志；完整模型上下文只保存在分析与规划
-历史文件中。事件命名、级别、安全边界及开发约束见
+模型 Prompt、原始响应、上下文快照和图片数据既不会进入运行日志，也不会写入工作流
+状态文件。事件命名、级别、安全边界及开发约束见
 [日志规范](docs/logging.md)。
 
 素材缓存目录包含：
 
 | 路径 | 内容 |
 | --- | --- |
-| `shots.json` | PySceneDetect 产生的全片 Shot 边界 |
+| `shots.json` | PySceneDetect 产生的全片 Shot 边界检查点；FPS 由 ffprobe 读取 |
 | `source.srt` / `dialogues.json` / `dialogue_merged.srt` | ASR 与完整台词重组结果 |
 | `segment_boundaries.json` | 对白组、无对白间隙和 Segment/Shot 归属 |
 | `segments/segment_XXXX.mp4` | 按 Shot 边界保存的独立 Segment 视频 |
+| `shot_annotations/shot_XXXXX.json` | 可断点复用的单-Shot最终结构化标注 |
 | `video_description.json` | Segment、Shot、场景、人物和对白的完整结构化描述 |
-| `analysis_history.json` | 素材分析阶段全部 LLM/VLM 上下文及响应 |
+| `analysis_history.json` | 不含模型调用内容的轻量素材分析状态 |
 | `analysis_manifest.json` | 缓存输入、模型、schema 和检测参数签名 |
 
 每个任务输出目录包含：
@@ -339,7 +341,7 @@ uv run cutmaster run \
 | `edit_plan.json` | 重音对齐后的抽象剪辑 Slot，不含原片时间戳 |
 | `candidate_pool.json` | 每个 Slot 的结构化视频候选、模型分数和本地运动特征 |
 | `selection_diagnostics.json` | VLM Pairwise Beam Search 的候选路径、路径分数和评分数量 |
-| `planning_history.json` | 主动维护的规划上下文、模型调用和脚本版本/补丁历史 |
+| `planning_history.json` | 规划产物和脚本版本/补丁状态，不含模型调用内容 |
 | `script_raw.json` | 最终选中的候选路径及 Slot/候选 ID |
 | `script_adapted.json` | 输出帧范围、节拍对齐、优化后的原片范围和切点诊断信息 |
 | `clips/clip_XXXX.mp4` | 标准化的无声中间视频片段 |
@@ -366,7 +368,7 @@ uv run cutmaster run \
 - `video_description.py`：Segment、Shot、场景、人物和对白的严格数据契约。
 - `prompting/`：统一注册 analyser/planner Prompt，由同一 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
 - `analyser.py`：全片 Shot 检测、对白 Segment 构造、素材切片、并行单-Shot VLM 标注和素材缓存。
-- `workflow_context.py`：analyser 与 planner 共用的结构化产物、模型调用历史、断点和脚本版本持久化。
+- `runtime/workflow_context.py`：analyser 与 planner 共用的轻量结构化产物和脚本版本持久化，不保存模型调用历史。
 - `planner.py`：规划门面，统一暴露并组织四个解耦阶段。
 - `slot_planner.py`：根据用户目标、音乐画像和结构化素材规划抽象 Slot。
 - `candidate_retriever.py`：检索候选片段，并用真实画面完成主体与内容核验。

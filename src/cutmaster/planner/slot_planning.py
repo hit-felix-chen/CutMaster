@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from cutmaster.models import LLMConfig, RunRequest
+from cutmaster.configuration.schema import LLMConfig
+from cutmaster.contracts.workflow import RunRequest
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planner import SlotPlanningDetails
-from cutmaster.workflow_context import WorkflowContext
+from cutmaster.runtime.workflow_context import WorkflowContext
 
 def _request_metadata(request: RunRequest, clip_count: int) -> dict[str, Any]:
     return {

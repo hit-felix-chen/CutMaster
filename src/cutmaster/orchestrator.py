@@ -4,14 +4,16 @@ import json
 import shutil
 import time
 
-from cutmaster.cuts import optimize_script_source_windows
-from cutmaster.music import analyze_music, write_music_profile
-from cutmaster.models import AppConfig, OrchestrationResult, RunRequest
-from cutmaster.observability import error_summary, log_event
+from cutmaster.editing.source_windows import optimize_script_source_windows
+from cutmaster.music.analysis import analyze_music, write_music_profile
+from cutmaster.configuration.schema import AppConfig
+from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
+from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.planner import NoFeasiblePathError, Planner
-from cutmaster.workflow_context import WorkflowContext
-from cutmaster.renderer import media_duration, render_montage
-from cutmaster.script import adapt_script, script_duration, write_script
+from cutmaster.runtime.workflow_context import WorkflowContext
+from cutmaster.editing.renderer import render_montage
+from cutmaster.runtime.media_probe import media_duration
+from cutmaster.editing.script import adapt_script, script_duration, write_script
 from cutmaster.analyser import analyse_video_material
 
 

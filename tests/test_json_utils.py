@@ -1,4 +1,4 @@
-from cutmaster.json_utils import parse_json_object
+from cutmaster.runtime.json_codec import parse_json_object
 
 
 def test_parse_fenced_json() -> None:

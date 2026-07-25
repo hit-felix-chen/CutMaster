@@ -1,4 +1,4 @@
-from cutmaster.planner import _merge_planning_feedback
+from cutmaster.planner.service import _merge_planning_feedback
 
 
 def test_planning_feedback_accumulates_failed_assignments_and_forbidden_segments() -> None:

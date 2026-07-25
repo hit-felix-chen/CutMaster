@@ -3,18 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cutmaster.candidate_retriever import retrieve_candidates
-from cutmaster.models import AppConfig, RunRequest
-from cutmaster.workflow_context import WorkflowContext
-from cutmaster.script_reviewer import review_and_patch
-from cutmaster.sequence_selector import (
+from cutmaster.planner.candidate_retrieval import retrieve_candidates
+from cutmaster.configuration.schema import AppConfig
+from cutmaster.contracts.workflow import RunRequest
+from cutmaster.runtime.workflow_context import WorkflowContext
+from cutmaster.planner.script_review import review_and_patch
+from cutmaster.planner.sequence_selection import (
     NoFeasiblePathError,
     path_to_script,
     precompute_pairwise_scores,
     select_paths,
     validate_chronological_path,
 )
-from cutmaster.slot_planner import align_slots_to_music, plan_edit_slots
+from cutmaster.planner.slot_planning import align_slots_to_music, plan_edit_slots
 
 
 def _merge_planning_feedback(

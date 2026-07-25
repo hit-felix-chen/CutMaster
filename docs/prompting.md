@@ -85,34 +85,21 @@ result = workflow_context.call_prompt(
 定义分别位于：
 
 ```text
-src/cutmaster/prompting/analyser.py
-src/cutmaster/prompting/planner.py
+src/cutmaster/prompting/analyser/tasks.py
+src/cutmaster/prompting/planner/tasks.py
 ```
 
 注册表会拒绝重复的 stage/task，并在构造结果与请求键不一致时立即失败。
 
-## 历史与缓存
+## 状态与缓存
 
-每次模型调用记录：
+模型调用不写入持久化历史：完整 Prompt、注入上下文、原始响应、图片标签及模型调用
+状态都只存在于当前请求的内存中。
 
-```text
-prompt_id
-prompt_version
-prompt_fingerprint
-contract_version
-contract_fingerprint
-context_fingerprint
-response_contract
-```
-
-可复用结果必须同时匹配 Prompt、契约和所注入上下文的 fingerprint。历史中保存模型原始结构结果和业务归一化结果；恢复时使用当前契约重新检查原始结构，并重新执行当前业务校验器。
-
-因此：
-
-- Prompt 文本改变，只失效对应调用；
-- 字段范围改变，只失效对应契约；
-- maintained context 改变，不会错误复用旧结果；
-- 业务归一化逻辑改变，会在恢复时重新执行；
+需要断点复用的业务产物必须由所属阶段独立保存。例如 Shot 标注写入
+`shot_annotations/<shot_id>.json`，其中只包含最终结构化标注及 Prompt/契约
+fingerprint，不包含模型调用内容。Prompt 或契约变化时，对应 Shot 检查点失效并重新
+请求模型。
 - 旧式、没有 Prompt/契约 fingerprint 的历史调用不会复用。
 
 ## 开发约束

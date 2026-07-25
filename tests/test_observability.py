@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
-from cutmaster.observability import (
+from cutmaster.runtime.observability import (
     configure_logging,
     error_summary,
     log_event,

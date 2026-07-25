@@ -1,5 +1,5 @@
-from cutmaster.asr import _to_srt
-from cutmaster.models import ASRConfig
+from cutmaster.analyser.asr import _to_srt
+from cutmaster.configuration.schema import ASRConfig
 
 
 def test_fun_asr_words_are_split_into_srt() -> None:

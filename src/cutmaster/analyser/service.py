@@ -1,21 +1,29 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 
-from cutmaster.asr import prepare_subtitles
-from cutmaster.cuts import detect_source_cuts
-from cutmaster.dialogue import postprocess_dialogues
-from cutmaster.models import (
+from cutmaster.analyser.asr import prepare_subtitles
+from cutmaster.analyser.cache import (
+    ANALYSIS_SCHEMA_VERSION,
+    dialogue_checkpoint as _dialogue_checkpoint,
+    material_directory as _material_directory,
+    read_json_checkpoint as _read_json_checkpoint,
+    valid_segment_checkpoint as _valid_segment_checkpoint,
+    valid_shot_checkpoint as _valid_shot_checkpoint,
+    write_json_checkpoint as _write_json_checkpoint,
+)
+from cutmaster.analyser.contracts import MaterialAnalysisResult
+from cutmaster.runtime.shot_detection import detect_source_cuts
+from cutmaster.analyser.dialogue import postprocess_dialogues
+from cutmaster.configuration.schema import (
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
@@ -23,17 +31,17 @@ from cutmaster.models import (
     ShotDetectionConfig,
     VLMConfig,
 )
-from cutmaster.observability import log_event
+from cutmaster.runtime.observability import log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import (
     DialogueSegmentationDetails,
     ShotAnnotationDetails,
 )
-from cutmaster.workflow_context import WorkflowContext
-from cutmaster.progress import progress_bar
-from cutmaster.renderer import probe_media
+from cutmaster.runtime.workflow_context import WorkflowContext
+from cutmaster.runtime.progress import progress_bar
+from cutmaster.runtime.media_probe import probe_media
 from cutmaster.timecode import format_range, parse_time
-from cutmaster.video_description import (
+from cutmaster.contracts.video import (
     BoundarySource,
     CameraAngle,
     CameraMovement,
@@ -54,205 +62,6 @@ from cutmaster.video_description import (
     TimeRange,
     VideoDescription,
 )
-
-
-ANALYSIS_SCHEMA_VERSION = "1.0"
-
-
-@dataclass(frozen=True)
-class MaterialAnalysisResult:
-    material_directory: Path
-    source_srt: Path
-    processed_subtitle: Path
-    dialogues_json: Path
-    video_description_path: Path
-    analysis_history_path: Path
-    video_description: dict[str, Any]
-
-
-def _file_signature(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
-
-
-def _digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def _material_directory(
-    video_path: Path,
-    video_title: str,
-    subtitle_path: Path | None,
-    material_config: MaterialAnalysisConfig,
-    detection_config: ShotDetectionConfig,
-    asr_config: ASRConfig,
-    annotation_config: ShotAnnotationConfig,
-    llm_config: LLMConfig,
-    vlm_config: VLMConfig,
-) -> tuple[Path, dict[str, Any]]:
-    source_signature = _file_signature(video_path)
-    asset_id = f"{video_path.stem}-{_digest(source_signature)}"
-    analysis_signature = {
-        "schema_version": ANALYSIS_SCHEMA_VERSION,
-        "source": source_signature,
-        "video_title": video_title or video_path.stem,
-        "subtitle": (
-            _file_signature(subtitle_path)
-            if subtitle_path is not None
-            else {
-                "backend": asr_config.backend,
-                "max_chars": asr_config.max_chars,
-                "max_subtitle_duration_sec": asr_config.max_subtitle_duration_sec,
-            }
-        ),
-        "llm": {
-            "model": llm_config.model,
-            "base_url": llm_config.base_url,
-            "enable_thinking": llm_config.enable_thinking,
-            "temperature": llm_config.temperature,
-            "max_tokens": llm_config.max_tokens,
-        },
-        "vlm": {
-            "model": vlm_config.model,
-            "base_url": vlm_config.base_url,
-            "enable_thinking": vlm_config.enable_thinking,
-            "temperature": vlm_config.temperature,
-            "max_tokens": vlm_config.max_tokens,
-        },
-        "shot_sample_frames": annotation_config.shot_sample_frames,
-        "scene_detection": {
-            "adaptive_threshold": detection_config.adaptive_threshold,
-            "adaptive_min_content_val": detection_config.adaptive_min_content_val,
-            "adaptive_min_scene_len_sec": (
-                detection_config.adaptive_min_scene_len_sec
-            ),
-            "duplicate_frame_threshold": (
-                detection_config.duplicate_frame_threshold
-            ),
-        },
-    }
-    return (
-        material_config.material_cache_dir
-        / asset_id
-        / f"analysis-{_digest(analysis_signature)}",
-        analysis_signature,
-    )
-
-
-def _write_json_checkpoint(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary_path.replace(path)
-    log_event(
-        "INFO",
-        "analyser",
-        "checkpoint.write",
-        "Analysis checkpoint written",
-        path=path,
-    )
-
-
-def _read_json_checkpoint(path: Path) -> Any | None:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        log_event(
-            "WARNING",
-            "analyser",
-            "cache.invalid",
-            "Invalid analysis checkpoint was ignored",
-            path=path,
-        )
-        return None
-
-
-def _valid_shot_checkpoint(
-    value: Any,
-    duration_sec: float,
-) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list) or not value:
-        return None
-    previous_end = 0.0
-    shot_ids: set[str] = set()
-    for shot in value:
-        if not isinstance(shot, dict):
-            return None
-        shot_id = str(shot.get("shot_id") or "")
-        time_range = shot.get("time_range")
-        if not shot_id or shot_id in shot_ids or not isinstance(time_range, dict):
-            return None
-        try:
-            start = float(time_range["start_sec"])
-            end = float(time_range["end_sec"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        if abs(start - previous_end) > 1e-3 or end <= start:
-            return None
-        shot_ids.add(shot_id)
-        previous_end = end
-    if abs(previous_end - duration_sec) > 1e-3:
-        return None
-    return value
-
-
-def _valid_segment_checkpoint(
-    value: Any,
-    shots: list[dict[str, Any]],
-) -> list[dict[str, Any]] | None:
-    if not isinstance(value, list) or not value:
-        return None
-    expected_shot_ids = [str(shot["shot_id"]) for shot in shots]
-    actual_shot_ids: list[str] = []
-    previous_end = 0.0
-    for segment in value:
-        if not isinstance(segment, dict):
-            return None
-        segment_shots = segment.get("shots")
-        time_range = segment.get("time_range")
-        if not isinstance(segment_shots, list) or not segment_shots:
-            return None
-        if not isinstance(time_range, dict):
-            return None
-        try:
-            start = float(time_range["start_sec"])
-            end = float(time_range["end_sec"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        if abs(start - previous_end) > 1e-3 or end <= start:
-            return None
-        actual_shot_ids.extend(str(shot.get("shot_id") or "") for shot in segment_shots)
-        previous_end = end
-    if actual_shot_ids != expected_shot_ids:
-        return None
-    return value
-
-
-def _dialogue_checkpoint(
-    material_directory: Path,
-) -> tuple[Path, Path] | None:
-    processed_subtitle = material_directory / "dialogue_merged.srt"
-    dialogues_json = material_directory / "dialogues.json"
-    document = _read_json_checkpoint(dialogues_json)
-    if (
-        not processed_subtitle.is_file()
-        or processed_subtitle.stat().st_size <= 0
-        or not isinstance(document, dict)
-        or not isinstance(document.get("sentences"), list)
-    ):
-        return None
-    return processed_subtitle, dialogues_json
-
 
 def _detect_full_video_shots(
     video_path: Path,
@@ -826,7 +635,9 @@ def _annotate_segments(
     context: WorkflowContext,
     config: VLMConfig,
     sample_frames: int,
+    annotation_directory: Path,
 ) -> list[SegmentDescription]:
+    annotation_directory.mkdir(parents=True, exist_ok=True)
     annotation_progress = progress_bar(
         total=sum(len(segment["shots"]) for segment in segments),
         description="Shot VLM annotation",
@@ -867,13 +678,24 @@ def _annotate_segments(
                     bool(shot["dialogue"]),
                 )
 
-            cached_annotation = context.get_successful_prompt_result(
-                package,
-                validate_business=validate_annotation,
-            )
-            if cached_annotation is not None:
-                annotation = cached_annotation
-            else:
+            checkpoint_path = annotation_directory / f"{shot['shot_id']}.json"
+            checkpoint = _read_json_checkpoint(checkpoint_path)
+            annotation = None
+            if (
+                isinstance(checkpoint, dict)
+                and checkpoint.get("prompt_fingerprint") == package.fingerprint
+                and checkpoint.get("contract_fingerprint")
+                == package.response_contract.fingerprint
+                and isinstance(checkpoint.get("annotation"), dict)
+            ):
+                try:
+                    structured = package.response_contract.validate_structure(
+                        checkpoint["annotation"]
+                    )
+                    annotation = validate_annotation(structured)
+                except ValueError:
+                    annotation = None
+            if annotation is None:
                 images, sampled_times = _sample_shot_frames(
                     clip_path,
                     local_start,
@@ -890,6 +712,20 @@ def _annotate_segments(
                         f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
                         for index, time_sec in enumerate(sampled_times, 1)
                     ],
+                )
+                _write_json_checkpoint(
+                    checkpoint_path,
+                    {
+                        "schema_version": "1.0",
+                        "shot_id": shot["shot_id"],
+                        "prompt_id": package.prompt_id,
+                        "prompt_version": package.prompt_version,
+                        "prompt_fingerprint": package.fingerprint,
+                        "contract_fingerprint": (
+                            package.response_contract.fingerprint
+                        ),
+                        "annotation": annotation,
+                    },
                 )
             dialogue_occurrences = [
                 DialogueOccurrence(
@@ -1103,12 +939,9 @@ def analyse_video_material(
         _read_json_checkpoint(shots_path),
         duration_sec,
     )
-    if shots is None:
-        shots = _valid_shot_checkpoint(
-            context.get_artifact("shot_boundaries"),
-            duration_sec,
-        )
-    cached_source_metadata = context.get_artifact("source_metadata")
+    fps = float(media["fps"])
+    if fps <= 0:
+        raise ValueError("Could not determine source-video frame rate")
     if shots is None:
         stage_started = time.monotonic()
         log_event(
@@ -1126,7 +959,6 @@ def analyse_video_material(
             detection_config,
         )
         _write_json_checkpoint(shots_path, shots)
-        context.set_artifact("shot_boundaries", shots)
         log_event(
             "INFO",
             "analyser",
@@ -1149,20 +981,7 @@ def analyse_video_material(
             stage_count=5,
             shots=len(shots),
         )
-        if not shots_path.is_file():
-            _write_json_checkpoint(shots_path, shots)
-        if isinstance(cached_source_metadata, dict):
-            fps = float(cached_source_metadata.get("fps") or 0.0)
-        else:
-            fps = 0.0
-        if fps <= 0:
-            capture = cv2.VideoCapture(str(video_path))
-            try:
-                fps = float(capture.get(cv2.CAP_PROP_FPS))
-            finally:
-                capture.release()
-        if fps <= 0:
-            raise ValueError("Could not determine source-video frame rate")
+    context.set_artifact("shot_boundaries", shots)
 
     source_metadata = {
         "path": str(video_path.resolve()),
@@ -1172,8 +991,7 @@ def analyse_video_material(
         "width": int(media["width"]),
         "height": int(media["height"]),
     }
-    if cached_source_metadata != source_metadata:
-        context.set_artifact("source_metadata", source_metadata)
+    context.set_artifact("source_metadata", source_metadata)
 
     stage_started = time.monotonic()
     log_event(
@@ -1234,11 +1052,6 @@ def analyse_video_material(
         shots,
     )
     if segments is None:
-        segments = _valid_segment_checkpoint(
-            context.get_artifact("segment_boundaries"),
-            shots,
-        )
-    if segments is None:
         stage_started = time.monotonic()
         log_event(
             "INFO",
@@ -1277,6 +1090,7 @@ def analyse_video_material(
         )
         if not segment_boundaries_path.is_file():
             _write_json_checkpoint(segment_boundaries_path, segments)
+        context.set_artifact("segment_boundaries", segments)
 
     stage_started = time.monotonic()
     log_event(
@@ -1318,6 +1132,7 @@ def analyse_video_material(
         context,
         vlm_config,
         annotation_config.shot_sample_frames,
+        material_directory / "shot_annotations",
     )
     log_event(
         "INFO",

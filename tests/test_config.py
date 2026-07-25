@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from cutmaster.config import load_config
+from cutmaster.configuration.loader import load_config
 
 
 def test_workflow_ordered_config_maps_each_stage(tmp_path, monkeypatch) -> None:

@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from cutmaster.models import (
+from cutmaster.configuration.schema import (
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
@@ -10,7 +10,7 @@ from cutmaster.models import (
     ShotDetectionConfig,
     VLMConfig,
 )
-from cutmaster.analyser import (
+from cutmaster.analyser.service import (
     _annotate_segments,
     _detect_full_video_shots,
     _group_dialogue,
@@ -21,7 +21,7 @@ from cutmaster.analyser import (
 )
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import ShotAnnotationDetails
-from cutmaster.video_description import (
+from cutmaster.contracts.video import (
     CameraAngle,
     CameraMovement,
     InteriorExterior,
@@ -202,7 +202,7 @@ def test_shot_annotation_normalization_preserves_shot_id() -> None:
 
 def test_full_video_shot_detection_builds_complete_boundary_partition(monkeypatch) -> None:
     monkeypatch.setattr(
-        "cutmaster.analyser.detect_source_cuts",
+        "cutmaster.analyser.service.detect_source_cuts",
         lambda *_args, **_kwargs: ([1.25, 3.5], 24.0),
     )
     shots, fps = _detect_full_video_shots(
@@ -355,6 +355,7 @@ def test_silent_shots_between_dialogue_groups_become_independent_segments() -> N
 
 def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     monkeypatch,
+    tmp_path,
 ) -> None:
     segments = []
     for segment_index in range(2):
@@ -381,7 +382,7 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
         )
 
     monkeypatch.setattr(
-        "cutmaster.analyser._sample_shot_frames",
+        "cutmaster.analyser.service._sample_shot_frames",
         lambda *_args: (
             ["data:image/jpeg;base64,stub"] * 5,
             [0.1, 0.3, 0.5, 0.7, 0.9],
@@ -392,9 +393,6 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     lock = threading.Lock()
 
     class Context:
-        def get_successful_prompt_result(self, _package, **_kwargs):
-            return None
-
         def call_prompt(self, **kwargs):
             shot_id = kwargs["package"].operation.split()[-1]
             segment_id, shot_index = shot_id.removeprefix("shot_").split("_")
@@ -441,8 +439,24 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
             max_concurrency=2,
         ),
         5,
+        tmp_path / "shot_annotations",
     )
     assert len(descriptions) == 2
+    assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
+
+    cached_descriptions = _annotate_segments(
+        segments,
+        Context(),
+        VLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_concurrency=2,
+        ),
+        5,
+        tmp_path / "shot_annotations",
+    )
+    assert len(cached_descriptions) == 2
     assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
 
 
@@ -455,10 +469,11 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
     detection_calls = 0
 
     monkeypatch.setattr(
-        "cutmaster.analyser.probe_media",
-        lambda _path: {
-            "duration": 2.0,
-            "width": 1920,
+        "cutmaster.analyser.service.probe_media",
+            lambda _path: {
+                "duration": 2.0,
+                "fps": 24.0,
+                "width": 1920,
             "height": 1080,
             "has_audio": True,
         },
@@ -469,9 +484,9 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
         detection_calls += 1
         return _shots(2), 24.0
 
-    monkeypatch.setattr("cutmaster.analyser._detect_full_video_shots", detect)
+    monkeypatch.setattr("cutmaster.analyser.service._detect_full_video_shots", detect)
     monkeypatch.setattr(
-        "cutmaster.analyser.prepare_subtitles",
+        "cutmaster.analyser.service.prepare_subtitles",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("stop after shot detection")
         ),

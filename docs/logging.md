@@ -1,6 +1,6 @@
 # CutMaster 日志规范
 
-CutMaster 的运行日志用于回答三个问题：工作流正在执行什么、执行到了哪里、失败后能否定位并恢复。日志不承担模型上下文归档职责；完整 prompt、原始响应和结构化结果分别保存在 `analysis_history.json` 与 `planning_history.json`。
+CutMaster 的运行日志用于回答三个问题：工作流正在执行什么、执行到了哪里、失败后能否定位并恢复。日志不归档完整 Prompt、模型上下文或原始响应，工作流状态文件同样不记录这些调用内容。
 
 ## 单行格式
 
@@ -126,14 +126,15 @@ prompt_chars
 - 终端：使用同一格式，默认从 `INFO` 开始。
 - `tqdm` 进度条：只输出到终端/stdout-stderr；不写入 `cutmaster.log`。
 - benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，因此可以包含日志与进度条。
-- `analysis_history.json`、`planning_history.json`：用于模型上下文、响应与可复现性审计，不属于运行日志。
+- `analysis_history.json`、`planning_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
+- `shot_annotations/`：保存可断点复用的单-Shot最终结构化标注。
 
 ## 代码约束
 
 业务模块统一调用：
 
 ```python
-from cutmaster.observability import log_event
+from cutmaster.runtime.observability import log_event
 
 log_event(
     "INFO",

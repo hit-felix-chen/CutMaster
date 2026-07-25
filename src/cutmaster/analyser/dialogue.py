@@ -9,15 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cutmaster.llm import generate_text, request_json_with_retries
-from cutmaster.models import LLMConfig
-from cutmaster.observability import log_event
+from cutmaster.runtime.model_gateway import generate_text, request_json_with_retries
+from cutmaster.configuration.schema import LLMConfig
+from cutmaster.runtime.observability import log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import DialogueReconstructionDetails
 from cutmaster.timecode import format_time, parse_time
 
 if TYPE_CHECKING:
-    from cutmaster.workflow_context import WorkflowContext
+    from cutmaster.runtime.workflow_context import WorkflowContext
 
 SRT_BLOCK_RE = re.compile(
     r"(?ms)^\s*(\d+)\s*\n"

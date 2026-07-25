@@ -5,8 +5,9 @@ import pytest
 import numpy as np
 from scenedetect import FrameTimecode
 
-from cutmaster.cuts import choose_source_window, detect_source_cuts, optimize_script_source_windows
-from cutmaster.models import ShotDetectionConfig, SourceWindowOptimizationConfig
+from cutmaster.runtime.shot_detection import detect_source_cuts
+from cutmaster.editing.source_windows import choose_source_window, optimize_script_source_windows
+from cutmaster.configuration.schema import ShotDetectionConfig, SourceWindowOptimizationConfig
 
 
 def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path) -> None:
@@ -47,8 +48,14 @@ def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path)
             processed_positions.append(position.frame_num)
             return []
 
-    monkeypatch.setattr("cutmaster.cuts.open_video", lambda _path: FakeVideo())
-    monkeypatch.setattr("cutmaster.cuts.AdaptiveDetector", FakeDetector)
+    monkeypatch.setattr(
+        "cutmaster.runtime.shot_detection.open_video",
+        lambda _path: FakeVideo(),
+    )
+    monkeypatch.setattr(
+        "cutmaster.runtime.shot_detection.AdaptiveDetector",
+        FakeDetector,
+    )
 
     cuts, frame_rate = detect_source_cuts(tmp_path / "video.mp4", 0.0, 1.0)
 
@@ -185,7 +192,7 @@ def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.Monkey
     ) -> tuple[list[float], float]:
         return [start + (end - start) / 2.0], 10.0
 
-    monkeypatch.setattr("cutmaster.cuts.detect_source_cuts", fake_detect)
+    monkeypatch.setattr("cutmaster.editing.source_windows.detect_source_cuts", fake_detect)
     items = [
         {
             "_id": index,

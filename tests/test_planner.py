@@ -2,14 +2,14 @@ import threading
 
 import pytest
 
-from cutmaster.models import LLMConfig, VLMConfig
-from cutmaster.candidate_retriever import (
+from cutmaster.configuration.schema import LLMConfig, VLMConfig
+from cutmaster.planner.candidate_retrieval import (
     _retrieval_segment_context,
     _validate_candidates,
     _validate_visual_grounding,
 )
-from cutmaster.script_reviewer import review_and_patch
-from cutmaster.sequence_selector import (
+from cutmaster.planner.script_review import review_and_patch
+from cutmaster.planner.sequence_selection import (
     NoFeasiblePathError,
     _pair_key,
     _unary,
@@ -18,12 +18,12 @@ from cutmaster.sequence_selector import (
     select_paths,
     validate_chronological_path,
 )
-from cutmaster.slot_planner import (
+from cutmaster.planner.slot_planning import (
     _globally_align_boundaries,
     _validate_slots,
     align_slots_to_music,
 )
-from cutmaster.workflow_context import WorkflowContext
+from cutmaster.runtime.workflow_context import WorkflowContext
 
 
 def _slots():
@@ -277,7 +277,7 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
         for index, slot in enumerate(slots, 1)
     }
     monkeypatch.setattr(
-        "cutmaster.sequence_selector._edge_contact_sheet_data_url",
+        "cutmaster.planner.sequence_selection._edge_contact_sheet_data_url",
         lambda *args, **kwargs: "data:image/jpeg;base64,stub",
     )
     barrier = threading.Barrier(2)
@@ -528,7 +528,7 @@ def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> 
         slots,
         pool,
         original,
-        __import__("cutmaster.models", fromlist=["LLMConfig"]).LLMConfig(
+        __import__("cutmaster.configuration.schema", fromlist=["LLMConfig"]).LLMConfig(
             model="test", base_url="", api_key="test"
         ),
         context,

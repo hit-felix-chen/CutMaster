@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from cutmaster.llm import generate_text, request_json_with_retries
-from cutmaster.models import LLMConfig, VLMConfig
+from cutmaster.runtime.model_gateway import generate_text, request_json_with_retries
+from cutmaster.configuration.schema import LLMConfig, VLMConfig
 
 
 @pytest.mark.parametrize(
@@ -52,7 +52,7 @@ def test_model_thinking_config_reaches_api_request(
                 ]
             )
 
-    monkeypatch.setattr("cutmaster.llm.OpenAI", FakeOpenAI)
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.OpenAI", FakeOpenAI)
 
     assert generate_text("test", config, "Return JSON") == '{"ok":true}'
     assert captured["model"] == config.model
@@ -61,7 +61,7 @@ def test_model_thinking_config_reaches_api_request(
 
 def test_json_request_retries_validation_failure(monkeypatch) -> None:
     responses = iter(['{"items": []}', '{"items": [1]}'])
-    monkeypatch.setattr("cutmaster.llm.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
 
     def validate(parsed):
         if not parsed["items"]:
@@ -79,7 +79,7 @@ def test_json_request_retries_validation_failure(monkeypatch) -> None:
 
 
 def test_json_request_reports_final_failure(monkeypatch) -> None:
-    monkeypatch.setattr("cutmaster.llm.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
 
     with pytest.raises(RuntimeError, match="failed after 2 attempts"):
         request_json_with_retries(
@@ -92,7 +92,7 @@ def test_json_request_reports_final_failure(monkeypatch) -> None:
 def test_json_request_does_not_repeat_provider_image_inspection_rejection(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("cutmaster.llm.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
     attempts = 0
 
     def rejected_request():
