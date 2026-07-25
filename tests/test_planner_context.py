@@ -25,5 +25,7 @@ def test_context_persists_artifacts_calls_and_script_versions(tmp_path, monkeypa
     assert loaded.get_artifact("music_profile")["tempo_bpm"] == 120
     assert loaded.get_artifact("edit_plan") == result
     assert loaded.data["calls"][0]["status"] == "success"
+    assert loaded.get_successful_call_result("plan") == result
+    assert loaded.get_successful_call_result("missing") is None
     assert loaded.data["calls"][0]["context_snapshot"]["music_profile"]["tempo_bpm"] == 120
     assert loaded.data["script_versions"][0]["source"] == "beam_search"

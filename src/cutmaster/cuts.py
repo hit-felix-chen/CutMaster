@@ -13,6 +13,7 @@ from scenedetect import open_video
 from scenedetect.detectors import AdaptiveDetector
 
 from cutmaster.models import ShotDetectionConfig, SourceWindowOptimizationConfig
+from cutmaster.progress import progress_bar
 from cutmaster.timecode import format_range, parse_range
 
 
@@ -61,6 +62,7 @@ def detect_source_cuts(
     adaptive_min_content_val: float = ADAPTIVE_MIN_CONTENT_VAL,
     adaptive_min_scene_len_sec: float = ADAPTIVE_MIN_SCENE_LEN_SEC,
     duplicate_frame_threshold: float = DUPLICATE_FRAME_THRESHOLD,
+    progress_label: str | None = None,
 ) -> tuple[list[float], float]:
     if end_sec <= start_sec:
         return [], 30.0
@@ -76,10 +78,27 @@ def detect_source_cuts(
         )
         cuts: list[float] = []
         previous_signature: np.ndarray | None = None
+        progress = (
+            progress_bar(
+                total=max(1, round((end_sec - start_sec) * frame_rate)),
+                description=progress_label,
+                unit="frame",
+            )
+            if progress_label
+            else None
+        )
+        pending_progress = 0
+        progress_batch_size = max(1, round(frame_rate))
         while True:
             frame = video.read()
             if frame is False:
                 break
+            pending_progress += 1
+            if progress is not None and pending_progress >= progress_batch_size:
+                progress.update(
+                    min(pending_progress, max(0, progress.total - progress.n))
+                )
+                pending_progress = 0
             position = video.position
             if float(position.seconds) >= end_sec:
                 break
@@ -95,6 +114,11 @@ def detect_source_cuts(
             cuts.extend(float(cut.seconds) for cut in detector.process_frame(position, frame))
             previous_signature = signature
     finally:
+        if "progress" in locals() and progress is not None:
+            progress.update(
+                min(pending_progress, max(0, progress.total - progress.n))
+            )
+            progress.close()
         video.capture.release()
     return cuts, frame_rate
 
@@ -332,25 +356,31 @@ def optimize_script_source_windows(
             ): index
             for index, item in enumerate(items)
         }
-        for future in as_completed(futures):
-            index = futures[future]
-            optimized[index] = future.result()
-            metadata = optimized[index]["cut_optimization"]
-            if metadata["fallback_level"] > 0:
-                logger.warning(
-                    "Clip {}/{} relaxed internal-cut edge distance: {:.3f}s -> {:.3f}s (level {})",
+        with progress_bar(
+            total=len(futures),
+            description="Source-window optimization",
+            unit="clip",
+        ) as progress:
+            for future in as_completed(futures):
+                index = futures[future]
+                optimized[index] = future.result()
+                progress.update()
+                metadata = optimized[index]["cut_optimization"]
+                if metadata["fallback_level"] > 0:
+                    logger.warning(
+                        "Clip {}/{} relaxed internal-cut edge distance: {:.3f}s -> {:.3f}s (level {})",
+                        index + 1,
+                        len(items),
+                        optimization_config.min_boundary_distance_sec,
+                        metadata["effective_min_boundary_distance_sec"],
+                        metadata["fallback_level"],
+                    )
+                logger.info(
+                    "Optimized clip {}/{}: shift={:+.3f}s, internal_cuts={}, worst_distance={:.3f}s",
                     index + 1,
                     len(items),
-                    optimization_config.min_boundary_distance_sec,
-                    metadata["effective_min_boundary_distance_sec"],
-                    metadata["fallback_level"],
+                    metadata["source_shift_sec"],
+                    metadata["num_internal_cuts"],
+                    metadata["max_beat_distance_sec"],
                 )
-            logger.info(
-                "Optimized clip {}/{}: shift={:+.3f}s, internal_cuts={}, worst_distance={:.3f}s",
-                index + 1,
-                len(items),
-                metadata["source_shift_sec"],
-                metadata["num_internal_cuts"],
-                metadata["max_beat_distance_sec"],
-            )
     return [item for item in optimized if item is not None]

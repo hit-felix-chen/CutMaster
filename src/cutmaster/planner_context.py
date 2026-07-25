@@ -32,10 +32,12 @@ class PlanningContext:
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
+            temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            temporary_path.write_text(
                 json.dumps(self.data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+            temporary_path.replace(self.path)
 
     def set_artifact(self, key: str, value: Any) -> None:
         with self._lock:
@@ -53,6 +55,21 @@ class PlanningContext:
         with self._lock:
             versions = self.data.get("artifacts", {}).get(key, [])
             return versions[-1]["value"] if versions else default
+
+    def get_successful_call_result(
+        self,
+        operation: str,
+        default: Any = None,
+    ) -> Any:
+        with self._lock:
+            for call in reversed(self.data.get("calls", [])):
+                if (
+                    call.get("operation") == operation
+                    and call.get("status") == "success"
+                    and "parsed_result" in call
+                ):
+                    return call["parsed_result"]
+            return default
 
     def context_snapshot(self, keys: list[str]) -> dict[str, Any]:
         with self._lock:

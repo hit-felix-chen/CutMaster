@@ -11,6 +11,7 @@ dependencies = [
     "opencv-python>=4.10,<5",
     "requests>=2.32.0",
     "scenedetect==0.7.0",
+    "tqdm>=4.67.0",
 ]
 
 [project.scripts]

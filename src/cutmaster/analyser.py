@@ -23,6 +23,7 @@ from cutmaster.models import (
     ShotDetectionConfig,
 )
 from cutmaster.planner_context import PlanningContext
+from cutmaster.progress import progress_bar
 from cutmaster.renderer import probe_media
 from cutmaster.timecode import format_range, parse_time
 from cutmaster.video_description import (
@@ -134,6 +135,103 @@ def _material_directory(
     )
 
 
+def _write_json_checkpoint(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def _read_json_checkpoint(path: Path) -> Any | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Ignoring invalid analysis checkpoint: {}", path)
+        return None
+
+
+def _valid_shot_checkpoint(
+    value: Any,
+    duration_sec: float,
+) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    previous_end = 0.0
+    shot_ids: set[str] = set()
+    for shot in value:
+        if not isinstance(shot, dict):
+            return None
+        shot_id = str(shot.get("shot_id") or "")
+        time_range = shot.get("time_range")
+        if not shot_id or shot_id in shot_ids or not isinstance(time_range, dict):
+            return None
+        try:
+            start = float(time_range["start_sec"])
+            end = float(time_range["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if abs(start - previous_end) > 1e-3 or end <= start:
+            return None
+        shot_ids.add(shot_id)
+        previous_end = end
+    if abs(previous_end - duration_sec) > 1e-3:
+        return None
+    return value
+
+
+def _valid_segment_checkpoint(
+    value: Any,
+    shots: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    expected_shot_ids = [str(shot["shot_id"]) for shot in shots]
+    actual_shot_ids: list[str] = []
+    previous_end = 0.0
+    for segment in value:
+        if not isinstance(segment, dict):
+            return None
+        segment_shots = segment.get("shots")
+        time_range = segment.get("time_range")
+        if not isinstance(segment_shots, list) or not segment_shots:
+            return None
+        if not isinstance(time_range, dict):
+            return None
+        try:
+            start = float(time_range["start_sec"])
+            end = float(time_range["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if abs(start - previous_end) > 1e-3 or end <= start:
+            return None
+        actual_shot_ids.extend(str(shot.get("shot_id") or "") for shot in segment_shots)
+        previous_end = end
+    if actual_shot_ids != expected_shot_ids:
+        return None
+    return value
+
+
+def _dialogue_checkpoint(
+    material_directory: Path,
+) -> tuple[Path, Path] | None:
+    processed_subtitle = material_directory / "dialogue_merged.srt"
+    dialogues_json = material_directory / "dialogues.json"
+    document = _read_json_checkpoint(dialogues_json)
+    if (
+        not processed_subtitle.is_file()
+        or processed_subtitle.stat().st_size <= 0
+        or not isinstance(document, dict)
+        or not isinstance(document.get("sentences"), list)
+    ):
+        return None
+    return processed_subtitle, dialogues_json
+
+
 def _detect_full_video_shots(
     video_path: Path,
     duration_sec: float,
@@ -149,6 +247,7 @@ def _detect_full_video_shots(
             detection_config.adaptive_min_scene_len_sec
         ),
         duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
+        progress_label="Full-video Shot detection",
     )
     boundaries = [
         0.0,
@@ -475,42 +574,59 @@ def _split_segment_clips(
 ) -> None:
     clips_dir = material_directory / "segments"
     clips_dir.mkdir(parents=True, exist_ok=True)
-    for segment in segments:
-        start = float(segment["time_range"]["start_sec"])
-        end = float(segment["time_range"]["end_sec"])
-        output = clips_dir / f"{segment['segment_id']}.mp4"
-        command = [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{start:.6f}",
-            "-t",
-            f"{end - start:.6f}",
-            "-i",
-            str(video_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-c:a",
-            "aac",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(output),
-        ]
-        subprocess.run(command, check=True)
-        segment["clip_path"] = str(output.resolve())
+    with progress_bar(
+        segments,
+        total=len(segments),
+        description="Segment clip preparation",
+        unit="segment",
+    ) as progress:
+        for segment in progress:
+            start = float(segment["time_range"]["start_sec"])
+            end = float(segment["time_range"]["end_sec"])
+            output = clips_dir / f"{segment['segment_id']}.mp4"
+            expected_duration = end - start
+            try:
+                existing_duration = float(probe_media(output)["duration"])
+            except Exception:
+                existing_duration = -1.0
+            if abs(existing_duration - expected_duration) <= 0.1:
+                logger.info("Reusing Segment clip: {}", output)
+                segment["clip_path"] = str(output.resolve())
+                continue
+            temporary_output = output.with_suffix(".partial.mp4")
+            command = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{start:.6f}",
+                "-t",
+                f"{end - start:.6f}",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(temporary_output),
+            ]
+            subprocess.run(command, check=True)
+            temporary_output.replace(output)
+            segment["clip_path"] = str(output.resolve())
 
 
 def _sample_shot_frames(
@@ -730,6 +846,12 @@ def _annotate_segments(
     config: LLMConfig,
     sample_frames: int,
 ) -> list[SegmentDescription]:
+    annotation_progress = progress_bar(
+        total=sum(len(segment["shots"]) for segment in segments),
+        description="Shot VLM annotation",
+        unit="shot",
+    )
+
     def annotate_segment(segment: dict[str, Any]) -> SegmentDescription:
         clip_path = Path(segment["clip_path"])
         segment_start = float(segment["time_range"]["start_sec"])
@@ -739,31 +861,48 @@ def _annotate_segments(
             global_end = float(shot["time_range"]["end_sec"])
             local_start = global_start - segment_start
             local_end = global_end - segment_start
-            images, sampled_times = _sample_shot_frames(
-                clip_path,
-                local_start,
-                local_end,
-                global_start,
-                sample_frames,
-            )
-            annotation = context.call_json(
-                operation=f"Shot visual annotation {shot['shot_id']}",
-                prompt=_shot_prompt(segment, shot, sampled_times),
-                config=config,
-                context_keys=["source_metadata", "full_dialogue"],
-                system_prompt=SHOT_ANNOTATOR_SYSTEM,
-                enable_thinking=True,
-                validate=lambda parsed, shot=shot: _validate_shot_annotation(
-                    parsed,
+            operation = f"Shot visual annotation {shot['shot_id']}"
+            cached_annotation = context.get_successful_call_result(operation)
+            if cached_annotation is not None:
+                annotation = _validate_shot_annotation(
+                    cached_annotation,
                     shot["shot_id"],
                     bool(shot["dialogue"]),
-                ),
-                image_data_urls=images,
-                image_labels=[
-                    f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
-                    for index, time_sec in enumerate(sampled_times, 1)
-                ],
-            )
+                )
+                sampled_times = [
+                    round(
+                        global_start
+                        + (global_end - global_start) * (index + 0.5) / sample_frames,
+                        6,
+                    )
+                    for index in range(sample_frames)
+                ]
+            else:
+                images, sampled_times = _sample_shot_frames(
+                    clip_path,
+                    local_start,
+                    local_end,
+                    global_start,
+                    sample_frames,
+                )
+                annotation = context.call_json(
+                    operation=operation,
+                    prompt=_shot_prompt(segment, shot, sampled_times),
+                    config=config,
+                    context_keys=["source_metadata", "full_dialogue"],
+                    system_prompt=SHOT_ANNOTATOR_SYSTEM,
+                    enable_thinking=True,
+                    validate=lambda parsed, shot=shot: _validate_shot_annotation(
+                        parsed,
+                        shot["shot_id"],
+                        bool(shot["dialogue"]),
+                    ),
+                    image_data_urls=images,
+                    image_labels=[
+                        f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
+                        for index, time_sec in enumerate(sampled_times, 1)
+                    ],
+                )
             dialogue_occurrences = [
                 DialogueOccurrence(
                     dialogue_id=int(item["dialogue_id"]),
@@ -799,6 +938,7 @@ def _annotate_segments(
                     },
                 )
             )
+            annotation_progress.update()
 
         total_duration = sum(shot.time_range.duration_sec for shot in annotated_shots)
         if segment["has_dialogue"]:
@@ -873,11 +1013,14 @@ def _annotate_segments(
         len(segments),
         worker_count,
     )
-    with ThreadPoolExecutor(
-        max_workers=worker_count,
-        thread_name_prefix="segment-vlm",
-    ) as executor:
-        return list(executor.map(annotate_segment, segments))
+    try:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="segment-vlm",
+        ) as executor:
+            return list(executor.map(annotate_segment, segments))
+    finally:
+        annotation_progress.close()
 
 
 def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
@@ -940,59 +1083,125 @@ def analyse_video_material(
     context = PlanningContext(history_path)
 
     media = probe_media(video_path)
-    shots, fps = _detect_full_video_shots(
-        video_path,
-        float(media["duration"]),
-        detection_config,
+    duration_sec = float(media["duration"])
+    shots_path = material_directory / "shots.json"
+    shots = _valid_shot_checkpoint(
+        _read_json_checkpoint(shots_path),
+        duration_sec,
     )
+    if shots is None:
+        shots = _valid_shot_checkpoint(
+            context.get_artifact("shot_boundaries"),
+            duration_sec,
+        )
+    cached_source_metadata = context.get_artifact("source_metadata")
+    if shots is None:
+        logger.info(
+            "Analysis stage 1/5: detecting full-video Shot boundaries with PySceneDetect"
+        )
+        shots, fps = _detect_full_video_shots(
+            video_path,
+            duration_sec,
+            detection_config,
+        )
+        _write_json_checkpoint(shots_path, shots)
+        context.set_artifact("shot_boundaries", shots)
+        logger.info("Analysis stage 1/5 complete: {} Shots", len(shots))
+    else:
+        logger.info(
+            "Reusing analysis stage 1/5 Shot checkpoint: {} Shots",
+            len(shots),
+        )
+        if not shots_path.is_file():
+            _write_json_checkpoint(shots_path, shots)
+        if isinstance(cached_source_metadata, dict):
+            fps = float(cached_source_metadata.get("fps") or 0.0)
+        else:
+            fps = 0.0
+        if fps <= 0:
+            capture = cv2.VideoCapture(str(video_path))
+            try:
+                fps = float(capture.get(cv2.CAP_PROP_FPS))
+            finally:
+                capture.release()
+        if fps <= 0:
+            raise ValueError("Could not determine source-video frame rate")
+
     source_metadata = {
         "path": str(video_path.resolve()),
         "title": video_title or video_path.stem,
-        "duration_sec": float(media["duration"]),
+        "duration_sec": duration_sec,
         "fps": fps,
         "width": int(media["width"]),
         "height": int(media["height"]),
     }
-    context.set_artifact("source_metadata", source_metadata)
-    context.set_artifact("shot_boundaries", shots)
-    (material_directory / "shots.json").write_text(
-        json.dumps(shots, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if cached_source_metadata != source_metadata:
+        context.set_artifact("source_metadata", source_metadata)
 
+    logger.info("Analysis stage 2/5: preparing subtitles and dialogue")
     source_srt = prepare_subtitles(
         video_path,
         material_directory,
         asr_config,
         provided_subtitle,
     )
-    processed_subtitle, dialogues_json = postprocess_dialogues(
-        source_srt,
-        material_directory,
-        llm_config,
-        context=context,
-    )
+    dialogue_checkpoint = _dialogue_checkpoint(material_directory)
+    if dialogue_checkpoint is None:
+        processed_subtitle, dialogues_json = postprocess_dialogues(
+            source_srt,
+            material_directory,
+            llm_config,
+            context=context,
+        )
+        logger.info("Analysis stage 2/5 complete")
+    else:
+        processed_subtitle, dialogues_json = dialogue_checkpoint
+        logger.info("Reusing analysis stage 2/5 dialogue checkpoint")
     dialogue_document = json.loads(dialogues_json.read_text(encoding="utf-8"))
     dialogue = _dialogue_with_shot_membership(
         _compact_dialogue(dialogue_document),
         shots,
     )
-    context.set_artifact("full_dialogue", dialogue)
-    dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
-    segments = _raw_segments(shots, dialogue, dialogue_groups)
-    context.set_artifact("segment_boundaries", segments)
-    (material_directory / "segment_boundaries.json").write_text(
-        json.dumps(segments, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if context.get_artifact("full_dialogue") != dialogue:
+        context.set_artifact("full_dialogue", dialogue)
 
+    segment_boundaries_path = material_directory / "segment_boundaries.json"
+    segments = _valid_segment_checkpoint(
+        _read_json_checkpoint(segment_boundaries_path),
+        shots,
+    )
+    if segments is None:
+        segments = _valid_segment_checkpoint(
+            context.get_artifact("segment_boundaries"),
+            shots,
+        )
+    if segments is None:
+        logger.info("Analysis stage 3/5: grouping dialogue and building Segments")
+        dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
+        segments = _raw_segments(shots, dialogue, dialogue_groups)
+        _write_json_checkpoint(segment_boundaries_path, segments)
+        context.set_artifact("segment_boundaries", segments)
+        logger.info("Analysis stage 3/5 complete: {} Segments", len(segments))
+    else:
+        logger.info(
+            "Reusing analysis stage 3/5 Segment checkpoint: {} Segments",
+            len(segments),
+        )
+        if not segment_boundaries_path.is_file():
+            _write_json_checkpoint(segment_boundaries_path, segments)
+
+    logger.info("Analysis stage 4/5: preparing reusable Segment clips")
     _split_segment_clips(video_path, segments, material_directory)
+    logger.info("Analysis stage 4/5 complete")
+
+    logger.info("Analysis stage 5/5: annotating Shots")
     annotated_segments = _annotate_segments(
         segments,
         context,
         llm_config,
         annotation_config.shot_sample_frames,
     )
+    logger.info("Analysis stage 5/5 complete")
     video_description = VideoDescription(
         schema_version=ANALYSIS_SCHEMA_VERSION,
         source=SourceVideoMetadata(**source_metadata),
@@ -1011,23 +1220,15 @@ def analyse_video_material(
     )
     description_dict = video_description.to_dict()
     description_path = material_directory / "video_description.json"
-    description_path.write_text(
-        json.dumps(description_dict, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_checkpoint(description_path, description_dict)
     context.set_artifact("video_description", description_dict)
-    (material_directory / "analysis_manifest.json").write_text(
-        json.dumps(
-            {
-                **analysis_signature,
-                "material_directory": str(material_directory.resolve()),
-                "video_description": str(description_path.resolve()),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    _write_json_checkpoint(
+        material_directory / "analysis_manifest.json",
+        {
+            **analysis_signature,
+            "material_directory": str(material_directory.resolve()),
+            "video_description": str(description_path.resolve()),
+        },
     )
     return MaterialAnalysisResult(
         material_directory=material_directory,

@@ -119,6 +119,7 @@ dependencies = [
     { name = "opencv-python" },
     { name = "requests" },
     { name = "scenedetect" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -134,6 +135,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.10,<5" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "scenedetect", specifier = "==0.7.0" },
+    { name = "tqdm", specifier = ">=4.67.0" },
 ]
 
 [package.metadata.requires-dev]

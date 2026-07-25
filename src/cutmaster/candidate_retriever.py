@@ -11,6 +11,7 @@ from loguru import logger
 from cutmaster.models import CandidateRetrievalConfig, LLMConfig
 from cutmaster.planner_context import PlanningContext
 from cutmaster.planner_shared import _contact_sheet_data_url, _normalize_likert_score
+from cutmaster.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
 
 RETRIEVER_SYSTEM = (
@@ -196,11 +197,16 @@ def add_visual_features(
     candidates = [candidate for slot in slots for candidate in pool[slot["slot_id"]]]
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
         candidate_image_data_urls = list(
-            executor.map(
-                lambda candidate: _contact_sheet_data_url(
-                    video_path, candidate, sample_frames
+            progress_iter(
+                executor.map(
+                    lambda candidate: _contact_sheet_data_url(
+                        video_path, candidate, sample_frames
+                    ),
+                    candidates,
                 ),
-                candidates,
+                total=len(candidates),
+                description="Candidate contact sheets",
+                unit="candidate",
             )
         )
     slots_by_id = {slot["slot_id"]: slot for slot in slots}
@@ -321,7 +327,13 @@ Return exactly one item per candidate:
                 )
             raise
 
-    grounded = score_subset(candidates, candidate_image_data_urls)
+    with progress_bar(
+        total=len(candidates),
+        description="Candidate VLM validation",
+        unit="candidate",
+    ) as progress:
+        grounded = score_subset(candidates, candidate_image_data_urls)
+        progress.update(len(candidates))
     for candidate in candidates:
         candidate.update(grounded[candidate["candidate_id"]])
 
@@ -614,8 +626,15 @@ def add_kinetic_features(
     max_workers: int = 4,
 ) -> None:
     candidates = [candidate for values in pool.values() for candidate in values]
+    if not candidates:
+        return
     worker_count = max(1, min(max_workers, len(candidates)))
     groups = [candidates[index::worker_count] for index in range(worker_count)]
+    progress = progress_bar(
+        total=len(candidates),
+        description="Candidate motion analysis",
+        unit="candidate",
+    )
 
     def process(group: list[dict[str, Any]]) -> None:
         video = cv2.VideoCapture(str(video_path))
@@ -627,8 +646,12 @@ def add_kinetic_features(
                 candidate["kinetic_energy"] = round(
                     _candidate_motion(video, start, end, sample_fps), 4
                 )
+                progress.update()
         finally:
             video.release()
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        list(executor.map(process, groups))
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            list(executor.map(process, groups))
+    finally:
+        progress.close()

@@ -64,6 +64,16 @@ Fun-ASR 最初会将转写结果切分为较短的字幕条目。CutMaster 将�
 和检测参数生成稳定目录。命中完整缓存时，不再执行 ASR、场景检测、素材切片或
 Shot VLM 标注。
 
+素材分析同时采用逐阶段检查点，而不是只有全部成功后才能复用。PySceneDetect、
+字幕与台词、Segment 边界、每个 Segment 视频和每个成功的 Shot VLM 标注都会在完成后
+立即持久化。后续阶段失败或进程中断时，再次启动会校验已有产物，并从第一个缺失阶段
+继续；已经成功的单 Shot VLM 请求也不会重复调用。JSON 历史和检查点采用原子替换，
+避免中断留下半写文件。
+
+全片 Shot 检测、Segment 切片、逐 Shot VLM、候选抽帧与运动分析、Pairwise VLM、
+源窗口优化和最终片段渲染都会输出进度条，包括完成比例、处理速度和 ETA。通过
+benchmark adapter 运行时，这些进度同时进入 task 的 `logs/backend.log`。
+
 PySceneDetect 首先使用与后续切点优化相同的 `AdaptiveDetector` 参数完整检测全片。
 对白划分 LLM 读取全部句子及每句覆盖的 Shot ID，必须把每个台词序号恰好分配一次，
 且不能在同一个 Shot 内建立 Segment 边界。Python 随后把每个对白组扩展到最小覆盖
@@ -293,7 +303,7 @@ uv run cutmaster run \
 | `--overwrite` | 否 | 覆盖已有运行结果 |
 
 如果 `output.mp4` 已存在，运行会直接停止，除非指定 `--overwrite`。`--overwrite`
-只重建当前剪辑任务；输入签名一致且文件完整的视频素材分析缓存仍会复用。
+只重建当前剪辑任务；输入签名一致的视频素材分析完整缓存和有效阶段检查点仍会复用。
 
 ## 输出文件
 

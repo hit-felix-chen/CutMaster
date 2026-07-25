@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from cutmaster.models import RenderConfig
+from cutmaster.progress import progress_bar
 from cutmaster.timecode import parse_range
 
 
@@ -189,36 +190,43 @@ def render_montage(
     clips_dir = output_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     clip_paths: list[Path] = []
-    for index, item in enumerate(script, start=1):
-        start, _ = parse_range(str(item["timestamp"]))
-        output_frames = item.get("output_frame_range")
-        if not isinstance(output_frames, list) or len(output_frames) != 2:
-            raise RenderError(f"Clip {index} is missing output_frame_range")
-        output_start_frame, output_end_frame = map(int, output_frames)
-        frame_count = output_end_frame - output_start_frame
-        end = start + frame_count / config.fps
-        if end > source_meta["duration"] + 0.25:
-            raise RenderError(
-                f"Clip {index} ends at {end:.3f}s beyond source duration {source_meta['duration']:.3f}s"
+    with progress_bar(
+        enumerate(script, start=1),
+        total=len(script),
+        description="Final clip rendering",
+        unit="clip",
+    ) as progress:
+        for index, item in progress:
+            start, _ = parse_range(str(item["timestamp"]))
+            output_frames = item.get("output_frame_range")
+            if not isinstance(output_frames, list) or len(output_frames) != 2:
+                raise RenderError(f"Clip {index} is missing output_frame_range")
+            output_start_frame, output_end_frame = map(int, output_frames)
+            frame_count = output_end_frame - output_start_frame
+            end = start + frame_count / config.fps
+            if end > source_meta["duration"] + 0.25:
+                raise RenderError(
+                    f"Clip {index} ends at {end:.3f}s beyond source duration "
+                    f"{source_meta['duration']:.3f}s"
+                )
+            clip_path = clips_dir / f"clip_{index:04d}.mp4"
+            logger.info(
+                "Clip {}/{}: {:.3f}s -> {:.3f}s ({} frames)",
+                index,
+                len(script),
+                start,
+                end,
+                frame_count,
             )
-        clip_path = clips_dir / f"clip_{index:04d}.mp4"
-        logger.info(
-            "Clip {}/{}: {:.3f}s -> {:.3f}s ({} frames)",
-            index,
-            len(script),
-            start,
-            end,
-            frame_count,
-        )
-        render_clip(
-            video_path,
-            clip_path,
-            start,
-            frame_count,
-            config,
-            encoder,
-        )
-        clip_paths.append(clip_path)
+            render_clip(
+                video_path,
+                clip_path,
+                start,
+                frame_count,
+                config,
+                encoder,
+            )
+            clip_paths.append(clip_path)
 
     montage_path = output_dir / "montage.mp4"
     concatenate_clips(clip_paths, montage_path)

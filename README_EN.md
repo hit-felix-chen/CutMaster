@@ -75,6 +75,18 @@ Material analysis is independent of the edit instruction, BGM, and task output
 directory. `material_analysis.material_cache_dir` stores a versioned cache keyed by the
 video, subtitle input, model, analysis schema, and detection settings.
 
+Material analysis uses stage-level checkpoints rather than waiting for the whole
+analysis to succeed. PySceneDetect output, subtitles/dialogue, Segment boundaries,
+each Segment clip, and every successful Shot VLM annotation are persisted as soon
+as they complete. After a later failure or interruption, the next run validates
+these artifacts and resumes at the first missing stage without repeating successful
+Shot calls. JSON histories and checkpoints use atomic replacement.
+
+Full-video Shot detection, Segment clipping, per-Shot VLM annotation, candidate
+frame/motion processing, pairwise VLM scoring, source-window optimization, and
+final clip rendering expose progress bars with completion, throughput, and ETA.
+The benchmark adapter also captures them in each task's `logs/backend.log`.
+
 PySceneDetect first extracts all Shot boundaries with the same
 `AdaptiveDetector` settings used by later cut refinement. The dialogue
 segmentation LLM receives the complete transcript plus each line's covering Shot
@@ -338,8 +350,8 @@ All `run` options:
 | `--overwrite` | no | Replace an existing run output |
 
 An existing `output.mp4` causes the run to stop unless `--overwrite` is passed.
-`--overwrite` rebuilds the current edit task only. A complete material-analysis
-cache with the same input signature is still reused.
+`--overwrite` rebuilds the current edit task only. Complete material-analysis
+caches and valid stage checkpoints with the same input signature are still reused.
 
 ## Output artifacts
 

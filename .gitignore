@@ -7,3 +7,5 @@ __pycache__/
 config.toml
 outputs/
 
+# ignore cache dictionary
+.cutmaster/

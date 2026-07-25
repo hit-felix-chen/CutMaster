@@ -11,6 +11,7 @@ from loguru import logger
 from cutmaster.models import LLMConfig
 from cutmaster.planner_context import PlanningContext
 from cutmaster.planner_shared import _edge_contact_sheet_data_url, _normalize_likert_score
+from cutmaster.progress import progress_iter
 from cutmaster.timecode import parse_range
 
 PAIRWISE_SYSTEM = (
@@ -104,9 +105,14 @@ def precompute_pairwise_scores(
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(edge_inputs)))) as executor:
         edge_images = {
             (edge, candidate_id): image_data_url
-            for edge, candidate_id, image_data_url in executor.map(
-                render_edge,
-                edge_inputs,
+            for edge, candidate_id, image_data_url in progress_iter(
+                executor.map(
+                    render_edge,
+                    edge_inputs,
+                ),
+                total=len(edge_inputs),
+                description="Pairwise edge contact sheets",
+                unit="edge",
             )
         }
 
@@ -232,7 +238,14 @@ Return exactly one item for every candidate pair:
         return result
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        boundary_results = list(executor.map(score_boundary, boundary_jobs))
+        boundary_results = list(
+            progress_iter(
+                executor.map(score_boundary, boundary_jobs),
+                total=len(boundary_jobs),
+                description="Pairwise VLM scoring",
+                unit="boundary",
+            )
+        )
 
     scores: dict[str, dict[str, Any]] = {}
     slots_by_id = {slot["slot_id"]: slot for slot in slots}
