@@ -10,11 +10,19 @@ def test_workflow_ordered_config_maps_each_stage(tmp_path, monkeypatch) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
         """
-[model]
-model = "test-model"
+[llm]
+model = "test-llm"
 base_url = "https://example.invalid/v1"
 api_key_env = "CUTMASTER_TEST_KEY"
+enable_thinking = false
 max_concurrency = 2
+
+[vlm]
+model = "test-vlm"
+base_url = "https://vision.example.invalid/v1"
+api_key_env = "CUTMASTER_TEST_KEY"
+enable_thinking = true
+max_concurrency = 3
 
 [material_analysis]
 material_cache_dir = "materials"
@@ -68,8 +76,12 @@ threads = 2
 
     config = load_config(path)
 
-    assert config.model.model == "test-model"
-    assert config.model.max_concurrency == 2
+    assert config.llm.model == "test-llm"
+    assert config.llm.enable_thinking is False
+    assert config.llm.max_concurrency == 2
+    assert config.vlm.model == "test-vlm"
+    assert config.vlm.enable_thinking is True
+    assert config.vlm.max_concurrency == 3
     assert config.material_analysis.material_cache_dir == tmp_path / "materials"
     assert config.shot_detection.adaptive_threshold == 2.5
     assert config.shot_annotation.shot_sample_frames == 5
@@ -81,11 +93,11 @@ threads = 2
     assert config.render.fps == 24
 
 
-def test_legacy_llm_section_is_not_accepted(tmp_path) -> None:
+def test_legacy_model_section_is_not_accepted(tmp_path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
         """
-[llm]
+[model]
 model = "legacy"
 api_key = "secret"
 
@@ -104,10 +116,14 @@ def test_unknown_stage_key_is_rejected(tmp_path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
         """
-[model]
+[llm]
 model = "test"
 api_key = "secret"
 max_concurency = 4
+
+[vlm]
+model = "test"
+api_key = "secret"
 
 [asr]
 api_key = "secret"
@@ -116,7 +132,7 @@ api_key = "secret"
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=r"Unknown keys in \[model\]"):
+    with pytest.raises(ValueError, match=r"Unknown keys in \[llm\]"):
         load_config(path)
 
 
@@ -124,7 +140,11 @@ def test_invalid_stage_value_is_rejected(tmp_path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
         """
-[model]
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
 model = "test"
 api_key = "secret"
 
@@ -139,4 +159,25 @@ shot_sample_frames = 4
     )
 
     with pytest.raises(ValueError, match="shot_sample_frames must equal 5"):
+        load_config(path)
+
+
+def test_thinking_switch_requires_toml_boolean(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+enable_thinking = "false"
+
+[vlm]
+model = "test"
+api_key = "secret"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"\[llm\]\.enable_thinking"):
         load_config(path)

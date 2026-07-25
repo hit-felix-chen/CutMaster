@@ -5,7 +5,7 @@ from typing import Any
 
 from cutmaster.candidate_retriever import retrieve_candidates
 from cutmaster.models import AppConfig, RunRequest
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.script_reviewer import review_and_patch
 from cutmaster.sequence_selector import (
     NoFeasiblePathError,
@@ -79,7 +79,7 @@ class Planner:
         self,
         video_path: Path,
         config: AppConfig,
-        context: PlanningContext,
+        context: WorkflowContext,
     ) -> None:
         self.video_path = video_path
         self.config = config
@@ -93,7 +93,7 @@ class Planner:
         slots = plan_edit_slots(
             request,
             music_profile,
-            self.config.model,
+            self.config.llm,
             self.context,
         )
         return align_slots_to_music(
@@ -107,7 +107,8 @@ class Planner:
         return retrieve_candidates(
             slots,
             self.video_path,
-            self.config.model,
+            self.config.llm,
+            self.config.vlm,
             self.config.candidate_retrieval,
             self.context,
         )
@@ -128,7 +129,7 @@ class Planner:
             self.video_path,
             slots,
             candidate_pool,
-            self.config.model,
+            self.config.vlm,
             self.context,
             sample_frames=self.config.candidate_retrieval.visual_sample_frames,
         )
@@ -164,7 +165,7 @@ class Planner:
             slots,
             candidate_pool,
             script,
-            self.config.model,
+            self.config.llm,
             self.context,
             pairwise_scores,
         )

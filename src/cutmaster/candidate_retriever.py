@@ -8,8 +8,8 @@ from typing import Any
 import cv2
 from loguru import logger
 
-from cutmaster.models import CandidateRetrievalConfig, LLMConfig
-from cutmaster.planner_context import PlanningContext
+from cutmaster.models import CandidateRetrievalConfig, LLMConfig, VLMConfig
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.planner_shared import _contact_sheet_data_url, _normalize_likert_score
 from cutmaster.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
@@ -188,8 +188,8 @@ def add_visual_features(
     video_path: Path,
     slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
-    config: LLMConfig,
-    context: PlanningContext,
+    config: VLMConfig,
+    context: WorkflowContext,
     *,
     sample_frames: int,
     operation: str,
@@ -285,7 +285,6 @@ Return exactly one item per candidate:
                 config=config,
                 context_keys=["request"],
                 system_prompt=VISUAL_SYSTEM,
-                enable_thinking=True,
                 validate=lambda parsed: _validate_visual_grounding(parsed, subset),
                 image_data_urls=image_urls,
                 image_labels=[candidate["candidate_id"] for candidate in subset],
@@ -371,8 +370,9 @@ def retrieve_candidates(
     slots: list[dict[str, Any]],
     video_path: Path,
     config: LLMConfig,
+    vlm_config: VLMConfig,
     retrieval_config: CandidateRetrievalConfig,
-    context: PlanningContext,
+    context: WorkflowContext,
 ) -> dict[str, list[dict[str, Any]]]:
     pool: dict[str, list[dict[str, Any]]] = {
         slot["slot_id"]: [] for slot in slots
@@ -455,7 +455,6 @@ Return:
                 config=config,
                 context_keys=["request"],
                 system_prompt=RETRIEVER_SYSTEM,
-                enable_thinking=True,
                 validate=lambda parsed, batch=batch: _validate_candidates(
                     parsed,
                     batch,
@@ -473,7 +472,7 @@ Return:
                 video_path,
                 batch,
                 batch_pool,
-                config,
+                vlm_config,
                 context,
                 sample_frames=retrieval_config.visual_sample_frames,
                 operation=(

@@ -6,15 +6,26 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class LLMConfig:
+class ModelConfig:
     model: str
     base_url: str
     api_key: str
+    enable_thinking: bool = True
     temperature: float = 0.1
     max_tokens: int = 4000
     timeout_sec: float = 180.0
     max_retries: int = 3
     max_concurrency: int = 4
+
+
+@dataclass(frozen=True)
+class LLMConfig(ModelConfig):
+    pass
+
+
+@dataclass(frozen=True)
+class VLMConfig(ModelConfig):
+    pass
 
 
 @dataclass(frozen=True)
@@ -94,7 +105,8 @@ class RenderConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
-    model: LLMConfig
+    llm: LLMConfig
+    vlm: VLMConfig
     material_analysis: MaterialAnalysisConfig
     shot_detection: ShotDetectionConfig
     asr: ASRConfig

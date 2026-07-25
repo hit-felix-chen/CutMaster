@@ -1,13 +1,13 @@
 from cutmaster.models import LLMConfig
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 
 
 def test_context_persists_artifacts_calls_and_script_versions(tmp_path, monkeypatch) -> None:
     path = tmp_path / "planning_history.json"
-    context = PlanningContext(path)
+    context = WorkflowContext(path)
     context.set_artifact("music_profile", {"tempo_bpm": 120})
     monkeypatch.setattr(
-        "cutmaster.planner_context.generate_text",
+        "cutmaster.workflow_context.generate_text",
         lambda prompt, *_args, **_kwargs: '{"items":[{"slot_id":"slot_01"}]}',
     )
     result = context.call_json(
@@ -20,11 +20,14 @@ def test_context_persists_artifacts_calls_and_script_versions(tmp_path, monkeypa
     )
     context.record_script_version([{"_id": 1}], source="beam_search")
 
-    loaded = PlanningContext(path)
+    loaded = WorkflowContext(path)
     assert result["items"][0]["slot_id"] == "slot_01"
     assert loaded.get_artifact("music_profile")["tempo_bpm"] == 120
     assert loaded.get_artifact("edit_plan") == result
     assert loaded.data["calls"][0]["status"] == "success"
+    assert loaded.data["calls"][0]["model"] == "test"
+    assert loaded.data["calls"][0]["enable_thinking"] is True
+    assert loaded.data["calls"][0]["input_modality"] == "text"
     assert loaded.get_successful_call_result("plan") == result
     assert loaded.get_successful_call_result("missing") is None
     assert loaded.data["calls"][0]["context_snapshot"]["music_profile"]["tempo_bpm"] == 120

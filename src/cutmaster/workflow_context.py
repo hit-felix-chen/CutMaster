@@ -7,14 +7,14 @@ from threading import RLock
 from typing import Any, Callable, TypeVar
 
 from cutmaster.llm import generate_text, request_json_with_retries
-from cutmaster.models import LLMConfig
+from cutmaster.models import ModelConfig
 
 
 T = TypeVar("T")
 
 
-class PlanningContext:
-    """Append-only, project-owned context for planning and patch calls."""
+class WorkflowContext:
+    """Persistent artifacts and model-call history for a workflow stage."""
 
     def __init__(self, path: Path) -> None:
         self._lock = RLock()
@@ -106,10 +106,9 @@ class PlanningContext:
         *,
         operation: str,
         prompt: str,
-        config: LLMConfig,
+        config: ModelConfig,
         context_keys: list[str] | None = None,
         system_prompt: str,
-        enable_thinking: bool = True,
         validate: Callable[[dict[str, Any]], T] | None = None,
         output_artifact: str | None = None,
         image_data_urls: list[str] | None = None,
@@ -119,7 +118,7 @@ class PlanningContext:
         contextual_prompt = prompt
         if snapshot:
             contextual_prompt = (
-                "# Maintained planning context\n"
+                "# Maintained workflow context\n"
                 + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                 + "\n\n"
                 + prompt
@@ -129,6 +128,11 @@ class PlanningContext:
                 "call_id": len(self.data.setdefault("calls", [])) + 1,
                 "operation": operation,
                 "created_at": datetime.now().astimezone().isoformat(),
+                "model": config.model,
+                "enable_thinking": config.enable_thinking,
+                "input_modality": (
+                    "text_and_images" if image_data_urls else "text"
+                ),
                 "context_keys": context_keys or [],
                 "context_snapshot": snapshot,
                 "prompt": contextual_prompt,
@@ -146,7 +150,6 @@ class PlanningContext:
                 contextual_prompt,
                 config,
                 system_prompt=system_prompt,
-                enable_thinking=enable_thinking,
                 image_data_urls=image_data_urls,
             )
             with self._lock:

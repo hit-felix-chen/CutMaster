@@ -62,7 +62,7 @@ source video + BGM + instruction
 Fun-ASR output is initially divided into short subtitle cues. CutMaster groups
 adjacent cues from the same speaker into candidate passages and asks the text
 model which complete passages should be merged. The requests are processed in
-parallel according to `model.max_concurrency`.
+parallel according to `llm.max_concurrency`.
 
 `dialogues.json` stores both the reconstructed sentence range and every original
 cue-level anchor. `dialogue_merged.srt` is the sentence-level subtitle passed to
@@ -95,7 +95,7 @@ may split a Shot. Python then creates silent Segments from all remaining opening
 interstitial, and ending Shots.
 
 Each Segment is saved as an MP4 before annotation. Segments run concurrently
-under `model.max_concurrency`; Shots inside one Segment remain serial. Every Shot
+under `vlm.max_concurrency`; Shots inside one Segment remain serial. Every Shot
 VLM call receives exactly five uniformly sampled frames and the complete
 transcript as global context. Transcript text is never accepted as visual
 evidence. `analysis_history.json` records context snapshots, prompts, frame
@@ -200,8 +200,8 @@ cp config.example.toml config.toml
 
 `config.toml` is ignored by Git. The loader accepts either a key stored directly
 as `api_key` or the name of an environment variable stored as `api_key_env`.
-For environment-based configuration, replace the `api_key` entry in both
-`[model]` and `[asr]` with:
+For environment-based configuration, use the following entry in `[llm]`,
+`[vlm]`, and `[asr]`:
 
 ```toml
 api_key_env = "DASHSCOPE_API_KEY"
@@ -218,18 +218,24 @@ export DASHSCOPE_API_KEY="..."
 The TOML tables follow workflow execution order. Stages without user-tunable
 settings are represented by comments rather than empty tables.
 
-### Stage 0: `[model]`
+### Stage 0a/0b: `[llm]` and `[vlm]`
+
+The tables have identical but independent fields. `[llm]` handles dialogue
+reconstruction, Segment grouping, Slot planning, candidate retrieval, and script
+review. `[vlm]` handles per-Shot annotation, candidate visual grounding, and
+pairwise continuity scoring.
 
 | Key | Purpose | Default in example |
 | --- | --- | --- |
-| `model` | OpenAI-compatible text model | `qwen3.7-plus` |
+| `model` | OpenAI-compatible text or vision-language model | `qwen3.7-plus` |
 | `base_url` | OpenAI-compatible API base URL | DashScope compatible-mode URL |
 | `api_key` / `api_key_env` | Direct credential or environment-variable name | placeholder |
+| `enable_thinking` | Enable thinking for every request sent to this model | `true` |
 | `temperature` | Sampling temperature | `0.1` |
 | `max_tokens` | Maximum completion tokens | `4000` |
 | `timeout_sec` | Timeout for one model request | `180` |
 | `max_retries` | Retries after the first request | `3` |
-| `max_concurrency` | Parallel dialogue, Segment annotation, and pairwise-visual requests | `4` |
+| `max_concurrency` | Maximum concurrent requests for this model service | `4` |
 
 The OpenAI SDK's own retries are disabled. CutMaster owns the full
 request/parse/validate retry cycle, so `max_retries = 3` means at most four
@@ -314,7 +320,8 @@ optimization.
 | `original_volume` | Source-audio volume; frame-exact mode requires `0` | `0.0` |
 | `audio_sample_rate` | Final AAC sample rate | `48000` |
 
-Model concurrency is controlled by `model.max_concurrency`, motion decoding by
+Text and vision concurrency are controlled independently by `llm.max_concurrency`
+and `vlm.max_concurrency`; motion decoding is controlled by
 `candidate_retrieval.motion_workers`, source-window optimization by
 `source_window_optimization.max_workers`, and encoding by `render.threads`.
 
@@ -376,7 +383,7 @@ Each task output directory contains:
 | `edit_plan.json` | Accent-aligned abstract edit slots without source timestamps |
 | `candidate_pool.json` | Structured-video candidates, model scores, and local motion features |
 | `selection_diagnostics.json` | Independent-best and Beam Search paths with scores |
-| `planning_history.json` | Maintained planning context, model calls, and versioned scripts/patches |
+| `planning_history.json` | Planning-stage workflow context, model calls, and versioned scripts/patches |
 | `script_raw.json` | Final selected path with slot and candidate IDs |
 | `script_adapted.json` | Frame-grid output ranges, beat alignment, refined source ranges, and cut diagnostics |
 | `clips/clip_XXXX.mp4` | Normalized, video-only intermediate clips |
@@ -407,8 +414,8 @@ Each `script_adapted.json` item adds:
   data contracts.
 - `analyser.py`: full-video Shot detection, dialogue Segment assembly,
   source splitting, parallel single-Shot VLM annotation, and material caching.
-- `planner_context.py`: persistent planning context, call history, structured
-  artifacts, and script versions.
+- `workflow_context.py`: shared analyser/planner artifacts, model-call history,
+  checkpoints, and script-version persistence.
 - `planner.py`: planning facade that exposes and coordinates four decoupled stages.
 - `slot_planner.py`: abstract Slot planning from the request, music profile, and
   structured source material.

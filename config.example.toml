@@ -1,8 +1,21 @@
-# Stage 0: shared model service
-[model]
+# Stage 0a: text-only LLM service
+[llm]
 model = "qwen3.7-plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = "DASHSCOPE_API_KEY"
+api_key_env = "DASHSCOPE_API_KEY"
+enable_thinking = true
+temperature = 0.1
+max_tokens = 4000
+timeout_sec = 180.0
+max_retries = 3
+max_concurrency = 4
+
+# Stage 0b: vision-language model service
+[vlm]
+model = "qwen3.7-plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+enable_thinking = true
 temperature = 0.1
 max_tokens = 4000
 timeout_sec = 180.0
@@ -21,7 +34,7 @@ duplicate_frame_threshold = 1.0
 
 [asr]
 backend = "bailian"
-api_key = "DASHSCOPE_API_KEY"
+api_key_env = "DASHSCOPE_API_KEY"
 reuse = true
 timeout_sec = 1800.0
 poll_interval_sec = 2.0

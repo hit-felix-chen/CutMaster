@@ -8,7 +8,7 @@ from loguru import logger
 from openai import OpenAI
 
 from cutmaster.json_utils import parse_json_object
-from cutmaster.models import LLMConfig
+from cutmaster.models import ModelConfig
 
 
 T = TypeVar("T")
@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
 
 def generate_text(
     prompt: str,
-    config: LLMConfig,
+    config: ModelConfig,
     system_prompt: str = SYSTEM_PROMPT,
     enable_thinking: bool | None = None,
     image_data_urls: list[str] | None = None,
@@ -36,7 +36,8 @@ def generate_text(
         # Keeping SDK retries enabled here would multiply the configured attempts.
         max_retries=0,
     )
-    extra_body = {"enable_thinking": enable_thinking} if enable_thinking is not None else None
+    thinking = config.enable_thinking if enable_thinking is None else enable_thinking
+    extra_body = {"enable_thinking": thinking}
     user_content: str | list[dict[str, Any]] = prompt
     if image_data_urls:
         user_content = [{"type": "text", "text": prompt}]
@@ -64,7 +65,7 @@ def generate_text(
 
 def request_json_with_retries(
     request: Callable[[], str],
-    config: LLMConfig,
+    config: ModelConfig,
     *,
     operation: str,
     validate: Callable[[dict], T] | None = None,

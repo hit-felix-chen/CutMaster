@@ -5,7 +5,7 @@ import math
 from typing import Any
 
 from cutmaster.models import LLMConfig, RunRequest
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 
 PLANNER_SYSTEM = (
     "You are the planning component of a professional video editor. "
@@ -101,7 +101,7 @@ def plan_edit_slots(
     request: RunRequest,
     music_profile: dict[str, Any],
     config: LLMConfig,
-    context: PlanningContext,
+    context: WorkflowContext,
 ) -> list[dict[str, Any]]:
     clip_count = request.custom_clips or max(
         1, math.ceil(request.target_output_length_sec / request.target_shot_length_sec)
@@ -166,7 +166,6 @@ Return:
             "planning_feedback",
         ],
         system_prompt=PLANNER_SYSTEM,
-        enable_thinking=True,
         validate=lambda parsed: _validate_slots(
             parsed,
             clip_count,

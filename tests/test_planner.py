@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from cutmaster.models import LLMConfig
+from cutmaster.models import LLMConfig, VLMConfig
 from cutmaster.candidate_retriever import (
     _retrieval_segment_context,
     _validate_candidates,
@@ -23,7 +23,7 @@ from cutmaster.slot_planner import (
     _validate_slots,
     align_slots_to_music,
 )
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 
 
 def _slots():
@@ -317,7 +317,7 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
         tmp_path / "video.mp4",
         slots,
         pool,
-        LLMConfig(
+        VLMConfig(
             model="test",
             base_url="",
             api_key="test",
@@ -497,7 +497,7 @@ def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> 
         [pool["slot_01"][0], pool["slot_02"][0], pool["slot_03"][0]],
         __import__("pathlib").Path("video.mp4"),
     )
-    context = PlanningContext(tmp_path / "history.json")
+    context = WorkflowContext(tmp_path / "history.json")
     proposed = [
         {
             "operation": "replace",
@@ -582,7 +582,7 @@ def test_review_rejects_patch_that_degrades_precomputed_hard_cut(
         [first, original_second],
         __import__("pathlib").Path("video.mp4"),
     )
-    context = PlanningContext(tmp_path / "history.json")
+    context = WorkflowContext(tmp_path / "history.json")
     monkeypatch.setattr(
         context,
         "call_json",

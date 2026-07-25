@@ -18,21 +18,26 @@ from cutmaster.models import (
     ShotDetectionConfig,
     SlotPlanningConfig,
     SourceWindowOptimizationConfig,
+    VLMConfig,
 )
 
 
+MODEL_CONFIG_KEYS = {
+    "model",
+    "base_url",
+    "api_key",
+    "api_key_env",
+    "enable_thinking",
+    "temperature",
+    "max_tokens",
+    "timeout_sec",
+    "max_retries",
+    "max_concurrency",
+}
+
 CONFIG_SCHEMA: dict[str, set[str]] = {
-    "model": {
-        "model",
-        "base_url",
-        "api_key",
-        "api_key_env",
-        "temperature",
-        "max_tokens",
-        "timeout_sec",
-        "max_retries",
-        "max_concurrency",
-    },
+    "llm": MODEL_CONFIG_KEYS,
+    "vlm": MODEL_CONFIG_KEYS,
     "material_analysis": {"material_cache_dir"},
     "shot_detection": {
         "adaptive_threshold",
@@ -117,11 +122,70 @@ def _secret(section: dict[str, Any], section_name: str) -> str:
     return value
 
 
+def _boolean(
+    section: dict[str, Any],
+    section_name: str,
+    key: str,
+    default: bool,
+) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"[{section_name}].{key} must be true or false")
+    return value
+
+
+def _llm_config(section: dict[str, Any]) -> LLMConfig:
+    model = str(section.get("model") or "").strip()
+    if not model:
+        raise ValueError("Missing [llm].model")
+    return LLMConfig(
+        model=model,
+        base_url=str(section.get("base_url") or "").strip(),
+        api_key=_secret(section, "llm"),
+        enable_thinking=_boolean(
+            section,
+            "llm",
+            "enable_thinking",
+            True,
+        ),
+        temperature=float(section.get("temperature", 0.1)),
+        max_tokens=int(section.get("max_tokens", 4000)),
+        timeout_sec=float(section.get("timeout_sec", 180.0)),
+        max_retries=int(section.get("max_retries", 3)),
+        max_concurrency=int(section.get("max_concurrency", 4)),
+    )
+
+
+def _vlm_config(section: dict[str, Any]) -> VLMConfig:
+    model = str(section.get("model") or "").strip()
+    if not model:
+        raise ValueError("Missing [vlm].model")
+    return VLMConfig(
+        model=model,
+        base_url=str(section.get("base_url") or "").strip(),
+        api_key=_secret(section, "vlm"),
+        enable_thinking=_boolean(
+            section,
+            "vlm",
+            "enable_thinking",
+            True,
+        ),
+        temperature=float(section.get("temperature", 0.1)),
+        max_tokens=int(section.get("max_tokens", 4000)),
+        timeout_sec=float(section.get("timeout_sec", 180.0)),
+        max_retries=int(section.get("max_retries", 3)),
+        max_concurrency=int(section.get("max_concurrency", 4)),
+    )
+
+
 def _validate_values(config: AppConfig) -> None:
     positive = {
-        "model.max_tokens": config.model.max_tokens,
-        "model.timeout_sec": config.model.timeout_sec,
-        "model.max_concurrency": config.model.max_concurrency,
+        "llm.max_tokens": config.llm.max_tokens,
+        "llm.timeout_sec": config.llm.timeout_sec,
+        "llm.max_concurrency": config.llm.max_concurrency,
+        "vlm.max_tokens": config.vlm.max_tokens,
+        "vlm.timeout_sec": config.vlm.timeout_sec,
+        "vlm.max_concurrency": config.vlm.max_concurrency,
         "shot_detection.adaptive_threshold": (
             config.shot_detection.adaptive_threshold
         ),
@@ -174,8 +238,10 @@ def _validate_values(config: AppConfig) -> None:
             f"Config values must be positive: {sorted(invalid_positive)}"
         )
     non_negative = {
-        "model.temperature": config.model.temperature,
-        "model.max_retries": config.model.max_retries,
+        "llm.temperature": config.llm.temperature,
+        "llm.max_retries": config.llm.max_retries,
+        "vlm.temperature": config.vlm.temperature,
+        "vlm.max_retries": config.vlm.max_retries,
         "slot_planning.replan_max_rounds": (
             config.slot_planning.replan_max_rounds
         ),
@@ -218,7 +284,8 @@ def load_config(path: Path) -> AppConfig:
         data = tomllib.load(handle)
     _validate_schema(data)
 
-    model_service = _section(data, "model")
+    llm = _section(data, "llm")
+    vlm = _section(data, "vlm")
     material_analysis = _section(data, "material_analysis")
     shot_detection = _section(data, "shot_detection")
     asr = _section(data, "asr")
@@ -229,21 +296,9 @@ def load_config(path: Path) -> AppConfig:
     script_review = _section(data, "script_review")
     source_window_optimization = _section(data, "source_window_optimization")
     render = _section(data, "render")
-    model = str(model_service.get("model") or "").strip()
-    if not model:
-        raise ValueError("Missing [model].model")
-
     config = AppConfig(
-        model=LLMConfig(
-            model=model,
-            base_url=str(model_service.get("base_url") or "").strip(),
-            api_key=_secret(model_service, "model"),
-            temperature=float(model_service.get("temperature", 0.1)),
-            max_tokens=int(model_service.get("max_tokens", 4000)),
-            timeout_sec=float(model_service.get("timeout_sec", 180.0)),
-            max_retries=int(model_service.get("max_retries", 3)),
-            max_concurrency=int(model_service.get("max_concurrency", 4)),
-        ),
+        llm=_llm_config(llm),
+        vlm=_vlm_config(vlm),
         material_analysis=MaterialAnalysisConfig(
             material_cache_dir=(
                 path.parent

@@ -8,8 +8,8 @@ from typing import Any
 
 from loguru import logger
 
-from cutmaster.models import LLMConfig
-from cutmaster.planner_context import PlanningContext
+from cutmaster.models import VLMConfig
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.planner_shared import _edge_contact_sheet_data_url, _normalize_likert_score
 from cutmaster.progress import progress_iter
 from cutmaster.timecode import parse_range
@@ -67,8 +67,8 @@ def precompute_pairwise_scores(
     video_path: Path,
     slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
-    config: LLMConfig,
-    context: PlanningContext,
+    config: VLMConfig,
+    context: WorkflowContext,
     *,
     sample_frames: int,
 ) -> dict[str, dict[str, Any]]:
@@ -222,7 +222,6 @@ Return exactly one item for every candidate pair:
             config=config,
             context_keys=["request"],
             system_prompt=PAIRWISE_SYSTEM,
-            enable_thinking=True,
             validate=lambda parsed: _validate_pairwise_grounding(
                 parsed,
                 expected_pairs,

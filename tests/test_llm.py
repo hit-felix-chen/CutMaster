@@ -1,7 +1,62 @@
+from types import SimpleNamespace
+
 import pytest
 
-from cutmaster.llm import request_json_with_retries
-from cutmaster.models import LLMConfig
+from cutmaster.llm import generate_text, request_json_with_retries
+from cutmaster.models import LLMConfig, VLMConfig
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            LLMConfig(
+                model="text",
+                base_url="",
+                api_key="test",
+                enable_thinking=False,
+            ),
+            False,
+        ),
+        (
+            VLMConfig(
+                model="vision",
+                base_url="",
+                api_key="test",
+                enable_thinking=True,
+            ),
+            True,
+        ),
+    ],
+)
+def test_model_thinking_config_reaches_api_request(
+    monkeypatch,
+    config,
+    expected,
+) -> None:
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self.create)
+            )
+
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok":true}')
+                    )
+                ]
+            )
+
+    monkeypatch.setattr("cutmaster.llm.OpenAI", FakeOpenAI)
+
+    assert generate_text("test", config) == '{"ok":true}'
+    assert captured["model"] == config.model
+    assert captured["extra_body"] == {"enable_thinking": expected}
 
 
 def test_json_request_retries_validation_failure(monkeypatch) -> None:

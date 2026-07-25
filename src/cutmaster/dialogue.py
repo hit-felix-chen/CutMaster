@@ -15,7 +15,7 @@ from cutmaster.models import LLMConfig
 from cutmaster.timecode import format_time, parse_time
 
 if TYPE_CHECKING:
-    from cutmaster.planner_context import PlanningContext
+    from cutmaster.workflow_context import WorkflowContext
 
 SRT_BLOCK_RE = re.compile(
     r"(?ms)^\s*(\d+)\s*\n"
@@ -34,7 +34,7 @@ SYSTEM_PROMPT = (
 
 
 def generate_boundary_decisions(prompt: str, config: LLMConfig, system_prompt: str) -> str:
-    return generate_text(prompt, config, system_prompt, enable_thinking=False)
+    return generate_text(prompt, config, system_prompt)
 
 
 @dataclass(frozen=True)
@@ -250,7 +250,7 @@ def postprocess_dialogues(
     output_dir: Path,
     config: LLMConfig,
     generator: Callable[[str, LLMConfig, str], str] = generate_boundary_decisions,
-    context: PlanningContext | None = None,
+    context: WorkflowContext | None = None,
 ) -> tuple[Path, Path]:
     cues = parse_srt(source_srt.read_text(encoding="utf-8-sig"))
     passages = candidate_passages(cues)
@@ -283,7 +283,6 @@ def postprocess_dialogues(
                 prompt=prompt,
                 config=config,
                 system_prompt=SYSTEM_PROMPT,
-                enable_thinking=False,
                 validate=lambda parsed: _validate_decisions(
                     parsed.get("merge_candidate_ids"), chunk
                 ),

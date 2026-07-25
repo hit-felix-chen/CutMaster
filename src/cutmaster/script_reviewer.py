@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.models import LLMConfig
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.sequence_selector import _score_candidate_path, path_to_script
 from cutmaster.timecode import parse_range
 
@@ -75,7 +75,7 @@ def review_and_patch(
     pool: dict[str, list[dict[str, Any]]],
     script: list[dict[str, Any]],
     config: LLMConfig,
-    context: PlanningContext,
+    context: WorkflowContext,
     pairwise_scores: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     prompt = """Review the current script as a sequence, focusing on instruction coverage, music-energy fit, temporal progression, and adjacent-clip continuity.
@@ -96,7 +96,6 @@ Return {"patches":[{"operation":"keep|replace","slot_id":"slot_01","candidate_id
             "current_script",
         ],
         system_prompt=REVIEW_SYSTEM,
-        enable_thinking=True,
         validate=lambda parsed: _validate_patches(parsed, slots, pool),
         output_artifact="latest_patches",
     )

@@ -8,6 +8,7 @@ from cutmaster.models import (
     MaterialAnalysisConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
+    VLMConfig,
 )
 from cutmaster.analyser import (
     _annotate_segments,
@@ -82,9 +83,13 @@ def test_full_video_shot_detection_builds_complete_boundary_partition(monkeypatc
     assert shots[-1]["end_boundary"] == "video_end"
 
 
-def test_dialogue_segmentation_rejects_boundaries_inside_one_shot() -> None:
+def test_dialogue_segmentation_merges_adjacent_groups_sharing_one_shot() -> None:
     shots = _shots(2)
-    dialogue = [_dialogue(1, 0.1, 0.3), _dialogue(2, 0.5, 0.7)]
+    dialogue = [
+        _dialogue(1, 0.1, 0.2),
+        _dialogue(2, 0.3, 0.4),
+        _dialogue(3, 0.5, 0.6),
+    ]
     parsed = {
         "segments": [
             {
@@ -105,9 +110,84 @@ def test_dialogue_segmentation_rejects_boundaries_inside_one_shot() -> None:
                 "summary": "second",
                 "grouping_reason": "second passage",
             },
+            {
+                "first_dialogue_id": 3,
+                "last_dialogue_id": 3,
+                "speech_mode": "monologue",
+                "participants": ["Speaker 3"],
+                "topic": "third",
+                "summary": "third",
+                "grouping_reason": "third passage",
+            },
         ]
     }
-    with pytest.raises(ValueError, match="overlapping Shots"):
+    groups = _validate_dialogue_segments(parsed, dialogue, shots)
+
+    assert len(groups) == 1
+    assert groups[0]["dialogue_ids"] == [1, 2, 3]
+    assert groups[0]["first_shot_index"] == 0
+    assert groups[0]["last_shot_index"] == 0
+    assert groups[0]["speech_mode"] == "dialogue"
+    assert "share a PySceneDetect Shot" in groups[0]["grouping_reason"]
+
+
+def test_dialogue_segmentation_rejects_overlapping_dialogue_ranges() -> None:
+    shots = _shots(3)
+    dialogue = [
+        _dialogue(1, 0.1, 0.2),
+        _dialogue(2, 1.1, 1.2),
+        _dialogue(3, 2.1, 2.2),
+    ]
+    parsed = {
+        "segments": [
+            {
+                "first_dialogue_id": 1,
+                "last_dialogue_id": 2,
+                "speech_mode": "dialogue",
+                "topic": "first",
+                "summary": "first",
+            },
+            {
+                "first_dialogue_id": 2,
+                "last_dialogue_id": 3,
+                "speech_mode": "dialogue",
+                "topic": "second",
+                "summary": "second",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="overlapping dialogue IDs"):
+        _validate_dialogue_segments(parsed, dialogue, shots)
+
+
+def test_dialogue_segmentation_rejects_missing_dialogue_ids() -> None:
+    shots = _shots(3)
+    dialogue = [
+        _dialogue(1, 0.1, 0.2),
+        _dialogue(2, 1.1, 1.2),
+        _dialogue(3, 2.1, 2.2),
+    ]
+    parsed = {
+        "segments": [
+            {
+                "first_dialogue_id": 1,
+                "last_dialogue_id": 1,
+                "speech_mode": "monologue",
+                "topic": "first",
+                "summary": "first",
+            },
+            {
+                "first_dialogue_id": 3,
+                "last_dialogue_id": 3,
+                "speech_mode": "monologue",
+                "topic": "third",
+                "summary": "third",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="omit one or more dialogue IDs"):
         _validate_dialogue_segments(parsed, dialogue, shots)
 
 
@@ -218,7 +298,7 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     descriptions = _annotate_segments(
         segments,
         Context(),
-        LLMConfig(
+        VLMConfig(
             model="test",
             base_url="",
             api_key="test",
@@ -269,6 +349,7 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
         "asr_config": ASRConfig(backend="bailian", api_key="test"),
         "annotation_config": ShotAnnotationConfig(),
         "llm_config": LLMConfig(model="test", base_url="", api_key="test"),
+        "vlm_config": VLMConfig(model="test", base_url="", api_key="test"),
     }
 
     with pytest.raises(RuntimeError, match="stop after shot detection"):

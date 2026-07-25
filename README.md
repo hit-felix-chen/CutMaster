@@ -53,7 +53,7 @@ CutMaster 当前支持可复用的全片 Shot/Segment 视觉分析、LLM 辅助�
 
 ### 台词重组
 
-Fun-ASR 最初会将转写结果切分为较短的字幕条目。CutMaster 将同一说话人的相邻字幕组织为候选段落，再调用文本模型判断哪些完整段落应当合并。请求并发数由 `model.max_concurrency` 控制。
+Fun-ASR 最初会将转写结果切分为较短的字幕条目。CutMaster 将同一说话人的相邻字幕组织为候选段落，再调用文本模型判断哪些完整段落应当合并。请求并发数由 `llm.max_concurrency` 控制。
 
 `dialogues.json` 同时记录重组后的完整句子时间范围以及对应的每一个原始字幕锚点。`dialogue_merged.srt` 是传给剪辑脚本生成阶段的句子级字幕。台词重组是一个约束明确的边界选择任务，因此会关闭模型 thinking。
 
@@ -80,7 +80,7 @@ PySceneDetect 首先使用与后续切点优化相同的 `AdaptiveDetector` 参�
 Shot 区间，并将所有剩余 Shot 确定性地补成无对白 Segment。
 
 每个 Segment 会先保存为独立 MP4。VLM 标注以 Segment 为并发单位，共用
-`model.max_concurrency`；同一 Segment 内的 Shot 严格串行。每个请求只标注一个 Shot，
+`vlm.max_concurrency`；同一 Segment 内的 Shot 严格串行。每个请求只标注一个 Shot，
 输入是该 Shot 的 5 张均匀采样帧以及完整台词全局上下文。台词只能帮助理解叙事和
 名字，不能作为人物出镜、动作、地点或道具的视觉证据。`analysis_history.json`
 记录模型上下文快照、完整提示词、帧标签、响应和校验结果。
@@ -107,7 +107,7 @@ ceil(target_duration / target_shot_length)
 - 包含来自 Shot VLM 标注的非空内容描述；
 - 只使用当前检索轮次提供的 Segment 和 Shot。
 
-CutMaster 对候选计算结构化语义相关性、真实画面相关性、主体出镜置信度、情绪匹配、画面运动匹配、显著性和时长可行性等单片段分数。候选池完成后，它会对每对相邻 Slot 的所有候选组合并行抽取前段尾帧和后段首帧，由多模态模型预计算直接硬切的视觉连续性、情绪连续性和叙事桥接分；不生成或依赖任何转场特效。模型调用并发数由 `model.max_concurrency` 控制，Beam Search 只读取缓存分数，不会在路径扩展时重复调用模型。它同时保留：
+CutMaster 对候选计算结构化语义相关性、真实画面相关性、主体出镜置信度、情绪匹配、画面运动匹配、显著性和时长可行性等单片段分数。候选池完成后，它会对每对相邻 Slot 的所有候选组合并行抽取前段尾帧和后段首帧，由多模态模型预计算直接硬切的视觉连续性、情绪连续性和叙事桥接分；不生成或依赖任何转场特效。视觉模型调用并发数由 `vlm.max_concurrency` 控制，Beam Search 只读取缓存分数，不会在路径扩展时重复调用模型。它同时保留：
 
 - 每个 Slot 单独取最高分候选得到的独立最优路径；
 - 在原片时间严格单调且片段不重叠的硬约束下，将相邻连续性和音乐能量变化纳入路径分数的 Beam Search 全局路径。
@@ -157,7 +157,7 @@ cp config.example.toml config.toml
 
 `config.toml` 已被 Git 忽略。配置加载器支持直接通过 `api_key` 保存密钥，也支持通过 `api_key_env` 指定环境变量名称。
 
-若采用环境变量，请将 `[model]` 和 `[asr]` 中的 `api_key` 均替换为：
+若采用环境变量，请在 `[llm]`、`[vlm]` 和 `[asr]` 中使用：
 
 ```toml
 api_key_env = "DASHSCOPE_API_KEY"
@@ -171,21 +171,26 @@ export DASHSCOPE_API_KEY="..."
 
 ## 配置
 
-配置文件严格按照流水线执行顺序排列。没有可调参数的音乐分析阶段只保留阶段注释，
+配置文件严格按照工作流执行顺序排列。没有可调参数的音乐分析阶段只保留阶段注释，
 不创建空配置表。
 
-### Stage 0：`[model]`
+### Stage 0a/0b：`[llm]` 与 `[vlm]`
+
+两个配置表拥有相同字段，但完全独立。`[llm]` 用于台词重组、Segment 划分、Slot
+规划、候选检索和脚本复核；`[vlm]` 用于逐 Shot 标注、候选视觉核验和 Pairwise
+连续性评分。
 
 | 配置项 | 含义 | 示例配置默认值 |
 | --- | --- | --- |
-| `model` | OpenAI-compatible 文本模型 | `qwen3.7-plus` |
+| `model` | OpenAI-compatible 文本或视觉语言模型 | `qwen3.7-plus` |
 | `base_url` | OpenAI-compatible API Base URL | DashScope compatible-mode URL |
 | `api_key` / `api_key_env` | 直接密钥或环境变量名称 | 占位值 |
+| `enable_thinking` | 是否向该模型的所有请求启用 thinking | `true` |
 | `temperature` | 采样温度 | `0.1` |
 | `max_tokens` | 最大输出 token 数 | `4000` |
 | `timeout_sec` | 单次模型请求超时 | `180` |
 | `max_retries` | 首次请求失败后的重试次数 | `3` |
-| `max_concurrency` | 台词重组、Segment 级 Shot 标注及相邻候选视觉评分的最大并发请求数 | `4` |
+| `max_concurrency` | 该模型服务的最大并发请求数 | `4` |
 
 OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解析/校验”重试周期。因此 `max_retries = 3` 表示最多执行四次完整请求，失败后的等待时间依次为 `1s`、`2s`、`4s`。
 
@@ -267,7 +272,7 @@ OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解
 | `original_volume` | 原片音频音量；帧精确模式要求为 `0` | `0.0` |
 | `audio_sample_rate` | 最终 AAC 采样率 | `48000` |
 
-模型并发由 `model.max_concurrency` 控制，运动特征解码由
+文本和视觉模型并发分别由 `llm.max_concurrency`、`vlm.max_concurrency` 控制，运动特征解码由
 `candidate_retrieval.motion_workers` 控制，源窗口优化由
 `source_window_optimization.max_workers` 控制，编码线程由 `render.threads` 控制。
 
@@ -354,7 +359,7 @@ uv run cutmaster run \
 - `music.py`：音乐能量、节拍、重音、段落结构和动态片段时长分析。
 - `video_description.py`：Segment、Shot、场景、人物和对白的严格数据契约。
 - `analyser.py`：全片 Shot 检测、对白 Segment 构造、素材切片、并行单-Shot VLM 标注和素材缓存。
-- `planner_context.py`：规划上下文、调用历史、结构化产物和脚本版本持久化。
+- `workflow_context.py`：analyser 与 planner 共用的结构化产物、模型调用历史、断点和脚本版本持久化。
 - `planner.py`：规划门面，统一暴露并组织四个解耦阶段。
 - `slot_planner.py`：根据用户目标、音乐画像和结构化素材规划抽象 Slot。
 - `candidate_retriever.py`：检索候选片段，并用真实画面完成主体与内容核验。

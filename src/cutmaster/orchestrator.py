@@ -10,7 +10,7 @@ from cutmaster.cuts import optimize_script_source_windows
 from cutmaster.music import analyze_music, write_music_profile
 from cutmaster.models import AppConfig, OrchestrationResult, RunRequest
 from cutmaster.planner import NoFeasiblePathError, Planner
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.renderer import media_duration, render_montage
 from cutmaster.script import adapt_script, script_duration, write_script
 from cutmaster.analyser import analyse_video_material
@@ -64,7 +64,8 @@ def run_orchestrator(
         config.shot_detection,
         config.asr,
         config.shot_annotation,
-        config.model,
+        config.llm,
+        config.vlm,
     )
     timings["video_material_analysis"] = time.monotonic() - stage_started
     source_srt_path = output_dir / "source.srt"
@@ -79,7 +80,7 @@ def run_orchestrator(
     write_music_profile(music_profile_path, music_profile)
     timings["music_analysis"] = time.monotonic() - stage_started
 
-    planning_context = PlanningContext(planning_history_path)
+    planning_context = WorkflowContext(planning_history_path)
     planning_context.set_artifact("music_profile", music_profile)
     planning_context.set_artifact("video_description", material.video_description)
     planner = Planner(request.video_path, config, planning_context)

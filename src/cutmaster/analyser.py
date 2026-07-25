@@ -21,8 +21,9 @@ from cutmaster.models import (
     MaterialAnalysisConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
+    VLMConfig,
 )
-from cutmaster.planner_context import PlanningContext
+from cutmaster.workflow_context import WorkflowContext
 from cutmaster.progress import progress_bar
 from cutmaster.renderer import probe_media
 from cutmaster.timecode import format_range, parse_time
@@ -98,6 +99,7 @@ def _material_directory(
     asr_config: ASRConfig,
     annotation_config: ShotAnnotationConfig,
     llm_config: LLMConfig,
+    vlm_config: VLMConfig,
 ) -> tuple[Path, dict[str, Any]]:
     source_signature = _file_signature(video_path)
     asset_id = f"{video_path.stem}-{_digest(source_signature)}"
@@ -114,7 +116,20 @@ def _material_directory(
                 "max_subtitle_duration_sec": asr_config.max_subtitle_duration_sec,
             }
         ),
-        "model": llm_config.model,
+        "llm": {
+            "model": llm_config.model,
+            "base_url": llm_config.base_url,
+            "enable_thinking": llm_config.enable_thinking,
+            "temperature": llm_config.temperature,
+            "max_tokens": llm_config.max_tokens,
+        },
+        "vlm": {
+            "model": vlm_config.model,
+            "base_url": vlm_config.base_url,
+            "enable_thinking": vlm_config.enable_thinking,
+            "temperature": vlm_config.temperature,
+            "max_tokens": vlm_config.max_tokens,
+        },
         "shot_sample_frames": annotation_config.shot_sample_frames,
         "scene_detection": {
             "adaptive_threshold": detection_config.adaptive_threshold,
@@ -357,7 +372,6 @@ def _validate_dialogue_segments(
     by_id = {int(line["dialogue_id"]): line for line in dialogue}
     assigned: list[int] = []
     normalized: list[dict[str, Any]] = []
-    previous_shot_end = -1
     for index, raw in enumerate(raw_segments, 1):
         if not isinstance(raw, dict):
             raise ValueError("Every dialogue Segment must be an object")
@@ -372,6 +386,18 @@ def _validate_dialogue_segments(
         ]
         if dialogue_ids != list(range(first_id, last_id + 1)):
             raise ValueError("Dialogue IDs must be contiguous integers")
+        expected_slice = expected_ids[len(assigned) : len(assigned) + len(dialogue_ids)]
+        if dialogue_ids != expected_slice:
+            next_expected = (
+                expected_ids[len(assigned)]
+                if len(assigned) < len(expected_ids)
+                else None
+            )
+            if next_expected is not None and first_id < next_expected:
+                raise ValueError("Dialogue Segments contain overlapping dialogue IDs")
+            if next_expected is not None and first_id > next_expected:
+                raise ValueError("Dialogue Segments omit one or more dialogue IDs")
+            raise ValueError("Dialogue Segments must preserve dialogue source order")
         mode = SpeechMode(str(raw["speech_mode"]))
         if mode == SpeechMode.NONE:
             raise ValueError("Spoken-content Segment cannot use speech_mode=none")
@@ -386,10 +412,6 @@ def _validate_dialogue_segments(
                 )
             }
         )
-        if shot_indexes[0] <= previous_shot_end:
-            raise ValueError(
-                "Adjacent dialogue Segments map to overlapping Shots; they must be grouped"
-            )
         participants = list(
             dict.fromkeys(
                 str(by_id[dialogue_id]["speaker"])
@@ -419,20 +441,72 @@ def _validate_dialogue_segments(
             }
         )
         assigned.extend(dialogue_ids)
-        previous_shot_end = shot_indexes[-1]
     if assigned != expected_ids:
-        raise ValueError("Dialogue Segments must cover every dialogue line exactly once")
-    return normalized
+        raise ValueError("Dialogue Segments omit one or more dialogue IDs")
+
+    merged: list[dict[str, Any]] = []
+    for segment in normalized:
+        if (
+            merged
+            and int(segment["first_shot_index"])
+            <= int(merged[-1]["last_shot_index"])
+        ):
+            previous = merged[-1]
+            participants = list(
+                dict.fromkeys(
+                    [
+                        *previous["participants"],
+                        *segment["participants"],
+                    ]
+                )
+            )
+            previous["last_dialogue_id"] = segment["last_dialogue_id"]
+            previous["dialogue_ids"].extend(segment["dialogue_ids"])
+            previous["speech_mode"] = (
+                SpeechMode.DIALOGUE
+                if (
+                    len(participants) > 1
+                    or previous["speech_mode"] == SpeechMode.DIALOGUE
+                    or segment["speech_mode"] == SpeechMode.DIALOGUE
+                )
+                else SpeechMode.MONOLOGUE
+            )
+            previous["participants"] = participants
+            previous["topic"] = " / ".join(
+                dict.fromkeys([previous["topic"], segment["topic"]])
+            )
+            previous["summary"] = " ".join(
+                dict.fromkeys([previous["summary"], segment["summary"]])
+            )
+            previous["grouping_reason"] = (
+                "Merged adjacent LLM dialogue groups because their dialogue "
+                "ranges share a PySceneDetect Shot"
+            )
+            previous["last_shot_index"] = max(
+                int(previous["last_shot_index"]),
+                int(segment["last_shot_index"]),
+            )
+        else:
+            merged.append(dict(segment))
+
+    for index, segment in enumerate(merged, 1):
+        segment["dialogue_group_id"] = f"dialogue_group_{index:04d}"
+    return merged
 
 
 def _group_dialogue(
-    context: PlanningContext,
+    context: WorkflowContext,
     config: LLMConfig,
     dialogue: list[dict[str, Any]],
     shots: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if not dialogue:
         return []
+    operation = "Full-transcript dialogue segmentation"
+
+    def validate(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+        return _validate_dialogue_segments(parsed, dialogue, shots)
+
     prompt = """Divide the complete transcript in the maintained context into contiguous
 spoken-content Segments.
 
@@ -458,17 +532,12 @@ Return:
   "summary":"what is said or narratively established"
 }]}"""
     return context.call_json(
-        operation="Full-transcript dialogue segmentation",
+        operation=operation,
         prompt=prompt,
         config=config,
         context_keys=["source_metadata", "shot_boundaries", "full_dialogue"],
         system_prompt=DIALOGUE_SEGMENTER_SYSTEM,
-        enable_thinking=True,
-        validate=lambda parsed: _validate_dialogue_segments(
-            parsed,
-            dialogue,
-            shots,
-        ),
+        validate=validate,
         output_artifact="dialogue_segments",
     )
 
@@ -842,8 +911,8 @@ Return:
 
 def _annotate_segments(
     segments: list[dict[str, Any]],
-    context: PlanningContext,
-    config: LLMConfig,
+    context: WorkflowContext,
+    config: VLMConfig,
     sample_frames: int,
 ) -> list[SegmentDescription]:
     annotation_progress = progress_bar(
@@ -891,7 +960,6 @@ def _annotate_segments(
                     config=config,
                     context_keys=["source_metadata", "full_dialogue"],
                     system_prompt=SHOT_ANNOTATOR_SYSTEM,
-                    enable_thinking=True,
                     validate=lambda parsed, shot=shot: _validate_shot_annotation(
                         parsed,
                         shot["shot_id"],
@@ -1062,6 +1130,7 @@ def analyse_video_material(
     asr_config: ASRConfig,
     annotation_config: ShotAnnotationConfig,
     llm_config: LLMConfig,
+    vlm_config: VLMConfig,
 ) -> MaterialAnalysisResult:
     if annotation_config.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must be exactly 5")
@@ -1074,13 +1143,14 @@ def analyse_video_material(
         asr_config,
         annotation_config,
         llm_config,
+        vlm_config,
     )
     cached = _cache_result(material_directory)
     if cached is not None:
         return cached
     material_directory.mkdir(parents=True, exist_ok=True)
     history_path = material_directory / "analysis_history.json"
-    context = PlanningContext(history_path)
+    context = WorkflowContext(history_path)
 
     media = probe_media(video_path)
     duration_sec = float(media["duration"])
@@ -1198,7 +1268,7 @@ def analyse_video_material(
     annotated_segments = _annotate_segments(
         segments,
         context,
-        llm_config,
+        vlm_config,
         annotation_config.shot_sample_frames,
     )
     logger.info("Analysis stage 5/5 complete")
@@ -1216,7 +1286,7 @@ def analyse_video_material(
         segments=annotated_segments,
         asr_model=asr_config.backend,
         dialogue_grouping_model=llm_config.model,
-        visual_description_model=llm_config.model,
+        visual_description_model=vlm_config.model,
     )
     description_dict = video_description.to_dict()
     description_path = material_directory / "video_description.json"
