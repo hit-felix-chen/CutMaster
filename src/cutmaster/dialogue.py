@@ -6,12 +6,16 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from cutmaster.llm import generate_text, request_json_with_retries
 from cutmaster.models import LLMConfig
 from cutmaster.timecode import format_time, parse_time
+
+if TYPE_CHECKING:
+    from cutmaster.planner_context import PlanningContext
 
 SRT_BLOCK_RE = re.compile(
     r"(?ms)^\s*(\d+)\s*\n"
@@ -246,6 +250,7 @@ def postprocess_dialogues(
     output_dir: Path,
     config: LLMConfig,
     generator: Callable[[str, LLMConfig, str], str] = generate_boundary_decisions,
+    context: PlanningContext | None = None,
 ) -> tuple[Path, Path]:
     cues = parse_srt(source_srt.read_text(encoding="utf-8-sig"))
     passages = candidate_passages(cues)
@@ -262,14 +267,27 @@ def postprocess_dialogues(
     def process_chunk(index: int, chunk: list[list[Cue]]) -> tuple[int, list[list[int]]]:
         logger.info("Dialogue model batch {}/{} started", index + 1, len(chunks))
         prompt = _build_prompt(chunk)
-        groups = request_json_with_retries(
-            lambda: generator(prompt, config, SYSTEM_PROMPT),
-            config,
-            operation=f"Dialogue model batch {index + 1}/{len(chunks)}",
-            validate=lambda parsed: _validate_decisions(
-                parsed.get("merge_candidate_ids"), chunk
-            ),
-        )
+        operation = f"Dialogue reconstruction batch {index + 1}/{len(chunks)}"
+        if context is None:
+            groups = request_json_with_retries(
+                lambda: generator(prompt, config, SYSTEM_PROMPT),
+                config,
+                operation=operation,
+                validate=lambda parsed: _validate_decisions(
+                    parsed.get("merge_candidate_ids"), chunk
+                ),
+            )
+        else:
+            groups = context.call_json(
+                operation=operation,
+                prompt=prompt,
+                config=config,
+                system_prompt=SYSTEM_PROMPT,
+                enable_thinking=False,
+                validate=lambda parsed: _validate_decisions(
+                    parsed.get("merge_candidate_ids"), chunk
+                ),
+            )
         return index, groups
 
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dialogue-llm") as executor:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from loguru import logger
 from openai import OpenAI
@@ -26,6 +26,7 @@ def generate_text(
     config: LLMConfig,
     system_prompt: str = SYSTEM_PROMPT,
     enable_thinking: bool | None = None,
+    image_data_urls: list[str] | None = None,
 ) -> str:
     client = OpenAI(
         api_key=config.api_key,
@@ -36,11 +37,21 @@ def generate_text(
         max_retries=0,
     )
     extra_body = {"enable_thinking": enable_thinking} if enable_thinking is not None else None
+    user_content: str | list[dict[str, Any]] = prompt
+    if image_data_urls:
+        user_content = [{"type": "text", "text": prompt}]
+        user_content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url},
+            }
+            for data_url in image_data_urls
+        )
     response = client.chat.completions.create(
         model=config.model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         temperature=config.temperature,
         max_tokens=config.max_tokens,
@@ -65,6 +76,10 @@ def request_json_with_retries(
             parsed = parse_json_object(request())
             return validate(parsed) if validate is not None else parsed
         except Exception as exc:
+            if "data_inspection_failed" in str(exc).lower():
+                # Repeating the same rejected image payload cannot make it pass provider-side
+                # inspection. Let the visual caller split or resample the payload instead.
+                raise
             if attempt >= attempts:
                 raise RuntimeError(
                     f"{operation} failed after {attempts} attempts: {exc}"

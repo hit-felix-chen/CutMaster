@@ -29,6 +29,58 @@ class ASRConfig:
 
 
 @dataclass(frozen=True)
+class MaterialAnalysisConfig:
+    material_cache_dir: Path = Path(".cutmaster/materials")
+
+
+@dataclass(frozen=True)
+class ShotDetectionConfig:
+    adaptive_threshold: float = 2.0
+    adaptive_min_content_val: float = 15.0
+    adaptive_min_scene_len_sec: float = 0.25
+    duplicate_frame_threshold: float = 1.0
+
+
+@dataclass(frozen=True)
+class ShotAnnotationConfig:
+    shot_sample_frames: int = 5
+
+
+@dataclass(frozen=True)
+class SlotPlanningConfig:
+    replan_max_rounds: int = 3
+
+
+@dataclass(frozen=True)
+class CandidateRetrievalConfig:
+    candidates_per_slot: int = 3
+    retrieval_batch_size: int = 5
+    retrieval_max_rounds: int = 3
+    motion_sample_fps: float = 2.0
+    motion_workers: int = 4
+    visual_sample_frames: int = 4
+    protagonist_visibility_threshold: float = 0.55
+    protagonist_visibility_fallback_threshold: float = 0.5
+
+
+@dataclass(frozen=True)
+class BeamSearchConfig:
+    beam_width: int = 8
+
+
+@dataclass(frozen=True)
+class ScriptReviewConfig:
+    review_rounds: int = 1
+
+
+@dataclass(frozen=True)
+class SourceWindowOptimizationConfig:
+    search_margin_sec: float = 2.0
+    min_boundary_distance_sec: float = 1.0
+    max_workers: int = 8
+
+
+@dataclass(frozen=True)
 class RenderConfig:
     width: int = 1920
     height: int = 1080
@@ -41,21 +93,18 @@ class RenderConfig:
 
 
 @dataclass(frozen=True)
-class PlanningConfig:
-    candidates_per_slot: int = 4
-    retrieval_batch_size: int = 5
-    beam_width: int = 8
-    review_rounds: int = 1
-    motion_sample_fps: float = 2.0
-    motion_workers: int = 4
-
-
-@dataclass(frozen=True)
 class AppConfig:
-    llm: LLMConfig
+    model: LLMConfig
+    material_analysis: MaterialAnalysisConfig
+    shot_detection: ShotDetectionConfig
     asr: ASRConfig
+    shot_annotation: ShotAnnotationConfig
+    slot_planning: SlotPlanningConfig
+    candidate_retrieval: CandidateRetrievalConfig
+    beam_search: BeamSearchConfig
+    script_review: ScriptReviewConfig
+    source_window_optimization: SourceWindowOptimizationConfig
     render: RenderConfig
-    planning: PlanningConfig = PlanningConfig()
 
 
 @dataclass(frozen=True)
@@ -75,13 +124,16 @@ class RunRequest:
 
 
 @dataclass(frozen=True)
-class PipelineResult:
+class OrchestrationResult:
     status: str
     output_video: str
     source_srt: str
     processed_subtitle: str
     dialogues_json: str
     music_profile: str
+    material_directory: str
+    video_description: str
+    analysis_history: str
     planning_history: str
     edit_plan: str
     candidate_pool: str

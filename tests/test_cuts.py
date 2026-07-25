@@ -6,6 +6,7 @@ import numpy as np
 from scenedetect import FrameTimecode
 
 from cutmaster.cuts import choose_source_window, detect_source_cuts, optimize_script_source_windows
+from cutmaster.models import ShotDetectionConfig, SourceWindowOptimizationConfig
 
 
 def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path) -> None:
@@ -176,7 +177,12 @@ def test_edge_constraint_is_enforced_without_audio_beats() -> None:
 
 
 def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_detect(_path: Path, start: float, end: float) -> tuple[list[float], float]:
+    def fake_detect(
+        _path: Path,
+        start: float,
+        end: float,
+        **_kwargs,
+    ) -> tuple[list[float], float]:
         return [start + (end - start) / 2.0], 10.0
 
     monkeypatch.setattr("cutmaster.cuts.detect_source_cuts", fake_detect)
@@ -196,7 +202,8 @@ def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.Monkey
         beat_times=[2.0, 6.0, 10.0],
         source_duration_sec=60.0,
         output_fps=10,
-        max_workers=3,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(max_workers=3),
     )
 
     assert [item["_id"] for item in optimized] == [1, 2, 3]

@@ -10,31 +10,38 @@
   <img src="assets/cutmaster_pipeline.png" alt="CutMaster method overview" width="100%">
 </p>
 
-<p align="center"><em>CutMaster: Beat-aware pipeline for long-video montage generation</em></p>
+<p align="center"><em>CutMaster: An agentic workflow for beat-aware long-video montage generation</em></p>
 
-CutMaster is a backend-only pipeline for turning one long source video, one BGM
+CutMaster is a backend-only agentic workflow for turning one long source video, one BGM
 track, and a natural-language instruction into a frame-accurate music montage.
 It extracts and extends the production flow used by the Mashup-Benchmark
 NarratoAI adapter as an independent Python project.
 
-CutMaster currently performs LLM-assisted dialogue reconstruction, structured
-music analysis, abstract edit-slot planning, ASR-grounded multi-candidate
-retrieval, temporally dependent Beam Search, versioned script patching,
+CutMaster currently performs reusable full-video Shot/Segment analysis,
+LLM-assisted dialogue reconstruction, structured music analysis, abstract
+edit-slot planning, structured-video multi-candidate retrieval, temporally
+dependent Beam Search, versioned script patching,
 source-window refinement against visual cuts, and deterministic FFmpeg
 rendering. Source audio is muted in the final video; only the selected BGM is
 retained.
 
-## Pipeline
+## Workflow
 
 ```text
 source video + BGM + instruction
   -> validate inputs and protect an existing output unless --overwrite is set
+  -> detect every source Shot boundary with PySceneDetect
   -> reuse a supplied/cached SRT or transcribe with DashScope Fun-ASR
   -> reconstruct complete dialogue sentences in parallel while preserving cue anchors
+  -> group the complete transcript into dialogue/monologue ranges with one LLM request
+  -> expand spoken ranges to Shot boundaries and fill every silent gap as a Segment
+  -> save each Segment as an independent reusable video file
+  -> annotate Segments in parallel and Shots serially, one Shot and five frames per VLM call
+  -> write a reusable video_description.json
   -> analyze BGM beats, accents, energy curves, and sections into a structured profile
   -> let the LLM plan abstract edit slots without source timestamps
   -> globally adjust slot durations so every output boundary lands on a music accent
-  -> retrieve several ASR-grounded source candidates for every slot
+  -> retrieve several Shot-grounded source candidates for every slot
   -> measure candidate motion directly from the source video
   -> compute both an independently best path and a temporally dependent Beam Search path
   -> let the LLM review and patch the script only within the existing candidate pool
@@ -55,12 +62,32 @@ source video + BGM + instruction
 Fun-ASR output is initially divided into short subtitle cues. CutMaster groups
 adjacent cues from the same speaker into candidate passages and asks the text
 model which complete passages should be merged. The requests are processed in
-parallel according to `llm.max_concurrency`.
+parallel according to `model.max_concurrency`.
 
 `dialogues.json` stores both the reconstructed sentence range and every original
 cue-level anchor. `dialogue_merged.srt` is the sentence-level subtitle passed to
 script generation. Dialogue reconstruction disables model thinking because it
 is a constrained boundary-selection task.
+
+### Reusable source-video description
+
+Material analysis is independent of the edit instruction, BGM, and task output
+directory. `material_analysis.material_cache_dir` stores a versioned cache keyed by the
+video, subtitle input, model, analysis schema, and detection settings.
+
+PySceneDetect first extracts all Shot boundaries with the same
+`AdaptiveDetector` settings used by later cut refinement. The dialogue
+segmentation LLM receives the complete transcript plus each line's covering Shot
+IDs. Every dialogue ID must be assigned exactly once, and no Segment boundary
+may split a Shot. Python then creates silent Segments from all remaining opening,
+interstitial, and ending Shots.
+
+Each Segment is saved as an MP4 before annotation. Segments run concurrently
+under `model.max_concurrency`; Shots inside one Segment remain serial. Every Shot
+VLM call receives exactly five uniformly sampled frames and the complete
+transcript as global context. Transcript text is never accepted as visual
+evidence. `analysis_history.json` records context snapshots, prompts, frame
+labels, responses, and validation results.
 
 ### Music profiling and abstract planning
 
@@ -80,13 +107,14 @@ non-empty.
 
 ### Candidate retrieval, path selection, and patching
 
-The retrieval model grounds each slot in `dialogue_merged.srt` and returns
-several source candidates with ASR evidence. Every candidate must:
+The retrieval model grounds each slot in `video_description.json` and returns
+several structured source candidates. Every candidate must:
 
-- overlap the supplied subtitle timeline;
+- contain consecutive source Shots;
+- start and end exactly on Shot boundaries;
 - be long enough for its slot;
-- contain a non-empty description and dialogue evidence;
-- use a valid source timestamp.
+- contain a non-empty Shot-grounded visual description;
+- use only Segments and Shots exposed in the current retrieval round.
 
 Candidate unary scores combine semantic relevance, emotion match, motion match,
 salience, and duration feasibility. CutMaster retains both:
@@ -161,7 +189,7 @@ cp config.example.toml config.toml
 `config.toml` is ignored by Git. The loader accepts either a key stored directly
 as `api_key` or the name of an environment variable stored as `api_key_env`.
 For environment-based configuration, replace the `api_key` entry in both
-`[llm]` and `[asr]` with:
+`[model]` and `[asr]` with:
 
 ```toml
 api_key_env = "DASHSCOPE_API_KEY"
@@ -175,7 +203,10 @@ export DASHSCOPE_API_KEY="..."
 
 ## Configuration
 
-### `[llm]`
+The TOML tables follow workflow execution order. Stages without user-tunable
+settings are represented by comments rather than empty tables.
+
+### Stage 0: `[model]`
 
 | Key | Purpose | Default in example |
 | --- | --- | --- |
@@ -186,54 +217,94 @@ export DASHSCOPE_API_KEY="..."
 | `max_tokens` | Maximum completion tokens | `4000` |
 | `timeout_sec` | Timeout for one model request | `180` |
 | `max_retries` | Retries after the first request | `3` |
-| `max_concurrency` | Parallel dialogue-reconstruction batches | `4` |
+| `max_concurrency` | Parallel dialogue, Segment annotation, and pairwise-visual requests | `4` |
 
 The OpenAI SDK's own retries are disabled. CutMaster owns the full
 request/parse/validate retry cycle, so `max_retries = 3` means at most four
 complete attempts with `1s`, `2s`, and `4s` delays.
 
-### `[planning]`
+### Stage 1: material analysis
 
-| Key | Purpose | Default in example |
+`[material_analysis]`
+
+| Key | Purpose | Default |
 | --- | --- | --- |
-| `candidates_per_slot` | Requested source candidates per slot | `4` |
-| `retrieval_batch_size` | Slots included in one retrieval request | `5` |
-| `beam_width` | Number of paths retained by Beam Search | `8` |
-| `review_rounds` | Candidate-constrained script review rounds | `1` |
-| `motion_sample_fps` | Sampling rate for candidate motion features | `2.0` |
-| `motion_workers` | Candidate motion decoding workers | `4` |
+| `material_cache_dir` | Reusable material-analysis root | `.cutmaster/materials` |
 
-### `[asr]`
+`[shot_detection]`
 
-| Key | Purpose | Default in example |
+| Key | Purpose | Default |
+| --- | --- | --- |
+| `adaptive_threshold` | PySceneDetect adaptive threshold | `2.0` |
+| `adaptive_min_content_val` | Minimum content-change value | `15.0` |
+| `adaptive_min_scene_len_sec` | Minimum Shot duration | `0.25` |
+| `duplicate_frame_threshold` | Near-duplicate frame threshold | `1.0` |
+
+The same detector settings drive full-video analysis and final source-window
+optimization.
+
+`[asr]`
+
+| Key | Purpose | Default |
 | --- | --- | --- |
 | `backend` | ASR backend; currently only `bailian` | `bailian` |
 | `api_key` / `api_key_env` | Direct credential or environment-variable name | placeholder |
-| `reuse` | Reuse a non-empty `source.srt` and extracted ASR audio | `true` |
+| `reuse` | Reuse non-empty ASR artifacts | `true` |
 | `timeout_sec` | Overall asynchronous ASR timeout | `1800` |
-| `poll_interval_sec` | ASR task polling interval | `2` |
-| `max_chars` | Preferred maximum characters per initial subtitle cue | `20` |
-| `max_subtitle_duration_sec` | Preferred maximum initial cue duration | `3.5` |
+| `poll_interval_sec` | ASR polling interval | `2` |
+| `max_chars` | Preferred maximum characters per cue | `20` |
+| `max_subtitle_duration_sec` | Preferred maximum cue duration | `3.5` |
 
-Fun-ASR runs with speaker diarization enabled. Before upload, FFmpeg extracts a
-16 kHz mono `source_audio.m4a` file.
+`[shot_annotation]`
 
-### `[render]`
+| Key | Purpose | Default |
+| --- | --- | --- |
+| `shot_sample_frames` | Frames per single-Shot VLM request; fixed at five | `5` |
+
+### Stage 3: `[slot_planning]`
+
+| Key | Purpose | Default |
+| --- | --- | --- |
+| `replan_max_rounds` | Maximum replans after retrieval or chronology failure | `3` |
+
+### Stage 4: `[candidate_retrieval]`
+
+| Key | Purpose | Default |
+| --- | --- | --- |
+| `candidates_per_slot` | Requested source candidates per Slot | `3` |
+| `retrieval_batch_size` | Slots included in one request | `5` |
+| `retrieval_max_rounds` | Maximum candidate-expansion rounds | `3` |
+| `visual_sample_frames` | Candidate visual-validation frames | `4` |
+| `protagonist_visibility_threshold` | Minimum normalized subject visibility | `0.55` |
+| `protagonist_visibility_fallback_threshold` | Exhaustive-retrieval identity fallback | `0.5` |
+| `motion_sample_fps` | Candidate motion sampling rate | `2.0` |
+| `motion_workers` | Candidate motion decoding workers | `4` |
+
+### Stages 5–7: selection, review, and source-window optimization
+
+| Table | Key | Purpose | Default |
+| --- | --- | --- | --- |
+| `[beam_search]` | `beam_width` | Paths retained by Beam Search | `8` |
+| `[script_review]` | `review_rounds` | Candidate-constrained review rounds | `1` |
+| `[source_window_optimization]` | `search_margin_sec` | Forward source-window search | `2.0` |
+| `[source_window_optimization]` | `min_boundary_distance_sec` | Preferred cut-edge clearance | `1.0` |
+| `[source_window_optimization]` | `max_workers` | Source-window optimization workers | `8` |
+
+### Stage 8: `[render]`
 
 | Key | Purpose | Default |
 | --- | --- | --- |
 | `width`, `height` | Output canvas | `1920×1080` |
 | `fps` | Output frame rate and timeline grid | `30` |
 | `encoder` | FFmpeg video encoder or `auto` | `auto` |
-| `threads` | Source-cut workers and libx264 threads | `8` |
+| `threads` | libx264 encoding threads | `8` |
 | `bgm_volume` | Final BGM volume multiplier | `0.3` |
 | `original_volume` | Source-audio volume; frame-exact mode requires `0` | `0.0` |
 | `audio_sample_rate` | Final AAC sample rate | `48000` |
 
-`threads` is a per-process setting, not a machine-wide concurrency limit.
-Running multiple CutMaster processes multiplies video decoders and memory use.
-For example, five outer processes with `threads = 8` can create up to 40
-concurrent source-cut workers.
+Model concurrency is controlled by `model.max_concurrency`, motion decoding by
+`candidate_retrieval.motion_workers`, source-window optimization by
+`source_window_optimization.max_workers`, and encoding by `render.threads`.
 
 ## Usage
 
@@ -267,23 +338,31 @@ All `run` options:
 | `--overwrite` | no | Replace an existing run output |
 
 An existing `output.mp4` causes the run to stop unless `--overwrite` is passed.
-With `--overwrite`, cached ASR artifacts may still be reused when `asr.reuse` is
-enabled; downstream dialogue, script, cut optimization, and render artifacts are
-regenerated.
+`--overwrite` rebuilds the current edit task only. A complete material-analysis
+cache with the same input signature is still reused.
 
 ## Output artifacts
 
-Each output directory contains:
+Each material-analysis cache directory contains:
 
 | Path | Contents |
 | --- | --- |
-| `source.srt` | Supplied, cached, or Fun-ASR-generated source subtitles |
-| `source_audio.m4a` | 16 kHz mono ASR input; created only when transcription is needed |
-| `dialogues.json` | Reconstructed sentences, merge operations, and original cue anchors |
-| `dialogue_merged.srt` | Sentence-level subtitles used for candidate retrieval |
+| `shots.json` | Full-video PySceneDetect Shot boundaries |
+| `source.srt`, `dialogues.json`, `dialogue_merged.srt` | ASR and reconstructed dialogue |
+| `segment_boundaries.json` | Dialogue groups, silent gaps, and Segment/Shot membership |
+| `segments/segment_XXXX.mp4` | Independently saved Segment video files |
+| `video_description.json` | Structured Segment, Shot, scene, character, and dialogue descriptions |
+| `analysis_history.json` | Material-analysis LLM/VLM contexts and responses |
+| `analysis_manifest.json` | Cache input, model, schema, and detector signature |
+
+Each task output directory contains:
+
+| Path | Contents |
+| --- | --- |
+| `source.srt`, `dialogues.json`, `dialogue_merged.srt` | Task audit copies from the material cache |
 | `music_profile.json` | Music energy, beats, accents, sections, and suggested durations |
 | `edit_plan.json` | Accent-aligned abstract edit slots without source timestamps |
-| `candidate_pool.json` | ASR-grounded candidates, model scores, and local motion features |
+| `candidate_pool.json` | Structured-video candidates, model scores, and local motion features |
 | `selection_diagnostics.json` | Independent-best and Beam Search paths with scores |
 | `planning_history.json` | Maintained planning context, model calls, and versioned scripts/patches |
 | `script_raw.json` | Final selected path with slot and candidate IDs |
@@ -312,23 +391,31 @@ Each `script_adapted.json` item adds:
 - `beats.py`: librosa onset-envelope and dynamic-programming beat tracking.
 - `music.py`: music energy, beats, accents, sections, and dynamic clip-duration
   analysis.
-- `planning_context.py`: persistent planning context, call history, structured
+- `video_description.py`: strict Segment, Shot, scene, character, and dialogue
+  data contracts.
+- `analyser.py`: full-video Shot detection, dialogue Segment assembly,
+  source splitting, parallel single-Shot VLM annotation, and material caching.
+- `planner_context.py`: persistent planning context, call history, structured
   artifacts, and script versions.
-- `planning.py`: abstract slots, ASR candidate retrieval, motion features, Beam
-  Search, and candidate-constrained patches.
+- `planner.py`: planning facade that exposes and coordinates four decoupled stages.
+- `slot_planner.py`: abstract Slot planning from the request, music profile, and
+  structured source material.
+- `candidate_retriever.py`: candidate retrieval and visual subject/content grounding.
+- `sequence_selector.py`: pairwise-score precomputation and chronological Beam Search.
+- `script_reviewer.py`: candidate-constrained review and script patching.
 - `script.py`: selected-candidate duration adaptation, output-timeline
   validation, and frame-grid quantization.
 - `cuts.py`: duplicate-frame-aware PySceneDetect analysis and parallel,
   forward-only frame-level minimax source-window refinement.
 - `renderer.py`: encoder selection, frame-exact clip rendering, concatenation,
   and final AAC BGM mixing.
-- `pipeline.py`: end-to-end orchestration, validation, timing, and result output.
+- `orchestrator.py`: end-to-end agentic orchestration, validation, timing, and result output.
 - `cli.py`: command-line entry point.
 
 ## Scope and limitations
 
-- Candidate retrieval is subtitle-guided. Visually important events with no
-  useful nearby dialogue remain harder to place in the candidate pool.
+- Initial material analysis must scan, accurately split, and annotate every
+  source Shot. This is expensive once, then reused for the same material.
 - The current motion feature uses low-resolution frame differences as an
   activity proxy rather than dense optical flow or semantic action recognition.
 - One run accepts one source video and one BGM track.

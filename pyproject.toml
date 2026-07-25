@@ -1,7 +1,7 @@
 [project]
 name = "cutmaster"
 version = "0.1.0"
-description = "Backend-only long-video montage pipeline extracted from the NarratoAI flow."
+description = "Agentic workflow for backend-only long-video montage generation."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

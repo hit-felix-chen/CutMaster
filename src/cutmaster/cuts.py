@@ -12,7 +12,14 @@ from loguru import logger
 from scenedetect import open_video
 from scenedetect.detectors import AdaptiveDetector
 
+from cutmaster.models import ShotDetectionConfig, SourceWindowOptimizationConfig
 from cutmaster.timecode import format_range, parse_range
+
+
+ADAPTIVE_THRESHOLD = 2.0
+ADAPTIVE_MIN_CONTENT_VAL = 15.0
+ADAPTIVE_MIN_SCENE_LEN_SEC = 0.25
+DUPLICATE_FRAME_THRESHOLD = 1.0
 
 
 @dataclass(frozen=True)
@@ -50,10 +57,10 @@ def detect_source_cuts(
     start_sec: float,
     end_sec: float,
     *,
-    adaptive_threshold: float = 2.0,
-    adaptive_min_content_val: float = 15.0,
-    adaptive_min_scene_len_sec: float = 0.25,
-    duplicate_frame_threshold: float = 1.0,
+    adaptive_threshold: float = ADAPTIVE_THRESHOLD,
+    adaptive_min_content_val: float = ADAPTIVE_MIN_CONTENT_VAL,
+    adaptive_min_scene_len_sec: float = ADAPTIVE_MIN_SCENE_LEN_SEC,
+    duplicate_frame_threshold: float = DUPLICATE_FRAME_THRESHOLD,
 ) -> tuple[list[float], float]:
     if end_sec <= start_sec:
         return [], 30.0
@@ -218,9 +225,9 @@ def _optimize_item(
     item: dict[str, Any],
     beat_times: list[float],
     source_duration_sec: float,
-    search_margin_sec: float,
-    min_boundary_distance_sec: float,
     output_fps: int,
+    detection_config: ShotDetectionConfig,
+    optimization_config: SourceWindowOptimizationConfig,
 ) -> dict[str, Any]:
     source_start, source_end = parse_range(str(item["timestamp"]))
     output_frames = item.get("output_frame_range")
@@ -229,8 +236,19 @@ def _optimize_item(
     output_start = int(output_frames[0]) / output_fps
     clip_duration = (int(output_frames[1]) - int(output_frames[0])) / output_fps
     detection_start = source_start
-    detection_end = min(source_duration_sec, source_end + search_margin_sec)
-    source_cuts, frame_rate = detect_source_cuts(video_path, detection_start, detection_end)
+    detection_end = min(
+        source_duration_sec,
+        source_end + optimization_config.search_margin_sec,
+    )
+    source_cuts, frame_rate = detect_source_cuts(
+        video_path,
+        detection_start,
+        detection_end,
+        adaptive_threshold=detection_config.adaptive_threshold,
+        adaptive_min_content_val=detection_config.adaptive_min_content_val,
+        adaptive_min_scene_len_sec=detection_config.adaptive_min_scene_len_sec,
+        duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
+    )
     internal_cuts = [cut for cut in source_cuts if source_start < cut < source_end]
     initial_output_cuts = [output_start + cut - source_start for cut in internal_cuts]
     initial_max_distance = max(
@@ -246,8 +264,10 @@ def _optimize_item(
         beat_times=beat_times,
         source_duration_sec=source_duration_sec,
         frame_rate=frame_rate,
-        search_margin_sec=search_margin_sec,
-        min_boundary_distance_sec=min_boundary_distance_sec,
+        search_margin_sec=optimization_config.search_margin_sec,
+        min_boundary_distance_sec=(
+            optimization_config.min_boundary_distance_sec
+        ),
     )
 
     result = dict(item)
@@ -257,11 +277,13 @@ def _optimize_item(
     )
     result["cut_optimization"] = {
         "search_direction": "forward",
-        "search_margin_sec": search_margin_sec,
+        "search_margin_sec": optimization_config.search_margin_sec,
         "source_shift_sec": round(optimized.source_shift_sec, 6),
         "num_internal_cuts": len(optimized.internal_source_cuts_sec),
         "initial_max_beat_distance_sec": round(initial_max_distance, 6),
-        "min_boundary_distance_sec": min_boundary_distance_sec,
+        "min_boundary_distance_sec": (
+            optimization_config.min_boundary_distance_sec
+        ),
         "effective_min_boundary_distance_sec": round(
             optimized.effective_min_boundary_distance_sec,
             6,
@@ -285,15 +307,17 @@ def optimize_script_source_windows(
     source_duration_sec: float,
     *,
     output_fps: int,
-    search_margin_sec: float = 2.0,
-    min_boundary_distance_sec: float = 1.0,
-    max_workers: int = 8,
+    detection_config: ShotDetectionConfig,
+    optimization_config: SourceWindowOptimizationConfig,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
 
     optimized: list[dict[str, Any] | None] = [None] * len(items)
-    worker_count = max(1, min(max_workers, len(items)))
+    worker_count = max(
+        1,
+        min(optimization_config.max_workers, len(items)),
+    )
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="cut-optimizer") as executor:
         futures = {
             executor.submit(
@@ -302,9 +326,9 @@ def optimize_script_source_windows(
                 item,
                 beat_times,
                 source_duration_sec,
-                search_margin_sec,
-                min_boundary_distance_sec,
                 output_fps,
+                detection_config,
+                optimization_config,
             ): index
             for index, item in enumerate(items)
         }
@@ -317,7 +341,7 @@ def optimize_script_source_windows(
                     "Clip {}/{} relaxed internal-cut edge distance: {:.3f}s -> {:.3f}s (level {})",
                     index + 1,
                     len(items),
-                    min_boundary_distance_sec,
+                    optimization_config.min_boundary_distance_sec,
                     metadata["effective_min_boundary_distance_sec"],
                     metadata["fallback_level"],
                 )

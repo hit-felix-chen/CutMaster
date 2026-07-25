@@ -1,5 +1,5 @@
 from cutmaster.models import LLMConfig
-from cutmaster.planning_context import PlanningContext
+from cutmaster.planner_context import PlanningContext
 
 
 def test_context_persists_artifacts_calls_and_script_versions(tmp_path, monkeypatch) -> None:
@@ -7,7 +7,7 @@ def test_context_persists_artifacts_calls_and_script_versions(tmp_path, monkeypa
     context = PlanningContext(path)
     context.set_artifact("music_profile", {"tempo_bpm": 120})
     monkeypatch.setattr(
-        "cutmaster.planning_context.generate_text",
+        "cutmaster.planner_context.generate_text",
         lambda prompt, *_args, **_kwargs: '{"items":[{"slot_id":"slot_01"}]}',
     )
     result = context.call_json(

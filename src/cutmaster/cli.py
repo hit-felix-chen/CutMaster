@@ -9,11 +9,14 @@ from loguru import logger
 
 from cutmaster.config import load_config
 from cutmaster.models import RunRequest
-from cutmaster.pipeline import run_pipeline
+from cutmaster.orchestrator import run_orchestrator
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cutmaster", description="CutMaster backend montage pipeline")
+    parser = argparse.ArgumentParser(
+        prog="cutmaster",
+        description="CutMaster agentic video-editing workflow",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="Generate a montage from one source video and one BGM track")
     run.add_argument("--video", type=Path, required=True)
@@ -55,6 +58,10 @@ def main(argv: list[str] | None = None) -> int:
         max_clip_duration_sec=args.max_clip_duration,
         overwrite=args.overwrite,
     )
-    result = run_pipeline(request, config)
+    result = run_orchestrator(request, config)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

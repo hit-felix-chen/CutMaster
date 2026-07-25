@@ -1,4 +1,5 @@
-[llm]
+# Stage 0: shared model service
+[model]
 model = "qwen3.7-plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = "DASHSCOPE_API_KEY"
@@ -7,6 +8,16 @@ max_tokens = 4000
 timeout_sec = 180.0
 max_retries = 3
 max_concurrency = 4
+
+# Stage 1: reusable source-material analysis
+[material_analysis]
+material_cache_dir = ".cutmaster/materials"
+
+[shot_detection]
+adaptive_threshold = 2.0
+adaptive_min_content_val = 15.0
+adaptive_min_scene_len_sec = 0.25
+duplicate_frame_threshold = 1.0
 
 [asr]
 backend = "bailian"
@@ -17,6 +28,41 @@ poll_interval_sec = 2.0
 max_chars = 20
 max_subtitle_duration_sec = 3.5
 
+[shot_annotation]
+shot_sample_frames = 5
+
+# Stage 2: music analysis currently has no user-tunable parameters.
+
+# Stage 3: music-aware edit-Slot planning
+[slot_planning]
+replan_max_rounds = 3
+
+# Stage 4: structured candidate retrieval and visual validation
+[candidate_retrieval]
+candidates_per_slot = 3
+retrieval_batch_size = 5
+retrieval_max_rounds = 3
+visual_sample_frames = 4
+protagonist_visibility_threshold = 0.55
+protagonist_visibility_fallback_threshold = 0.5
+motion_sample_fps = 2.0
+motion_workers = 4
+
+# Stage 5: chronological sequence selection
+[beam_search]
+beam_width = 8
+
+# Stage 6: candidate-constrained script review
+[script_review]
+review_rounds = 1
+
+# Stage 7: source-window optimization against visual cuts and music beats
+[source_window_optimization]
+search_margin_sec = 2.0
+min_boundary_distance_sec = 1.0
+max_workers = 8
+
+# Stage 8: frame-exact rendering and BGM mixing
 [render]
 width = 1920
 height = 1080
@@ -26,11 +72,3 @@ threads = 8
 bgm_volume = 0.3
 original_volume = 0.0
 audio_sample_rate = 48000
-
-[planning]
-candidates_per_slot = 4
-retrieval_batch_size = 5
-beam_width = 8
-review_rounds = 1
-motion_sample_fps = 2.0
-motion_workers = 4

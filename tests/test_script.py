@@ -1,8 +1,6 @@
-from pathlib import Path
-
 import pytest
 
-from cutmaster.script import adapt_script, align_cut_boundaries, normalize_script, script_duration, subtitle_ranges
+from cutmaster.script import adapt_script, align_cut_boundaries, script_duration
 from cutmaster.timecode import format_time, parse_range, parse_time
 
 
@@ -13,14 +11,25 @@ def test_timecode_round_trip() -> None:
     assert parse_range("00:00:01,000 --> 00:00:02,500") == (1.0, 2.5)
 
 
-def test_normalize_and_adapt_script() -> None:
-    raw = normalize_script(
-        [
-            {"timestamp": "00:00:10,000-00:00:20,000", "picture": "First event"},
-            {"timestamp": "00:00:30,000-00:00:40,000", "picture": "Second event"},
-        ],
-        Path("source.mp4"),
-    )
+def _raw_script(first_end: int, second_end: int):
+    return [
+        {
+            "_id": 1,
+            "timestamp": f"00:00:10,000-00:00:{first_end:02d},000",
+            "picture": "First event",
+            "OST": 1,
+        },
+        {
+            "_id": 2,
+            "timestamp": f"00:00:30,000-00:00:{second_end:02d},000",
+            "picture": "Second event",
+            "OST": 1,
+        },
+    ]
+
+
+def test_adapt_script() -> None:
+    raw = _raw_script(20, 40)
     adapted = adapt_script(raw, target_output_length_sec=7.0, target_shot_length_sec=4.0)
     assert len(adapted) == 2
     assert adapted[0]["timestamp"] == "00:00:10,000-00:00:14,000"
@@ -30,13 +39,7 @@ def test_normalize_and_adapt_script() -> None:
 
 
 def test_adapt_script_aligns_internal_cuts_to_audio_beats() -> None:
-    raw = normalize_script(
-        [
-            {"timestamp": "00:00:10,000-00:00:15,000", "picture": "First event"},
-            {"timestamp": "00:00:30,000-00:00:35,000", "picture": "Second event"},
-        ],
-        Path("source.mp4"),
-    )
+    raw = _raw_script(15, 35)
     adapted = adapt_script(
         raw,
         target_output_length_sec=8.0,
@@ -52,13 +55,7 @@ def test_adapt_script_aligns_internal_cuts_to_audio_beats() -> None:
 
 
 def test_adapt_script_uses_output_frame_grid_as_timeline_source() -> None:
-    raw = normalize_script(
-        [
-            {"timestamp": "00:00:10,000-00:00:15,000", "picture": "First event"},
-            {"timestamp": "00:00:30,000-00:00:35,000", "picture": "Second event"},
-        ],
-        Path("source.mp4"),
-    )
+    raw = _raw_script(15, 35)
     adapted = adapt_script(
         raw,
         target_output_length_sec=8.0,
@@ -134,25 +131,3 @@ def test_adapt_script_preserves_prealigned_output_timeline() -> None:
 def test_align_cut_boundaries_honors_explicit_clip_cap() -> None:
     with pytest.raises(ValueError, match="No audio beat"):
         align_cut_boundaries([4.0], [3.9, 4.1], 8.0, max_clip_duration_sec=4.0)
-
-
-def test_overlapping_script_is_rejected() -> None:
-    with pytest.raises(ValueError, match="overlaps"):
-        normalize_script(
-            [
-                {"timestamp": "00:00:10,000-00:00:15,000", "picture": "A"},
-                {"timestamp": "00:00:14,000-00:00:18,000", "picture": "B"},
-            ],
-            Path("source.mp4"),
-        )
-
-
-def test_script_must_hit_subtitle_timeline() -> None:
-    subtitle = "1\n00:00:10,000 --> 00:00:12,000\nHello\n"
-    assert subtitle_ranges(subtitle) == [(10.0, 12.0)]
-    with pytest.raises(ValueError, match="outside the subtitle timeline"):
-        normalize_script(
-            [{"timestamp": "00:00:13,000-00:00:14,000", "picture": "Outside"}],
-            Path("source.mp4"),
-            subtitle,
-        )
