@@ -41,7 +41,7 @@ source video + BGM + instruction
   -> analyze BGM beats, accents, energy curves, and sections into a structured profile
   -> let the LLM plan abstract edit slots without source timestamps
   -> globally adjust slot durations so every output boundary lands on a music accent
-  -> retrieve several Shot-grounded source candidates for every slot
+  -> select several fixed-duration source windows from real Segment and Shot descriptions
   -> measure candidate motion directly from the source video
   -> compute both an independently best path and a temporally dependent Beam Search path
   -> let the LLM review and patch the script only within the existing candidate pool
@@ -126,16 +126,21 @@ non-empty.
 The retrieval model grounds each slot in `video_description.json` and returns
 several structured source candidates. Each LLM request contains exactly one
 Slot, while requests for different Slots run concurrently up to
-`llm.max_concurrency`. A validation failure advances only that Slot to the next,
-wider Segment-search round without rolling back other Slots. Candidate VLM
+`llm.max_concurrency`. Before calling the model, Python computes how many
+non-overlapping fixed-duration windows fit in the current Segment scope. If the
+scope cannot satisfy the missing candidate count, no LLM request is made and
+only that Slot advances to the next, wider Segment-search round. Candidate VLM
 validation is also concurrent per Slot and bounded by `vlm.max_concurrency`.
 Every candidate must:
 
-- contain consecutive source Shots;
-- start and end exactly on Shot boundaries;
-- be long enough for its slot;
+- equal the Slot's `planned_duration_sec` within millisecond timecode precision;
+- remain fully inside the Segment timeline exposed in the current round;
+- not overlap another candidate or any previously retained or rejected window
+  for the same Slot;
+- allow starts and ends inside a Shot, with overlapping Shot IDs derived by
+  Python from the timestamp;
 - contain a non-empty Shot-grounded visual description;
-- use only Segments and Shots exposed in the current retrieval round.
+- use only Segment and Shot descriptions exposed in the current retrieval round.
 
 Candidate unary scores combine semantic relevance, emotion match, motion match,
 salience, and duration feasibility. CutMaster retains both:

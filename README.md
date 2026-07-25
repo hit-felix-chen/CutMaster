@@ -32,7 +32,7 @@ CutMaster 当前支持可复用的全片 Shot/Segment 视觉分析、LLM 辅助�
   -> 使用 librosa 生成节拍、重音、能量曲线和音乐段落的结构化画像
   -> LLM 根据指令、音乐画像和结构化视频描述规划可落地的剪辑 Slot
   -> 全局调整 Slot 时长，将所有输出边界对齐到音乐重音
-  -> LLM 从真实 Segment/Shot 描述中为每个 Slot 检索若干 Shot 边界候选
+  -> LLM 从真实 Segment/Shot 描述中为每个 Slot 选择若干固定时长时间窗口
   -> 从真实候选画面生成接触图，由多模态模型验证可见内容与主体出镜
   -> 候选不足时定向补检；多轮后仍不足则带失败诊断重新规划
   -> 从真实视频计算候选片段运动强度
@@ -101,13 +101,14 @@ ceil(target_duration / target_shot_length)
 
 ### 候选检索、路径选择与补丁
 
-候选检索模型根据 Slot 描述和 `video_description.json`，为每个 Slot 返回若干原片区间。同一轮中，每次 LLM 请求只包含一个 Slot，多个 Slot 请求按照 `llm.max_concurrency` 并发执行；一个 Slot 校验失败只会让该 Slot 在下一轮扩大 Segment 检索范围，不会回滚其他 Slot。候选 VLM 核验同样按 Slot 独立并发，并由 `vlm.max_concurrency` 控制。每个候选必须满足：
+候选检索模型根据 Slot 描述和 `video_description.json`，为每个 Slot 返回若干原片区间。同一轮中，每次 LLM 请求只包含一个 Slot，多个 Slot 请求按照 `llm.max_concurrency` 并发执行。请求前，Python 会先计算当前 Segment 范围最多能容纳多少个互不重叠的固定时长窗口；容量不足时不调用 LLM，直接让该 Slot 在下一轮扩大 Segment 检索范围，不会回滚其他 Slot。候选 VLM 核验同样按 Slot 独立并发，并由 `vlm.max_concurrency` 控制。每个候选必须满足：
 
-- 由一个或多个连续 Shot 构成；
-- 起止时间严格落在首尾 Shot 边界；
-- 长度足以容纳对应 Slot；
+- 长度在毫秒时间码精度内等于对应 Slot 的 `planned_duration_sec`；
+- 完整落在当前检索轮次提供的 Segment 时间线内；
+- 同一 Slot 的候选彼此不重叠，也不与此前保留或拒绝的窗口重叠；
+- 起止点可以位于 Shot 内部，覆盖的 Shot ID 由 Python 根据时间戳自动推导；
 - 包含来自 Shot VLM 标注的非空内容描述；
-- 只使用当前检索轮次提供的 Segment 和 Shot。
+- 只使用当前检索轮次提供的 Segment 和 Shot 描述。
 
 CutMaster 对候选计算结构化语义相关性、真实画面相关性、主体出镜置信度、情绪匹配、画面运动匹配、显著性和时长可行性等单片段分数。候选池完成后，它会对每对相邻 Slot 的所有候选组合并行抽取前段尾帧和后段首帧，由多模态模型预计算直接硬切的视觉连续性、情绪连续性和叙事桥接分；不生成或依赖任何转场特效。视觉模型调用并发数由 `vlm.max_concurrency` 控制，Beam Search 只读取缓存分数，不会在路径扩展时重复调用模型。它同时保留：
 

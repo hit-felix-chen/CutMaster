@@ -172,13 +172,12 @@ Desired durations should total approximately {details.target_duration_sec:.1f} s
     )
 
 
-def _candidate_item_schema(available_shot_ids: list[str]) -> dict[str, Any]:
+def _candidate_item_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
         "required": [
             "timestamp",
-            "source_shot_ids",
             "description",
             "matched_dialogue",
             "semantic_relevance",
@@ -193,15 +192,6 @@ def _candidate_item_schema(available_shot_ids: list[str]) -> dict[str, Any]:
                     r"\d{2}:\d{2}:\d{2},\d{3}$"
                 ),
             },
-            "source_shot_ids": {
-                "type": "array",
-                "minItems": 1,
-                "uniqueItems": True,
-                "items": {
-                    "type": "string",
-                    "enum": available_shot_ids,
-                },
-            },
             "description": {"type": "string", "minLength": 1},
             "matched_dialogue": {"type": "string"},
             "semantic_relevance": SCORE_SCHEMA,
@@ -215,11 +205,6 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
     slot_group_schemas = []
     for slot in details.slots:
         slot_id = str(slot["slot_id"])
-        available_shot_ids = [
-            str(shot["shot_id"])
-            for segment in details.source_segments_by_slot[slot_id]
-            for shot in segment["shots"]
-        ]
         slot_group_schemas.append(
             {
                 "type": "object",
@@ -231,7 +216,7 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
                         "type": "array",
                         "minItems": details.candidates_per_slot,
                         "maxItems": details.candidates_per_slot,
-                        "items": _candidate_item_schema(available_shot_ids),
+                        "items": _candidate_item_schema(),
                     },
                 },
             }
@@ -252,18 +237,23 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
             },
         },
     )
-    instructions = f"""Retrieve exactly {details.candidates_per_slot} distinct source candidates
+    instructions = f"""Retrieve exactly {details.candidates_per_slot} source candidates
 for every supplied edit Slot.
 
-Use only supplied structured source Segments and Shot-level visual annotations. Every candidate
-must consist of one or more consecutive source_shot_ids. Its timestamp must exactly equal the
-start boundary of its first Shot and the end boundary of its last Shot. Its duration must be at
-least planned_duration_sec. Silent Segments are valid source material.
+Use only supplied structured source Segments and their Shot-level visual annotations. Select each
+candidate as a precise time window:
+- its duration must equal that Slot's planned_duration_sec, to millisecond timestamp precision;
+- it must be fully contained in the supplied Segment timeline;
+- it may start or end inside a Shot and does not need to use Shot boundaries;
+- candidates for the same Slot must not overlap each other or any excluded range.
+Silent Segments are valid source material. Do not return source Shot IDs; the application derives
+the overlapping Shots deterministically from the validated timestamp.
 
 Prefer each Slot's source_segment_ids, preserve source chronology, and avoid every excluded
-range. Candidate descriptions must summarize supplied visual Shot descriptions. Dialogue may
-support narrative meaning but must not override visible identity or action. Score semantic
-relevance, emotional intensity, and editorial salience from 0 to 1.
+range. Describe only the content expected inside the selected time window, based on its
+overlapping Shot descriptions. Dialogue may support narrative meaning but must not override
+visible identity or action. Score semantic relevance, emotional intensity, and editorial
+salience from 0 to 1.
 
 <slots>
 {json.dumps(details.slots, ensure_ascii=False)}
@@ -277,12 +267,13 @@ relevance, emotional intensity, and editorial salience from 0 to 1.
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.CANDIDATE_RETRIEVAL,
-        prompt_version="1.0",
+        prompt_version="2.0",
         operation=details.operation,
         system_prompt=(
             "You retrieve real source-video passages from a structured VideoDescription whose "
-            "Segment and Shot boundaries are authoritative. Never invent timestamps, Shots, "
-            "visuals, or dialogue. Return strict JSON only."
+            "Segment timeline and Shot annotations are authoritative. Choose precise fixed-"
+            "duration windows within that timeline; never invent timestamps, visuals, or "
+            "dialogue. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,

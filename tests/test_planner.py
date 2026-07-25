@@ -13,6 +13,7 @@ from cutmaster.planner.candidate_retrieval import (
     _retrieval_segment_context,
     _validate_candidates,
     _validate_visual_grounding,
+    _window_capacity,
     retrieve_candidates,
 )
 from cutmaster.planner.script_review import review_and_patch
@@ -339,16 +340,21 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
     assert context.artifacts["pairwise_scores"] == scores
 
 
-def test_candidate_validation_requires_exact_count_and_shot_boundaries() -> None:
+def test_candidate_validation_requires_exact_duration_and_nonoverlap() -> None:
     slots = [_slots()[0] | {"planned_duration_sec": 5.0}]
     source_segments = {
         "slot_01": [
             {
                 "segment_id": "segment_0001",
+                "time_range": {"start_sec": 8.0, "end_sec": 20.0},
                 "shots": [
                     {
                         "shot_id": "shot_00001",
-                        "time_range": {"start_sec": 8.0, "end_sec": 13.0},
+                        "time_range": {"start_sec": 8.0, "end_sec": 14.0},
+                    },
+                    {
+                        "shot_id": "shot_00002",
+                        "time_range": {"start_sec": 14.0, "end_sec": 20.0},
                     }
                 ],
             }
@@ -356,7 +362,6 @@ def test_candidate_validation_requires_exact_count_and_shot_boundaries() -> None
     }
     raw_item = {
         "timestamp": "00:00:08,000-00:00:13,000",
-        "source_shot_ids": ["shot_00001"],
         "description": "structured visual context",
         "matched_dialogue": "hello",
         "semantic_relevance": 0.8,
@@ -378,6 +383,63 @@ def test_candidate_validation_requires_exact_count_and_shot_boundaries() -> None
     )
     assert result["slot_01"][0]["timestamp"] == "00:00:08,000-00:00:13,000"
     assert result["slot_01"][0]["source_shot_ids"] == ["shot_00001"]
+    assert result["slot_01"][0]["source_segment_ids"] == ["segment_0001"]
+
+    overlapping_item = {
+        **raw_item,
+        "timestamp": "00:00:12,000-00:00:17,000",
+    }
+    with pytest.raises(ValueError, match="overlap"):
+        _validate_candidates(
+            {
+                "candidates": [
+                    {
+                        "slot_id": "slot_01",
+                        "items": [raw_item, overlapping_item],
+                    }
+                ]
+            },
+            slots,
+            source_segments,
+            2,
+        )
+
+    with pytest.raises(ValueError, match="duration must equal"):
+        _validate_candidates(
+            {
+                "candidates": [
+                    {
+                        "slot_id": "slot_01",
+                        "items": [
+                            {
+                                **raw_item,
+                                "timestamp": "00:00:08,000-00:00:14,000",
+                            }
+                        ],
+                    }
+                ]
+            },
+            slots,
+            source_segments,
+            1,
+        )
+
+
+def test_fixed_duration_window_capacity_accounts_for_exclusions() -> None:
+    segments = [
+        {
+            "segment_id": "segment_0001",
+            "time_range": {"start_sec": 0.0, "end_sec": 20.0},
+            "shots": [],
+        }
+    ]
+
+    assert _window_capacity(segments, 5.0, []) == 4
+    assert _window_capacity(
+        segments,
+        5.0,
+        ["00:00:05,000-00:00:10,000"],
+    ) == 3
 
 
 def test_visual_grounding_requires_integer_likert_scores() -> None:
@@ -425,6 +487,90 @@ def test_retrieval_context_expands_to_adjacent_segments_on_later_rounds() -> Non
     assert [
         segment["segment_id"] for segment in second_round["slot_01"]
     ] == ["segment_0001", "segment_0002", "segment_0003"]
+
+
+def test_candidate_retrieval_expands_without_calling_infeasible_round(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slot = {
+        **_slots()[0],
+        "planned_duration_sec": 4.0,
+        "source_segment_ids": ["segment_0002"],
+        "required_visible_subjects": [],
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("request", {"instruction": "test"})
+    context.set_artifact("video_description", _video_description())
+    operations = []
+
+    def call_prompt(**kwargs):
+        package = kwargs["package"]
+        operations.append(package.operation)
+        response = {
+            "candidates": [
+                {
+                    "slot_id": "slot_01",
+                    "items": [
+                        {
+                            "timestamp": timestamp,
+                            "description": "visible source content",
+                            "matched_dialogue": "",
+                            "semantic_relevance": 0.8,
+                            "emotional_intensity": 0.5,
+                            "salience": 0.7,
+                        }
+                        for timestamp in (
+                            "00:00:00,000-00:00:04,000",
+                            "00:00:10,000-00:00:14,000",
+                            "00:00:20,000-00:00:24,000",
+                        )
+                    ],
+                }
+            ]
+        }
+        return kwargs["validate_business"](response)
+
+    def add_visual_features(_video_path, slots, pool, *_args, **_kwargs):
+        for candidate in pool[slots[0]["slot_id"]]:
+            candidate.update(
+                {
+                    "description": "visible source content",
+                    "visible_subjects": [],
+                    "protagonist_visibility_likert": 2,
+                    "visual_slot_relevance_likert": 4,
+                    "visual_evidence": "sampled frames match",
+                }
+            )
+
+    monkeypatch.setattr(context, "call_prompt", call_prompt)
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        add_visual_features,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda _video_path, pool, *_args: [
+            candidate.update({"kinetic_energy": 0.5})
+            for candidates in pool.values()
+            for candidate in candidates
+        ],
+    )
+
+    pool = retrieve_candidates(
+        [slot],
+        tmp_path / "video.mp4",
+        LLMConfig(model="text", base_url="", api_key="test"),
+        VLMConfig(model="vision", base_url="", api_key="test"),
+        CandidateRetrievalConfig(
+            candidates_per_slot=3,
+            retrieval_max_rounds=2,
+        ),
+        context,
+    )
+
+    assert operations == ["Candidate retrieval round 2 slot slot_01"]
+    assert len(pool["slot_01"]) == 3
 
 
 def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(
@@ -477,9 +623,8 @@ def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(
                     "items": [
                         {
                             "timestamp": (
-                                f"00:00:{start:02d},000-00:00:{start + 10:02d},000"
+                                f"00:00:{start:02d},000-00:00:{start + 5:02d},000"
                             ),
-                            "source_shot_ids": [f"shot_{segment_index:05d}"],
                             "description": "visible source content",
                             "matched_dialogue": "",
                             "semantic_relevance": 0.8,

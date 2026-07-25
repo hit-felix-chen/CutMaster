@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,88 @@ from cutmaster.planner.scoring import _contact_sheet_data_url, _normalize_likert
 from cutmaster.runtime.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
 
+
+_TIMESTAMP_TOLERANCE_SEC = 0.0011
+
+
+def _ranges_overlap(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> bool:
+    return (
+        first[0] < second[1] - _TIMESTAMP_TOLERANCE_SEC
+        and second[0] < first[1] - _TIMESTAMP_TOLERANCE_SEC
+    )
+
+
+def _merge_ranges(
+    ranges: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(ranges):
+        if end <= start:
+            continue
+        if (
+            not merged
+            or start > merged[-1][1] + _TIMESTAMP_TOLERANCE_SEC
+        ):
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _segment_ranges(segments: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    return _merge_ranges(
+        [
+            (
+                float(segment["time_range"]["start_sec"]),
+                float(segment["time_range"]["end_sec"]),
+            )
+            for segment in segments
+        ]
+    )
+
+
+def _window_capacity(
+    segments: list[dict[str, Any]],
+    duration_sec: float,
+    excluded_ranges: list[str],
+) -> int:
+    exclusions = _merge_ranges(
+        [parse_range(timestamp) for timestamp in excluded_ranges]
+    )
+    capacity = 0
+    for allowed_start, allowed_end in _segment_ranges(segments):
+        cursor = allowed_start
+        for excluded_start, excluded_end in exclusions:
+            if excluded_end <= cursor + _TIMESTAMP_TOLERANCE_SEC:
+                continue
+            if excluded_start >= allowed_end - _TIMESTAMP_TOLERANCE_SEC:
+                break
+            free_end = min(excluded_start, allowed_end)
+            capacity += math.floor(
+                max(0.0, free_end - cursor + _TIMESTAMP_TOLERANCE_SEC)
+                / duration_sec
+            )
+            cursor = max(cursor, excluded_end)
+            if cursor >= allowed_end - _TIMESTAMP_TOLERANCE_SEC:
+                break
+        capacity += math.floor(
+            max(0.0, allowed_end - cursor + _TIMESTAMP_TOLERANCE_SEC)
+            / duration_sec
+        )
+    return capacity
+
+
 def _validate_candidates(
     parsed: dict[str, Any],
     slots: list[dict[str, Any]],
     source_segments_by_slot: dict[str, list[dict[str, Any]]],
     per_slot: int,
+    excluded_ranges_by_slot: dict[str, list[str]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    excluded_ranges_by_slot = excluded_ranges_by_slot or {}
     allowed_slots = {slot["slot_id"] for slot in slots}
     slots_by_id = {slot["slot_id"]: slot for slot in slots}
     result: dict[str, list[dict[str, Any]]] = {slot_id: [] for slot_id in allowed_slots}
@@ -44,64 +121,72 @@ def _validate_candidates(
         raw_items = group.get("items")
         if not isinstance(raw_items, list) or len(raw_items) != per_slot:
             raise ValueError(f"Expected exactly {per_slot} candidates for {slot_id}")
-        seen_ranges: set[str] = set()
+        accepted_ranges: list[tuple[float, float]] = []
+        excluded_ranges = [
+            parse_range(timestamp)
+            for timestamp in excluded_ranges_by_slot.get(slot_id, [])
+        ]
+        segments = source_segments_by_slot[slot_id]
+        allowed_ranges = _segment_ranges(segments)
         available_shots = [
             shot
-            for segment in source_segments_by_slot[slot_id]
+            for segment in segments
             for shot in segment["shots"]
         ]
-        shots_by_id = {shot["shot_id"]: shot for shot in available_shots}
-        shot_positions = {
-            shot["shot_id"]: index for index, shot in enumerate(available_shots)
-        }
         for raw in raw_items:
             if not isinstance(raw, dict):
                 raise ValueError(f"Candidate for {slot_id} must be an object")
             start, end = parse_range(str(raw.get("timestamp") or ""))
             planned_duration = float(slots_by_id[slot_id]["planned_duration_sec"])
-            if end - start + 1e-6 < planned_duration:
+            if abs((end - start) - planned_duration) > _TIMESTAMP_TOLERANCE_SEC:
                 raise ValueError(
-                    f"Candidate for {slot_id} is shorter than planned_duration_sec"
+                    f"Candidate for {slot_id} duration must equal "
+                    f"planned_duration_sec={planned_duration:.6f}"
                 )
-            normalized_range = format_range(start, end)
-            if normalized_range in seen_ranges:
-                raise ValueError(f"Duplicate candidate range for {slot_id}")
-            seen_ranges.add(normalized_range)
-            source_shot_ids = [
-                str(value).strip()
-                for value in raw.get("source_shot_ids") or []
-                if str(value).strip()
-            ]
-            if not source_shot_ids or any(
-                shot_id not in shots_by_id for shot_id in source_shot_ids
+            candidate_range = (start, end)
+            if not any(
+                start >= allowed_start - _TIMESTAMP_TOLERANCE_SEC
+                and end <= allowed_end + _TIMESTAMP_TOLERANCE_SEC
+                for allowed_start, allowed_end in allowed_ranges
             ):
-                raise ValueError(f"Candidate for {slot_id} references invalid source Shots")
-            positions = [shot_positions[shot_id] for shot_id in source_shot_ids]
-            if positions != list(range(positions[0], positions[-1] + 1)):
-                raise ValueError(f"Candidate for {slot_id} must use consecutive source Shots")
-            selected_shots = [shots_by_id[shot_id] for shot_id in source_shot_ids]
+                raise ValueError(
+                    f"Candidate for {slot_id} is outside the supplied Segment timeline"
+                )
             if any(
-                abs(
-                    float(previous["time_range"]["end_sec"])
-                    - float(current["time_range"]["start_sec"])
-                )
-                > 1e-3
-                for previous, current in zip(
-                    selected_shots,
-                    selected_shots[1:],
-                )
+                _ranges_overlap(candidate_range, existing)
+                for existing in [*accepted_ranges, *excluded_ranges]
             ):
                 raise ValueError(
-                    f"Candidate for {slot_id} crosses unavailable source Shots"
+                    f"Candidate time ranges overlap for {slot_id}"
                 )
-            first_shot = selected_shots[0]
-            last_shot = selected_shots[-1]
-            expected_start = float(first_shot["time_range"]["start_sec"])
-            expected_end = float(last_shot["time_range"]["end_sec"])
-            if abs(start - expected_start) > 1e-3 or abs(end - expected_end) > 1e-3:
+            accepted_ranges.append(candidate_range)
+            normalized_range = format_range(start, end)
+            source_shot_ids = [
+                str(shot["shot_id"])
+                for shot in available_shots
+                if _ranges_overlap(
+                    candidate_range,
+                    (
+                        float(shot["time_range"]["start_sec"]),
+                        float(shot["time_range"]["end_sec"]),
+                    ),
+                )
+            ]
+            if not source_shot_ids:
                 raise ValueError(
-                    f"Candidate for {slot_id} must start and end on Shot boundaries"
+                    f"Candidate for {slot_id} does not overlap a supplied Shot"
                 )
+            source_segment_ids = [
+                str(segment["segment_id"])
+                for segment in segments
+                if _ranges_overlap(
+                    candidate_range,
+                    (
+                        float(segment["time_range"]["start_sec"]),
+                        float(segment["time_range"]["end_sec"]),
+                    ),
+                )
+            ]
             description = str(raw.get("description") or "").strip()
             matched_dialogue = str(raw.get("matched_dialogue") or "").strip()
             if not description:
@@ -111,6 +196,7 @@ def _validate_candidates(
                     "candidate_id": f"{slot_id}_candidate_{len(result[slot_id]) + 1:02d}",
                     "slot_id": slot_id,
                     "timestamp": normalized_range,
+                    "source_segment_ids": source_segment_ids,
                     "source_shot_ids": source_shot_ids,
                     "structured_context": description,
                     "description": description,
@@ -391,12 +477,34 @@ def retrieve_candidates(
         ) -> tuple[str, dict[str, list[dict[str, Any]]] | None]:
             slot_id = slot["slot_id"]
             slot_segments = {slot_id: source_segments_by_slot[slot_id]}
+            candidates_needed = (
+                retrieval_config.candidates_per_slot - len(pool[slot_id])
+            )
+            available_capacity = _window_capacity(
+                slot_segments[slot_id],
+                float(slot["planned_duration_sec"]),
+                excluded[slot_id],
+            )
+            if available_capacity < candidates_needed:
+                log_event(
+                    "WARNING",
+                    "planner.candidate",
+                    "fallback.apply",
+                    "Candidate scope lacks enough non-overlapping fixed-duration windows; "
+                    "expanding in the next round",
+                    round=round_index,
+                    slot_id=slot_id,
+                    candidates_needed=candidates_needed,
+                    available_capacity=available_capacity,
+                    planned_duration_sec=float(slot["planned_duration_sec"]),
+                )
+                return slot_id, None
             package = prompt_registry.build(
                 PromptStage.PLANNER,
                 PromptTask.CANDIDATE_RETRIEVAL,
                 CandidateRetrievalDetails(
                     operation=f"Candidate retrieval round {round_index} slot {slot_id}",
-                    candidates_per_slot=retrieval_config.candidates_per_slot,
+                    candidates_per_slot=candidates_needed,
                     slots=[slot],
                     excluded_ranges={slot_id: excluded[slot_id]},
                     source_segments_by_slot=slot_segments,
@@ -410,7 +518,8 @@ def retrieve_candidates(
                         parsed,
                         [slot],
                         slot_segments,
-                        retrieval_config.candidates_per_slot,
+                        candidates_needed,
+                        {slot_id: excluded[slot_id]},
                     ),
                 )
             except Exception as exc:
@@ -501,17 +610,20 @@ def retrieve_candidates(
                 visibility = _normalize_likert_score(
                     candidate["protagonist_visibility_likert"]
                 )
-                duplicate = any(
-                    candidate["timestamp"] == existing["timestamp"]
+                overlap = any(
+                    _ranges_overlap(
+                        parse_range(candidate["timestamp"]),
+                        parse_range(existing["timestamp"]),
+                    )
                     for existing in pool[slot_id]
                 )
                 visibility_ok = (
                     not requires_subject
                     or visibility >= retrieval_config.protagonist_visibility_threshold
                 )
-                if duplicate or not visibility_ok:
+                if overlap or not visibility_ok:
                     if (
-                        not duplicate
+                        not overlap
                         and requires_subject
                         and visibility
                         >= retrieval_config.protagonist_visibility_fallback_threshold
@@ -523,8 +635,8 @@ def retrieve_candidates(
                             "timestamp": candidate["timestamp"],
                             "candidate_id": candidate["candidate_id"],
                             "reason": (
-                                "duplicate_range"
-                                if duplicate
+                                "overlapping_range"
+                                if overlap
                                 else "required_subject_not_visually_confirmed"
                             ),
                             "protagonist_visibility_likert": candidate[
@@ -550,7 +662,10 @@ def retrieve_candidates(
             reverse=True,
         ):
             if any(
-                candidate["timestamp"] == existing["timestamp"]
+                _ranges_overlap(
+                    parse_range(candidate["timestamp"]),
+                    parse_range(existing["timestamp"]),
+                )
                 for existing in candidates
             ):
                 continue
