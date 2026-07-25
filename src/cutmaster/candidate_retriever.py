@@ -6,29 +6,18 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-from loguru import logger
 
 from cutmaster.models import CandidateRetrievalConfig, LLMConfig, VLMConfig
+from cutmaster.observability import error_summary, log_event
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.planner import (
+    CandidateRetrievalDetails,
+    CandidateVisualScoringDetails,
+)
 from cutmaster.workflow_context import WorkflowContext
 from cutmaster.planner_shared import _contact_sheet_data_url, _normalize_likert_score
 from cutmaster.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
-
-RETRIEVER_SYSTEM = (
-    "You retrieve real source-video passages from a structured VideoDescription whose Segment "
-    "and Shot boundaries are authoritative. Never invent timestamps, Shots, visuals, or dialogue. "
-    "Return strict JSON only."
-)
-
-VISUAL_SYSTEM = (
-    "You inspect source-video contact sheets for a professional video editor. "
-    "Resolve the requested subject from the maintained user request and source title, then "
-    "judge whether that subject and requested action are actually visible in the supplied "
-    "images. Identity must come from visible facial/person evidence, never costume, gender, "
-    "scene familiarity, or dialogue. ASR and slot descriptions are evaluation targets, never "
-    "visual facts. "
-    "Return strict JSON only."
-)
 
 def _validate_candidates(
     parsed: dict[str, Any],
@@ -222,54 +211,6 @@ def add_visual_features(
             ),
         }
 
-    def visual_prompt(subset: list[dict[str, Any]]) -> str:
-        candidate_specs = [candidate_spec(candidate) for candidate in subset]
-        return f"""Inspect the attached candidate contact sheets in exactly the listed order.
-Each image is visibly labeled with its candidate ID.
-
-First resolve the requested focal subject and editorial goal from the maintained user request,
-including the source video title. For a named real person or fictional character, use visual
-identity knowledge appropriate to that titled source to distinguish the actual subject from
-other cast members, ensemble performers, or visually similar people. Then judge each candidate
-strictly from its sampled pixels. Do not use ASR, dialogue implications, or the slot description
-as evidence that the target appears. The intended content and required subjects below are
-evaluation targets only; a listed name does not mean that person is visible. Names separated by
-"/" are aliases for one identity, not multiple people.
-
-Identity is a hard part of relevance: a prominent different person must receive subject
-visibility 1 even if their action, gender, clothing, or setting superficially fits the request.
-Source knowledge may map the requested character to their performer, but it must never map a
-costume, a famous sequence, or a scene role to identity. A subject being present elsewhere in a
-known scene does not establish that the person sampled here is that subject.
-
-Before returning JSON, perform an identity-evidence check for every score of 3 or higher: at least
-one sampled frame must contain a sufficiently clear face or other person-specific visual evidence
-that matches the requested identity. Evidence such as "signature outfit", hair color alone,
-central framing, gender, expected scene, or ASR is insufficient; lower such a score to 2 or
-1. If the visible person actually has a different face, score 1. Explain the decisive pixel
-evidence or the uncertainty.
-
-Score required_subject_visibility as:
-- 1: visible person is a different identity from the reference;
-- 2: no usable face comparison, even if a person is prominent;
-- 3: possible identity match but unclear/brief/obscured;
-- 4: face clearly matches the reference in a meaningful portion;
-- 5: repeated, unmistakable face match to the reference and dominant visibility.
-
-<candidates>
-{json.dumps(candidate_specs, ensure_ascii=False)}
-</candidates>
-
-Return exactly one item per candidate:
-{{"items":[{{
-  "candidate_id":"slot_01_candidate_01",
-  "visible_description":"literal people/action/setting visible across the sampled frames",
-  "visible_subjects":["only confidently identified names or generic labels"],
-  "required_subject_visibility":1,
-  "visual_slot_relevance":0.0,
-  "visual_evidence":"brief pixel-grounded reason"
-}}]}}"""
-
     def score_subset(
         subset: list[dict[str, Any]],
         image_urls: list[str],
@@ -278,14 +219,22 @@ Return exactly one item per candidate:
         resampled: bool = False,
     ) -> dict[str, dict[str, Any]]:
         subset_operation = operation + suffix
-        try:
-            return context.call_json(
+        package = prompt_registry.build(
+            PromptStage.PLANNER,
+            PromptTask.CANDIDATE_VISUAL_SCORING,
+            CandidateVisualScoringDetails(
                 operation=subset_operation,
-                prompt=visual_prompt(subset),
+                candidates=[candidate_spec(candidate) for candidate in subset],
+            ),
+        )
+        try:
+            return context.call_prompt(
+                package=package,
                 config=config,
-                context_keys=["request"],
-                system_prompt=VISUAL_SYSTEM,
-                validate=lambda parsed: _validate_visual_grounding(parsed, subset),
+                validate_business=lambda parsed: _validate_visual_grounding(
+                    parsed,
+                    subset,
+                ),
                 image_data_urls=image_urls,
                 image_labels=[candidate["candidate_id"] for candidate in subset],
             )
@@ -294,10 +243,16 @@ Return exactly one item per candidate:
                 raise
             if len(subset) > 1:
                 midpoint = len(subset) // 2
-                logger.warning(
-                    "{} was rejected by image inspection; splitting {} candidates",
-                    subset_operation,
-                    len(subset),
+                log_event(
+                    "WARNING",
+                    "planner.candidate",
+                    "fallback.apply",
+                    "Image-inspection batch was rejected; splitting candidates",
+                    operation=subset_operation,
+                    candidates=len(subset),
+                    fallback="split_batch",
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
                 )
                 return {
                     **score_subset(
@@ -313,10 +268,16 @@ Return exactly one item per candidate:
                 }
             if not resampled:
                 candidate = subset[0]
-                logger.warning(
-                    "{} was rejected by image inspection; retrying {} with one resampled frame",
-                    subset_operation,
-                    candidate["candidate_id"],
+                log_event(
+                    "WARNING",
+                    "planner.candidate",
+                    "fallback.apply",
+                    "Image-inspection candidate was rejected; resampling one frame",
+                    operation=subset_operation,
+                    candidate_id=candidate["candidate_id"],
+                    fallback="resample_single_frame",
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
                 )
                 return score_subset(
                     subset,
@@ -413,49 +374,24 @@ def retrieve_candidates(
                 ]
                 for slot in batch
             }
-            prompt = f"""Retrieve exactly {retrieval_config.candidates_per_slot} distinct source
-candidates for every supplied edit Slot.
-
-Use only the supplied structured source Segments and their Shot-level visual annotations.
-Every candidate must consist of one or more consecutive source_shot_ids. Its timestamp must
-exactly equal the start boundary of its first Shot and the end boundary of its last Shot.
-Its duration must be at least planned_duration_sec. Silent Segments are valid source material.
-
-Prefer each Slot's source_segment_ids, preserve source chronology, and avoid every excluded
-range. Candidate descriptions must summarize the supplied visual Shot descriptions. Dialogue
-may support narrative meaning but must not override visible identity or action. Score semantic
-relevance, emotional intensity, and editorial salience from 0 to 1.
-
-<slots>
-{json.dumps(batch, ensure_ascii=False)}
-</slots>
-<excluded_ranges>
-{json.dumps(excluded, ensure_ascii=False)}
-</excluded_ranges>
-<available_source_segments_by_slot>
-{json.dumps(source_segments_by_slot, ensure_ascii=False)}
-</available_source_segments_by_slot>
-
-Return:
-{{"candidates":[{{"slot_id":"slot_01","items":[{{
-  "timestamp":"00:00:01,000-00:00:08,000",
-  "source_shot_ids":["shot_00001","shot_00002"],
-  "description":"summary grounded in the supplied Shot visual descriptions",
-  "matched_dialogue":"exact supplied dialogue, or empty string for silent material",
-  "semantic_relevance":0.9,
-  "emotional_intensity":0.7,
-  "salience":0.8
-}}]}}]}}"""
-            batch_pool = context.call_json(
-                operation=(
+            package = prompt_registry.build(
+                PromptStage.PLANNER,
+                PromptTask.CANDIDATE_RETRIEVAL,
+                CandidateRetrievalDetails(
+                    operation=(
                     f"Candidate retrieval round {round_index} "
                     f"batch {batch_index}/{len(batches)}"
+                    ),
+                    candidates_per_slot=retrieval_config.candidates_per_slot,
+                    slots=batch,
+                    excluded_ranges=excluded,
+                    source_segments_by_slot=source_segments_by_slot,
                 ),
-                prompt=prompt,
+            )
+            batch_pool = context.call_prompt(
+                package=package,
                 config=config,
-                context_keys=["request"],
-                system_prompt=RETRIEVER_SYSTEM,
-                validate=lambda parsed, batch=batch: _validate_candidates(
+                validate_business=lambda parsed, batch=batch: _validate_candidates(
                     parsed,
                     batch,
                     source_segments_by_slot,

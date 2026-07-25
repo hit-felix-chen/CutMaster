@@ -4,11 +4,10 @@ import json
 import shutil
 import time
 
-from loguru import logger
-
 from cutmaster.cuts import optimize_script_source_windows
 from cutmaster.music import analyze_music, write_music_profile
 from cutmaster.models import AppConfig, OrchestrationResult, RunRequest
+from cutmaster.observability import error_summary, log_event
 from cutmaster.planner import NoFeasiblePathError, Planner
 from cutmaster.workflow_context import WorkflowContext
 from cutmaster.renderer import media_duration, render_montage
@@ -54,8 +53,26 @@ def run_orchestrator(
         planning_history_path.unlink()
     timings: dict[str, float] = {}
     started = time.monotonic()
+    log_event(
+        "INFO",
+        "orchestrator",
+        "workflow.start",
+        "CutMaster workflow started",
+        source_video=request.video_path.name,
+        source_audio=request.audio_path.name,
+        prompt_type=request.prompt_type,
+        target_duration_sec=request.target_output_length_sec,
+        output_dir=output_dir,
+    )
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.start",
+        "Video material analysis started",
+        stage="video_material_analysis",
+    )
     material = analyse_video_material(
         request.video_path,
         request.video_title or request.video_path.stem,
@@ -68,6 +85,15 @@ def run_orchestrator(
         config.vlm,
     )
     timings["video_material_analysis"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.complete",
+        "Video material analysis completed",
+        stage="video_material_analysis",
+        elapsed_sec=timings["video_material_analysis"],
+        material_directory=material.material_directory,
+    )
     source_srt_path = output_dir / "source.srt"
     processed_subtitle_path = output_dir / "dialogue_merged.srt"
     dialogues_json_path = output_dir / "dialogues.json"
@@ -76,9 +102,24 @@ def run_orchestrator(
     shutil.copy2(material.dialogues_json, dialogues_json_path)
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "music",
+        "stage.start",
+        "Music analysis started",
+        stage="music_analysis",
+    )
     music_profile = analyze_music(request.audio_path, request.target_output_length_sec)
     write_music_profile(music_profile_path, music_profile)
     timings["music_analysis"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "music",
+        "stage.complete",
+        "Music analysis completed",
+        stage="music_analysis",
+        elapsed_sec=timings["music_analysis"],
+    )
 
     planning_context = WorkflowContext(planning_history_path)
     planning_context.set_artifact("music_profile", music_profile)
@@ -99,37 +140,132 @@ def run_orchestrator(
         config.slot_planning.replan_max_rounds + 2,
     ):
         stage_started = time.monotonic()
+        log_event(
+            "INFO",
+            "planner.slot",
+            "stage.start",
+            "Slot planning started",
+            stage="slot_planning",
+            attempt=planning_attempt,
+        )
         slots = planner.plan_slots(request, music_profile)
         planning_context.set_artifact("edit_plan", slots)
         edit_plan_path.write_text(
             json.dumps(slots, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        planning_seconds += time.monotonic() - stage_started
+        elapsed = time.monotonic() - stage_started
+        planning_seconds += elapsed
+        log_event(
+            "INFO",
+            "planner.slot",
+            "stage.complete",
+            "Slot planning completed",
+            stage="slot_planning",
+            attempt=planning_attempt,
+            slots=len(slots),
+            elapsed_sec=elapsed,
+        )
 
         try:
             attempt_stage = "retrieval"
             stage_started = time.monotonic()
+            log_event(
+                "INFO",
+                "planner.candidate",
+                "stage.start",
+                "Candidate retrieval started",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                slots=len(slots),
+            )
             candidate_pool = planner.retrieve(slots)
-            retrieval_seconds += time.monotonic() - stage_started
+            elapsed = time.monotonic() - stage_started
+            retrieval_seconds += elapsed
+            log_event(
+                "INFO",
+                "planner.candidate",
+                "stage.complete",
+                "Candidate retrieval completed",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                candidates=sum(len(items) for items in candidate_pool.values()),
+                elapsed_sec=elapsed,
+            )
 
             attempt_stage = "chronology_preflight"
             stage_started = time.monotonic()
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.start",
+                "Chronology preflight started",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+            )
             planner.validate_sequence(slots, candidate_pool)
-            selection_seconds += time.monotonic() - stage_started
+            elapsed = time.monotonic() - stage_started
+            selection_seconds += elapsed
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.complete",
+                "Chronology preflight completed",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                elapsed_sec=elapsed,
+            )
 
             attempt_stage = "pairwise_visual_scoring"
             stage_started = time.monotonic()
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.start",
+                "Pairwise visual scoring started",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+            )
             pairwise_scores = planner.score_pairs(slots, candidate_pool)
-            pairwise_seconds += time.monotonic() - stage_started
+            elapsed = time.monotonic() - stage_started
+            pairwise_seconds += elapsed
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.complete",
+                "Pairwise visual scoring completed",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                pairs=len(pairwise_scores),
+                elapsed_sec=elapsed,
+            )
 
             attempt_stage = "beam_selection"
             stage_started = time.monotonic()
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.start",
+                "Beam selection started",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+            )
             beam_path, selection = planner.select(
                 slots,
                 candidate_pool,
                 pairwise_scores,
             )
-            selection_seconds += time.monotonic() - stage_started
+            elapsed = time.monotonic() - stage_started
+            selection_seconds += elapsed
+            log_event(
+                "INFO",
+                "planner.sequence",
+                "stage.complete",
+                "Beam selection completed",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                selected_clips=len(beam_path),
+                elapsed_sec=elapsed,
+            )
             selection["planning_attempt"] = planning_attempt
             break
         except (NoFeasiblePathError, ValueError) as exc:
@@ -173,9 +309,16 @@ def run_orchestrator(
             )
             if planning_attempt > config.slot_planning.replan_max_rounds:
                 raise
-            logger.warning(
-                "Planning attempt {} was infeasible; replanning with recorded diagnostics",
-                planning_attempt,
+            log_event(
+                "WARNING",
+                "planner.sequence",
+                "validation.reject",
+                "Planning attempt was infeasible; replanning with diagnostics",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                error_type=type(exc).__name__,
+                reason=error_summary(exc),
+                failed_slots=sorted(failed_slot_ids),
             )
     else:
         raise RuntimeError("Planning loop ended without a feasible path")
@@ -188,6 +331,14 @@ def run_orchestrator(
     timings["pairwise_visual_scoring"] = pairwise_seconds
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "planner.review",
+        "stage.start",
+        "Script construction and review started",
+        stage="sequence_selection_and_review",
+        review_rounds=config.script_review.review_rounds,
+    )
     raw_script = planner.build_script(slots, beam_path)
     planning_context.set_artifact("selection_diagnostics", selection)
     planning_context.record_script_version(raw_script, source="beam_search")
@@ -205,8 +356,24 @@ def run_orchestrator(
     timings["sequence_selection_and_review"] = (
         selection_seconds + time.monotonic() - stage_started
     )
+    log_event(
+        "INFO",
+        "planner.review",
+        "stage.complete",
+        "Script construction and review completed",
+        stage="sequence_selection_and_review",
+        clips=len(raw_script),
+        elapsed_sec=time.monotonic() - stage_started,
+    )
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "script",
+        "stage.start",
+        "Script adaptation started",
+        stage="script_adaptation",
+    )
     source_duration = media_duration(request.video_path)
     adapted_script = adapt_script(
         raw_script,
@@ -218,8 +385,25 @@ def run_orchestrator(
         config.render.fps,
     )
     timings["script_adaptation"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "script",
+        "stage.complete",
+        "Script adaptation completed",
+        stage="script_adaptation",
+        clips=len(adapted_script),
+        elapsed_sec=timings["script_adaptation"],
+    )
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "source_window",
+        "stage.start",
+        "Source-window optimization started",
+        stage="source_window_optimization",
+        clips=len(adapted_script),
+    )
     adapted_script = optimize_script_source_windows(
         request.video_path,
         adapted_script,
@@ -231,8 +415,25 @@ def run_orchestrator(
     )
     write_script(adapted_script_path, adapted_script)
     timings["source_cut_optimization"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "source_window",
+        "stage.complete",
+        "Source-window optimization completed",
+        stage="source_window_optimization",
+        clips=len(adapted_script),
+        elapsed_sec=timings["source_cut_optimization"],
+    )
 
     stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "renderer",
+        "stage.start",
+        "Montage rendering started",
+        stage="rendering",
+        clips=len(adapted_script),
+    )
     montage_path, output_path = render_montage(
         request.video_path,
         request.audio_path,
@@ -241,6 +442,15 @@ def run_orchestrator(
         config.render,
     )
     timings["rendering"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "renderer",
+        "stage.complete",
+        "Montage rendering completed",
+        stage="rendering",
+        elapsed_sec=timings["rendering"],
+        output_path=output_path,
+    )
 
     result = OrchestrationResult(
         status="success",
@@ -268,5 +478,14 @@ def run_orchestrator(
         wall_clock_sec=time.monotonic() - started,
     )
     result_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    logger.success("CutMaster orchestration complete: {}", output_path)
+    log_event(
+        "SUCCESS",
+        "orchestrator",
+        "workflow.complete",
+        "CutMaster workflow completed",
+        output_path=output_path,
+        wall_clock_sec=result.wall_clock_sec,
+        output_duration_sec=result.actual_output_length_sec,
+        clips=result.num_adapted_clips,
+    )
     return result

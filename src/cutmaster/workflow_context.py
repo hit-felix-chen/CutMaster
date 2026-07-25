@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -8,9 +10,21 @@ from typing import Any, Callable, TypeVar
 
 from cutmaster.llm import generate_text, request_json_with_retries
 from cutmaster.models import ModelConfig
+from cutmaster.observability import error_summary, log_event
+from cutmaster.prompting import PromptPackage
 
 
 T = TypeVar("T")
+
+
+def _fingerprint(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
 class WorkflowContext:
@@ -56,19 +70,36 @@ class WorkflowContext:
             versions = self.data.get("artifacts", {}).get(key, [])
             return versions[-1]["value"] if versions else default
 
-    def get_successful_call_result(
+    def get_successful_prompt_result(
         self,
-        operation: str,
+        package: PromptPackage,
+        validate_business: Callable[[dict[str, Any]], T] | None = None,
         default: Any = None,
-    ) -> Any:
+    ) -> T | dict[str, Any] | Any:
+        context_fingerprint = _fingerprint(
+            self.context_snapshot(list(package.context_keys))
+        )
         with self._lock:
             for call in reversed(self.data.get("calls", [])):
                 if (
-                    call.get("operation") == operation
+                    call.get("operation") == package.operation
+                    and call.get("prompt_id") == package.prompt_id
+                    and call.get("prompt_version") == package.prompt_version
+                    and call.get("prompt_fingerprint") == package.fingerprint
+                    and call.get("context_fingerprint") == context_fingerprint
+                    and call.get("contract_fingerprint")
+                    == package.response_contract.fingerprint
                     and call.get("status") == "success"
-                    and "parsed_result" in call
+                    and "structured_result" in call
                 ):
-                    return call["parsed_result"]
+                    structured = package.response_contract.validate_structure(
+                        call["structured_result"]
+                    )
+                    return (
+                        validate_business(structured)
+                        if validate_business is not None
+                        else structured
+                    )
             return default
 
     def context_snapshot(self, keys: list[str]) -> dict[str, Any]:
@@ -101,41 +132,49 @@ class WorkflowContext:
             )
             self.set_artifact("current_script", script)
 
-    def call_json(
+    def call_prompt(
         self,
         *,
-        operation: str,
-        prompt: str,
+        package: PromptPackage,
         config: ModelConfig,
-        context_keys: list[str] | None = None,
-        system_prompt: str,
-        validate: Callable[[dict[str, Any]], T] | None = None,
-        output_artifact: str | None = None,
+        validate_business: Callable[[dict[str, Any]], T] | None = None,
         image_data_urls: list[str] | None = None,
         image_labels: list[str] | None = None,
     ) -> T | dict[str, Any]:
-        snapshot = self.context_snapshot(context_keys or [])
-        contextual_prompt = prompt
+        has_images = bool(image_data_urls)
+        expects_images = package.modality.value == "text_and_images"
+        if has_images != expects_images:
+            raise ValueError(
+                f"{package.prompt_id} expects modality={package.modality.value}"
+            )
+        snapshot = self.context_snapshot(list(package.context_keys))
+        context_fingerprint = _fingerprint(snapshot)
+        contextual_prompt = package.user_prompt
         if snapshot:
             contextual_prompt = (
                 "# Maintained workflow context\n"
                 + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                 + "\n\n"
-                + prompt
+                + package.user_prompt
             )
         with self._lock:
             call: dict[str, Any] = {
                 "call_id": len(self.data.setdefault("calls", [])) + 1,
-                "operation": operation,
+                "operation": package.operation,
+                "prompt_id": package.prompt_id,
+                "prompt_version": package.prompt_version,
+                "prompt_fingerprint": package.fingerprint,
+                "context_fingerprint": context_fingerprint,
+                "contract_version": package.response_contract.version,
+                "contract_fingerprint": package.response_contract.fingerprint,
                 "created_at": datetime.now().astimezone().isoformat(),
                 "model": config.model,
                 "enable_thinking": config.enable_thinking,
-                "input_modality": (
-                    "text_and_images" if image_data_urls else "text"
-                ),
-                "context_keys": context_keys or [],
+                "input_modality": package.modality.value,
+                "context_keys": list(package.context_keys),
                 "context_snapshot": snapshot,
                 "prompt": contextual_prompt,
+                "response_contract": package.response_contract.schema,
                 "status": "running",
             }
             if image_labels:
@@ -144,13 +183,59 @@ class WorkflowContext:
             self.save()
 
         raw_responses: list[str] = []
+        structured_result: dict[str, Any] | None = None
 
         def request() -> str:
-            raw = generate_text(
-                contextual_prompt,
-                config,
-                system_prompt=system_prompt,
-                image_data_urls=image_data_urls,
+            request_started = time.monotonic()
+            modality = "text_and_images" if image_data_urls else "text"
+            log_event(
+                "INFO",
+                "model",
+                "model.start",
+                "Model request started",
+                operation=package.operation,
+                prompt_id=package.prompt_id,
+                prompt_version=package.prompt_version,
+                contract_version=package.response_contract.version,
+                model=config.model,
+                modality=modality,
+                thinking=config.enable_thinking,
+                images=len(image_data_urls or []),
+                prompt_chars=len(contextual_prompt),
+            )
+            try:
+                raw = generate_text(
+                    contextual_prompt,
+                    config,
+                    system_prompt=package.system_prompt,
+                    image_data_urls=image_data_urls,
+                )
+            except Exception as exc:
+                log_event(
+                    "WARNING",
+                    "model",
+                    "model.fail",
+                    "Model request failed",
+                    operation=package.operation,
+                    prompt_id=package.prompt_id,
+                    model=config.model,
+                    modality=modality,
+                    elapsed_sec=time.monotonic() - request_started,
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
+                )
+                raise
+            log_event(
+                "INFO",
+                "model",
+                "model.complete",
+                "Model request completed",
+                operation=package.operation,
+                prompt_id=package.prompt_id,
+                model=config.model,
+                modality=modality,
+                elapsed_sec=time.monotonic() - request_started,
+                response_chars=len(raw),
             )
             with self._lock:
                 raw_responses.append(raw)
@@ -159,18 +244,29 @@ class WorkflowContext:
             return raw
 
         try:
+            def validate(parsed: dict[str, Any]) -> T | dict[str, Any]:
+                nonlocal structured_result
+                structured = package.response_contract.validate_structure(parsed)
+                structured_result = structured
+                return (
+                    validate_business(structured)
+                    if validate_business is not None
+                    else structured
+                )
+
             result = request_json_with_retries(
                 request,
                 config,
-                operation=operation,
+                operation=package.operation,
                 validate=validate,
             )
             with self._lock:
                 call["status"] = "success"
                 call["completed_at"] = datetime.now().astimezone().isoformat()
+                call["structured_result"] = structured_result
                 call["parsed_result"] = result
-                if output_artifact:
-                    self.set_artifact(output_artifact, result)
+                if package.output_artifact:
+                    self.set_artifact(package.output_artifact, result)
                 self.save()
             return result
         except Exception as exc:

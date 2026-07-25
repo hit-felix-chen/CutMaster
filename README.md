@@ -312,6 +312,12 @@ uv run cutmaster run \
 
 ## 输出文件
 
+运行日志写入输出目录中的 `cutmaster.log`，采用稳定的
+`TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message` 单行格式。
+模型 prompt、原始响应和图片数据不会进入运行日志；完整模型上下文只保存在分析与规划
+历史文件中。事件命名、级别、安全边界及开发约束见
+[日志规范](docs/logging.md)。
+
 素材缓存目录包含：
 
 | 路径 | 内容 |
@@ -358,6 +364,7 @@ uv run cutmaster run \
 - `beats.py`：librosa onset envelope 和动态规划节拍跟踪。
 - `music.py`：音乐能量、节拍、重音、段落结构和动态片段时长分析。
 - `video_description.py`：Segment、Shot、场景、人物和对白的严格数据契约。
+- `prompting/`：统一注册 analyser/planner Prompt，由同一 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
 - `analyser.py`：全片 Shot 检测、对白 Segment 构造、素材切片、并行单-Shot VLM 标注和素材缓存。
 - `workflow_context.py`：analyser 与 planner 共用的结构化产物、模型调用历史、断点和脚本版本持久化。
 - `planner.py`：规划门面，统一暴露并组织四个解耦阶段。

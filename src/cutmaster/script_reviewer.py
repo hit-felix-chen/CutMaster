@@ -5,14 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.models import LLMConfig
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.planner import ScriptReviewDetails
 from cutmaster.workflow_context import WorkflowContext
 from cutmaster.sequence_selector import _score_candidate_path, path_to_script
 from cutmaster.timecode import parse_range
-
-REVIEW_SYSTEM = (
-    "You review a structured edit timeline and return minimal patch operations. "
-    "Use only candidate IDs supplied in the maintained context. Return strict JSON only."
-)
 
 def _validate_patches(
     parsed: dict[str, Any],
@@ -78,26 +75,18 @@ def review_and_patch(
     context: WorkflowContext,
     pairwise_scores: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    prompt = """Review the current script as a sequence, focusing on instruction coverage, music-energy fit, temporal progression, and adjacent-clip continuity.
-Return only minimal replacements that clearly improve the full path. Do not change a slot merely for variety.
-All output uses direct hard cuts between source fragments. Precomputed visual continuity scores
-will reject a patch subset that degrades the weighted full-path score.
-Return {"patches":[{"operation":"keep|replace","slot_id":"slot_01","candidate_id":"slot_01_candidate_02","reason":"short reason"}]}."""
-    patches = context.call_json(
-        operation="Script patch review",
-        prompt=prompt,
+    package = prompt_registry.build(
+        PromptStage.PLANNER,
+        PromptTask.SCRIPT_REVIEW,
+        ScriptReviewDetails(
+            slots=slots,
+            candidate_pool=pool,
+        ),
+    )
+    patches = context.call_prompt(
+        package=package,
         config=config,
-        context_keys=[
-            "request",
-            "music_profile",
-            "video_description",
-            "edit_plan",
-            "candidate_pool",
-            "current_script",
-        ],
-        system_prompt=REVIEW_SYSTEM,
-        validate=lambda parsed: _validate_patches(parsed, slots, pool),
-        output_artifact="latest_patches",
+        validate_business=lambda parsed: _validate_patches(parsed, slots, pool),
     )
     original_by_slot = {item["slot_id"]: item for item in script}
     candidates = {

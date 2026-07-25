@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import requests
-from loguru import logger
 
 from cutmaster.models import ASRConfig
+from cutmaster.observability import log_event
 
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
@@ -293,13 +293,57 @@ def prepare_subtitles(
             shutil.copy2(provided_subtitle, subtitle_path)
         return subtitle_path
     if config.reuse and subtitle_path.is_file() and subtitle_path.stat().st_size > 0:
-        logger.info("Reusing ASR subtitle: {}", subtitle_path)
+        log_event(
+            "INFO",
+            "asr",
+            "cache.hit",
+            "Reusable ASR subtitle found",
+            artifact="source_subtitle",
+            path=subtitle_path,
+        )
         return subtitle_path
     if config.backend != "bailian":
         raise ValueError(f"Unsupported ASR backend in CutMaster core: {config.backend}")
     audio_path = output_dir / "source_audio.m4a"
     if not (config.reuse and audio_path.is_file() and audio_path.stat().st_size > 0):
-        logger.info("Extracting 16 kHz mono audio for ASR")
+        stage_started = time.monotonic()
+        log_event(
+            "INFO",
+            "asr",
+            "stage.start",
+            "ASR audio extraction started",
+            stage="audio_extraction",
+            sample_rate_hz=16000,
+            channels=1,
+        )
         extract_asr_audio(video_path, audio_path)
-    logger.info("Transcribing source video with Fun-ASR")
-    return transcribe_bailian(audio_path, subtitle_path, config)
+        log_event(
+            "INFO",
+            "asr",
+            "stage.complete",
+            "ASR audio extraction completed",
+            stage="audio_extraction",
+            path=audio_path,
+            elapsed_sec=time.monotonic() - stage_started,
+        )
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "asr",
+        "stage.start",
+        "ASR transcription started",
+        stage="transcription",
+        backend=config.backend,
+    )
+    result = transcribe_bailian(audio_path, subtitle_path, config)
+    log_event(
+        "INFO",
+        "asr",
+        "stage.complete",
+        "ASR transcription completed",
+        stage="transcription",
+        backend=config.backend,
+        elapsed_sec=time.monotonic() - stage_started,
+        path=result,
+    )
+    return result

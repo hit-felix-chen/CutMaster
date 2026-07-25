@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from loguru import logger
-
 from cutmaster.llm import generate_text, request_json_with_retries
 from cutmaster.models import LLMConfig
+from cutmaster.observability import log_event
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.analyser import DialogueReconstructionDetails
 from cutmaster.timecode import format_time, parse_time
 
 if TYPE_CHECKING:
@@ -26,13 +28,6 @@ SRT_BLOCK_RE = re.compile(
 SPEAKER_RE = re.compile(r"^(Speaker\s+\d+):\s*(.*)$", re.IGNORECASE | re.DOTALL)
 TERMINAL_RE = re.compile(r"[。！？.!?][\"'”’）)]*$")
 CJK_RE = re.compile(r"[\u3400-\u9fff]")
-SYSTEM_PROMPT = (
-    "You reconstruct complete spoken sentences from adjacent ASR subtitle fragments. "
-    "Return strict JSON only. Never rewrite dialogue and only return the provided "
-    "candidate labels. Cue IDs are anchors, not candidate labels."
-)
-
-
 def generate_boundary_decisions(prompt: str, config: LLMConfig, system_prompt: str) -> str:
     return generate_text(prompt, config, system_prompt)
 
@@ -105,63 +100,13 @@ def _chunk_passages(passages: list[list[Cue]], max_chars: int = 18_000) -> list[
     return chunks
 
 
-def _build_prompt(passages: list[list[Cue]]) -> str:
-    candidates = [
-        {
-            "candidate_label": f"candidate_{index:03d}",
-            "speaker": passage[0].speaker,
-            "cues": [cue.anchor() for cue in passage],
-        }
-        for index, passage in enumerate(passages, start=1)
-    ]
-    return f"""# ASR dialogue-fragment reconstruction
-
-The input contains candidate passages made only from adjacent cues by the same speaker.
-Identify cue sequences that together form one grammatically and semantically complete spoken sentence.
-
-Rules:
-1. Return only candidate labels whose complete cue sequence should actually be merged.
-2. Omit candidates whose cues should remain separate.
-3. Do not merge independent complete sentences, even when the speaker is unchanged.
-4. Continuations split by ASR length limits, commas, clauses, numbers, or delayed sentence-final punctuation should be merged.
-5. Do not rewrite text or timestamps.
-6. Values such as cue_id are subtitle anchors. Never return a cue_id.
-
-Candidates:
-{json.dumps(candidates, ensure_ascii=False)}
-
-Return the candidate labels whose complete cue sequence should be merged:
-{{"merge_candidate_ids": ["candidate_001", "candidate_002"]}}
-"""
-
-
-def _validate_decisions(raw_ids: object, passages: list[list[Cue]]) -> list[list[int]]:
-    if raw_ids is None:
-        return []
-    if not isinstance(raw_ids, list):
-        raise ValueError("merge_candidate_ids must be an array")
+def _validate_decisions(
+    raw_ids: list[str],
+    passages: list[list[Cue]],
+) -> list[list[int]]:
     groups: list[list[int]] = []
-    seen: set[int] = set()
     for raw_id in raw_ids:
-        try:
-            if isinstance(raw_id, str) and raw_id.startswith("candidate_"):
-                candidate_id = int(raw_id.removeprefix("candidate_"))
-            else:
-                candidate_id = int(raw_id)
-        except (TypeError, ValueError):
-            logger.warning("Ignoring invalid dialogue candidate label: {!r}", raw_id)
-            continue
-        if candidate_id < 1 or candidate_id > len(passages):
-            logger.warning(
-                "Ignoring out-of-range dialogue candidate ID {} (batch has {} candidates)",
-                candidate_id,
-                len(passages),
-            )
-            continue
-        if candidate_id in seen:
-            logger.warning("Ignoring duplicate dialogue candidate ID: {}", candidate_id)
-            continue
-        seen.add(candidate_id)
+        candidate_id = int(str(raw_id).removeprefix("candidate_"))
         groups.append([cue.cue_id for cue in passages[candidate_id - 1]])
     return groups
 
@@ -255,38 +200,81 @@ def postprocess_dialogues(
     cues = parse_srt(source_srt.read_text(encoding="utf-8-sig"))
     passages = candidate_passages(cues)
     chunks = _chunk_passages(passages)
-    logger.info(
-        "Dialogue postprocessing: {} cues, {} candidate passages, {} model batches",
-        len(cues),
-        len(passages),
-        len(chunks),
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "dialogue",
+        "stage.start",
+        "Dialogue postprocessing started",
+        stage="dialogue_postprocessing",
+        cues=len(cues),
+        candidate_passages=len(passages),
+        model_batches=len(chunks),
     )
     decisions: list[list[list[int]] | None] = [None] * len(chunks)
     worker_count = max(1, min(config.max_concurrency, len(chunks)))
 
     def process_chunk(index: int, chunk: list[list[Cue]]) -> tuple[int, list[list[int]]]:
-        logger.info("Dialogue model batch {}/{} started", index + 1, len(chunks))
-        prompt = _build_prompt(chunk)
+        batch_started = time.monotonic()
+        log_event(
+            "DEBUG",
+            "dialogue",
+            "stage.progress",
+            "Dialogue model batch started",
+            batch=index + 1,
+            batches=len(chunks),
+        )
         operation = f"Dialogue reconstruction batch {index + 1}/{len(chunks)}"
+        candidates = [
+            {
+                "candidate_label": f"candidate_{candidate_index:03d}",
+                "speaker": passage[0].speaker,
+                "cues": [cue.anchor() for cue in passage],
+            }
+            for candidate_index, passage in enumerate(chunk, start=1)
+        ]
+        package = prompt_registry.build(
+            PromptStage.ANALYSER,
+            PromptTask.DIALOGUE_RECONSTRUCTION,
+            DialogueReconstructionDetails(
+                candidates=candidates,
+                operation=operation,
+            ),
+        )
+
+        def validate(parsed: dict) -> list[list[int]]:
+            package.response_contract.validate_structure(parsed)
+            return _validate_decisions(parsed["merge_candidate_ids"], chunk)
+
         if context is None:
             groups = request_json_with_retries(
-                lambda: generator(prompt, config, SYSTEM_PROMPT),
+                lambda: generator(
+                    package.user_prompt,
+                    config,
+                    package.system_prompt,
+                ),
                 config,
                 operation=operation,
-                validate=lambda parsed: _validate_decisions(
-                    parsed.get("merge_candidate_ids"), chunk
-                ),
+                validate=validate,
             )
         else:
-            groups = context.call_json(
-                operation=operation,
-                prompt=prompt,
+            groups = context.call_prompt(
+                package=package,
                 config=config,
-                system_prompt=SYSTEM_PROMPT,
-                validate=lambda parsed: _validate_decisions(
-                    parsed.get("merge_candidate_ids"), chunk
+                validate_business=lambda parsed: _validate_decisions(
+                    parsed["merge_candidate_ids"],
+                    chunk,
                 ),
             )
+        log_event(
+            "DEBUG",
+            "dialogue",
+            "stage.progress",
+            "Dialogue model batch completed",
+            batch=index + 1,
+            batches=len(chunks),
+            elapsed_sec=time.monotonic() - batch_started,
+        )
         return index, groups
 
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dialogue-llm") as executor:
@@ -297,7 +285,6 @@ def postprocess_dialogues(
         for future in as_completed(futures):
             index, groups = future.result()
             decisions[index] = groups
-            logger.info("Dialogue model batch {}/{} completed", index + 1, len(chunks))
 
     merge_groups = [group for batch in decisions if batch is not None for group in batch]
     document = build_dialogue_document(cues, merge_groups, source_srt, config.model)
@@ -305,9 +292,14 @@ def postprocess_dialogues(
     merged_srt_path = output_dir / "dialogue_merged.srt"
     dialogue_path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_merged_srt(merged_srt_path, document)
-    logger.info(
-        "Dialogue postprocessing complete: {} sentences, {} merged sentences",
-        document["statistics"]["sentence_count"],
-        document["statistics"]["merged_sentence_count"],
+    log_event(
+        "INFO",
+        "dialogue",
+        "stage.complete",
+        "Dialogue postprocessing completed",
+        stage="dialogue_postprocessing",
+        sentences=document["statistics"]["sentence_count"],
+        merged_sentences=document["statistics"]["merged_sentence_count"],
+        elapsed_sec=time.monotonic() - stage_started,
     )
     return merged_srt_path, dialogue_path

@@ -412,6 +412,9 @@ Each `script_adapted.json` item adds:
   analysis.
 - `video_description.py`: strict Segment, Shot, scene, character, and dialogue
   data contracts.
+- `prompting/`: the analyser/planner Prompt registry and executable JSON
+  response contracts used to generate response templates, validate structure,
+  and version model-call caches.
 - `analyser.py`: full-video Shot detection, dialogue Segment assembly,
   source splitting, parallel single-Shot VLM annotation, and material caching.
 - `workflow_context.py`: shared analyser/planner artifacts, model-call history,

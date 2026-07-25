@@ -4,27 +4,20 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from loguru import logger
 from openai import OpenAI
 
 from cutmaster.json_utils import parse_json_object
 from cutmaster.models import ModelConfig
+from cutmaster.observability import error_summary, log_event
 
 
 T = TypeVar("T")
 
 
-SYSTEM_PROMPT = (
-    "You are a professional long-video montage editor. Return strict JSON only. "
-    "Select only source segments that really exist in the supplied timestamped subtitles. "
-    "Do not invent dialogue or timestamps."
-)
-
-
 def generate_text(
     prompt: str,
     config: ModelConfig,
-    system_prompt: str = SYSTEM_PROMPT,
+    system_prompt: str,
     enable_thinking: bool | None = None,
     image_data_urls: list[str] | None = None,
 ) -> str:
@@ -80,20 +73,45 @@ def request_json_with_retries(
             if "data_inspection_failed" in str(exc).lower():
                 # Repeating the same rejected image payload cannot make it pass provider-side
                 # inspection. Let the visual caller split or resample the payload instead.
+                log_event(
+                    "ERROR",
+                    "model",
+                    "model.fail",
+                    "Model request rejected by provider inspection",
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
+                )
                 raise
             if attempt >= attempts:
+                log_event(
+                    "ERROR",
+                    "model",
+                    "model.fail",
+                    "Model transaction exhausted its retries",
+                    operation=operation,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
+                )
                 raise RuntimeError(
                     f"{operation} failed after {attempts} attempts: {exc}"
                 ) from exc
             delay = min(2 ** (attempt - 1), 8)
-            logger.warning(
-                "{} attempt {}/{} failed ({}: {}); retrying in {}s",
-                operation,
-                attempt,
-                attempts,
-                type(exc).__name__,
-                exc,
-                delay,
+            log_event(
+                "WARNING",
+                "model",
+                "model.retry",
+                "Model transaction failed; retrying",
+                operation=operation,
+                attempt=attempt,
+                max_attempts=attempts,
+                backoff_sec=delay,
+                error_type=type(exc).__name__,
+                reason=error_summary(exc),
             )
             time.sleep(delay)
     raise AssertionError("unreachable")

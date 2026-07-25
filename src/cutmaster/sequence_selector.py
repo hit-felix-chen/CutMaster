@@ -1,25 +1,18 @@
 from __future__ import annotations
 
-import json
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from cutmaster.models import VLMConfig
+from cutmaster.observability import log_event
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.planner import PairwiseScoringDetails
 from cutmaster.workflow_context import WorkflowContext
 from cutmaster.planner_shared import _edge_contact_sheet_data_url, _normalize_likert_score
 from cutmaster.progress import progress_iter
 from cutmaster.timecode import parse_range
-
-PAIRWISE_SYSTEM = (
-    "You evaluate whether two real source-video fragments form a coherent direct hard cut. "
-    "Judge the visible tail of the first fragment against the visible head of the second. "
-    "Do not assume slot text is visible fact, and do not suggest or rely on transition effects. "
-    "Return strict JSON only."
-)
 
 def _pair_key(previous_candidate_id: str, current_candidate_id: str) -> str:
     return f"{previous_candidate_id}->{current_candidate_id}"
@@ -122,21 +115,27 @@ def precompute_pairwise_scores(
         for previous, current in zip(slots[:-1], slots[1:], strict=True)
     )
     worker_count = max(1, min(config.max_concurrency, len(boundary_jobs)))
-    logger.info(
-        "Precomputing {} hard-cut candidate pairs across {} boundaries with {} workers",
-        pair_count,
-        len(boundary_jobs),
-        worker_count,
+    log_event(
+        "INFO",
+        "planner.sequence",
+        "stage.progress",
+        "Hard-cut candidate-pair precomputation configured",
+        pairs=pair_count,
+        boundaries=len(boundary_jobs),
+        workers=worker_count,
     )
 
     def score_boundary(
         job: tuple[int, tuple[dict[str, Any], dict[str, Any]]],
     ) -> dict[str, dict[str, Any]]:
         boundary_index, (previous_slot, current_slot) = job
-        logger.info(
-            "Pairwise visual boundary {}/{} started",
-            boundary_index,
-            len(boundary_jobs),
+        log_event(
+            "DEBUG",
+            "planner.sequence",
+            "stage.progress",
+            "Pairwise visual boundary started",
+            boundary=boundary_index,
+            boundaries=len(boundary_jobs),
         )
         previous_candidates = pool[previous_slot["slot_id"]]
         current_candidates = pool[current_slot["slot_id"]]
@@ -155,44 +154,19 @@ def precompute_pairwise_scores(
             for previous in previous_candidates
             for current in current_candidates
         ]
-        prompt = f"""Score all {len(previous_candidates)}x{len(current_candidates)} candidate
-combinations across this adjacent Slot boundary.
-
-The attached images contain the TAIL contact sheets for the three previous candidates followed
-by the HEAD contact sheets for the three current candidates. Evaluate only a direct hard cut
-between the sampled source fragments. Do not propose fades, dissolves, generated bridge shots,
-or any other transition effect.
-
-Use the maintained task request to judge editorial intent. Slot descriptions and candidate text
-are targets/context, not proof of what appears. Base visual and emotional judgments on pixels.
-
-Scores:
-- visual_continuity: composition, location/light/color compatibility, screen direction, body
-  position, and whether the direct cut looks intentional rather than accidental;
-- emotional_continuity: whether visible affect/action changes coherently or has a motivated
-  contrast instead of an unexplained emotional jump;
-- narrative_bridge: whether the visible before/after states advance the requested story and the
-  supplied continuity_from_previous.
-
-<previous_slot>
-{json.dumps(previous_slot, ensure_ascii=False)}
-</previous_slot>
-<current_slot>
-{json.dumps(current_slot, ensure_ascii=False)}
-</current_slot>
-<candidate_pairs>
-{json.dumps(pair_specs, ensure_ascii=False)}
-</candidate_pairs>
-
-Return exactly one item for every candidate pair:
-{{"items":[{{
-  "previous_candidate_id":"slot_01_candidate_01",
-  "current_candidate_id":"slot_02_candidate_01",
-  "visual_continuity":0.0,
-  "emotional_continuity":0.0,
-  "narrative_bridge":0.0,
-  "evidence":"brief pixel-grounded reason for the direct hard cut"
-}}]}}"""
+        package = prompt_registry.build(
+            PromptStage.PLANNER,
+            PromptTask.PAIRWISE_SCORING,
+            PairwiseScoringDetails(
+                operation=(
+                    f"Pairwise visual continuity boundary {boundary_index}/"
+                    f"{len(boundary_jobs)}"
+                ),
+                previous_slot=previous_slot,
+                current_slot=current_slot,
+                pair_specs=pair_specs,
+            ),
+        )
         image_labels = [
             *[
                 f"{candidate['candidate_id']} TAIL"
@@ -213,26 +187,23 @@ Return exactly one item for every candidate pair:
                 for candidate in current_candidates
             ],
         ]
-        result = context.call_json(
-            operation=(
-                f"Pairwise visual continuity boundary {boundary_index}/"
-                f"{len(boundary_jobs)}"
-            ),
-            prompt=prompt,
+        result = context.call_prompt(
+            package=package,
             config=config,
-            context_keys=["request"],
-            system_prompt=PAIRWISE_SYSTEM,
-            validate=lambda parsed: _validate_pairwise_grounding(
+            validate_business=lambda parsed: _validate_pairwise_grounding(
                 parsed,
                 expected_pairs,
             ),
             image_data_urls=image_data_urls,
             image_labels=image_labels,
         )
-        logger.info(
-            "Pairwise visual boundary {}/{} completed",
-            boundary_index,
-            len(boundary_jobs),
+        log_event(
+            "DEBUG",
+            "planner.sequence",
+            "stage.progress",
+            "Pairwise visual boundary completed",
+            boundary=boundary_index,
+            boundaries=len(boundary_jobs),
         )
         return result
 

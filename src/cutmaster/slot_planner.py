@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import json
 import math
 from typing import Any
 
 from cutmaster.models import LLMConfig, RunRequest
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.planner import SlotPlanningDetails
 from cutmaster.workflow_context import WorkflowContext
-
-PLANNER_SYSTEM = (
-    "You are the planning component of a professional video editor. "
-    "Plan an output timeline but do not select source timestamps. Return strict JSON only."
-)
 
 def _request_metadata(request: RunRequest, clip_count: int) -> dict[str, Any]:
     return {
@@ -129,51 +125,30 @@ def plan_edit_slots(
             "Do not repeat any exact source_segment_ids assignment listed in failed_slots; "
             "choose different visual source evidence while preserving chronology.\n"
         )
-    prompt = f"""Create exactly {clip_count} sequential edit slots for the maintained request,
-music profile, and structured video description.
-
-Each slot must be realizable from one or more supplied source_segment_ids. Use the Shot-level VLM
-descriptions, characters, scenes, dialogue, and Segment summaries as source truth. Never invent
-props, gestures, settings, identities, or actions absent from the structured description.
-Keep source_segment_ids in nondecreasing source order across slots. Reusing a Segment for adjacent
-slots is allowed when it contains enough distinct Shots. For a character-focused request, list
-the focal character in required_visible_subjects for every Slot where that character must be seen.
-Use the music sections and energy curve to vary desired duration: high kinetic energy generally uses shorter clips; low energy uses longer clips.
-Maintain a coherent progression. Every slot after the first must explain how it continues or contrasts with the previous slot.
-The desired durations should total approximately {request.target_output_length_sec:.1f} seconds.
-{retry_note}
-
-Return:
-{{"slots":[{{
-  "narrative_role":"setup|development|turning_point|climax|resolution",
-  "content_description":"people, visible action, emotion, setting, editorial purpose",
-  "target_emotion":"short label",
-  "target_emotional_intensity":0.0,
-  "target_kinetic_energy":0.0,
-  "desired_duration_sec":4.0,
-  "continuity_from_previous":"semantic or visual relationship",
-  "source_segment_ids":["segment_0001"],
-  "required_visible_subjects":["focal character name"]
-}}]}}"""
-    return context.call_json(
-        operation="Edit slot planning",
-        prompt=prompt,
+    package = prompt_registry.build(
+        PromptStage.PLANNER,
+        PromptTask.SLOT_PLANNING,
+        SlotPlanningDetails(
+            clip_count=clip_count,
+            target_duration_sec=request.target_output_length_sec,
+            allowed_segment_ids=[
+                str(segment["segment_id"])
+                for segment in video_description["segments"]
+                if str(segment["segment_id"]) not in forbidden_segment_ids
+            ],
+            retry_note=retry_note,
+        ),
+    )
+    return context.call_prompt(
+        package=package,
         config=config,
-        context_keys=[
-            "request",
-            "music_profile",
-            "video_description",
-            "planning_feedback",
-        ],
-        system_prompt=PLANNER_SYSTEM,
-        validate=lambda parsed: _validate_slots(
+        validate_business=lambda parsed: _validate_slots(
             parsed,
             clip_count,
             video_description,
             forbidden_segment_ids,
             failed_segment_assignments,
         ),
-        output_artifact="edit_plan_unaligned",
     )
 
 

@@ -54,7 +54,7 @@ def test_model_thinking_config_reaches_api_request(
 
     monkeypatch.setattr("cutmaster.llm.OpenAI", FakeOpenAI)
 
-    assert generate_text("test", config) == '{"ok":true}'
+    assert generate_text("test", config, "Return JSON") == '{"ok":true}'
     assert captured["model"] == config.model
     assert captured["extra_body"] == {"enable_thinking": expected}
 

@@ -46,7 +46,12 @@ def test_llm_merge_groups_create_sentences_with_anchors(tmp_path) -> None:
     responses = iter(
         [
             json.dumps(
-                {"merge_candidate_ids": [1, 2]},
+                {
+                    "merge_candidate_ids": [
+                        "candidate_001",
+                        "candidate_002",
+                    ]
+                },
                 ensure_ascii=False,
             )
         ]
@@ -103,7 +108,7 @@ def test_dialogue_batches_run_in_parallel_and_preserve_cue_order(tmp_path, monke
         time.sleep(0.05)
         with lock:
             active -= 1
-        return json.dumps({"merge_candidate_ids": [1]})
+        return json.dumps({"merge_candidate_ids": ["candidate_001"]})
 
     monkeypatch.setattr("cutmaster.dialogue._chunk_passages", two_chunks)
     _, dialogue_json = postprocess_dialogues(
@@ -119,26 +124,39 @@ def test_dialogue_batches_run_in_parallel_and_preserve_cue_order(tmp_path, monke
     assert document["sentences"][2]["anchors"][0]["cue_id"] == 62
 
 
-def test_invalid_candidate_ids_do_not_abort_dialogue_postprocessing(tmp_path) -> None:
+def test_invalid_candidate_ids_trigger_contract_retry(tmp_path) -> None:
     source = tmp_path / "source.srt"
     source.write_text(SRT, encoding="utf-8")
+    responses = iter(
+        [
+            {"merge_candidate_ids": ["candidate_001", 82, "not_a_candidate"]},
+            {"merge_candidate_ids": ["candidate_001"]},
+        ]
+    )
+    calls = 0
 
     def fake_generator(prompt, _config, _system_prompt):
+        nonlocal calls
+        calls += 1
         assert '"candidate_label": "candidate_001"' in prompt
-        return json.dumps(
-            {"merge_candidate_ids": ["candidate_001", 82, "not_a_candidate"]}
-        )
+        return json.dumps(next(responses))
 
     _, dialogue_json = postprocess_dialogues(
         source,
         tmp_path,
-        LLMConfig(model="test", base_url="", api_key="test"),
+        LLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_retries=1,
+        ),
         generator=fake_generator,
     )
     document = json.loads(dialogue_json.read_text(encoding="utf-8"))
 
     assert document["statistics"]["merged_sentence_count"] == 1
     assert document["merge_operations"][0]["cue_ids"] == [58, 59]
+    assert calls == 2
 
 
 def test_dialogue_postprocessing_retries_invalid_json(tmp_path, monkeypatch) -> None:

@@ -4,13 +4,13 @@ import base64
 import hashlib
 import json
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
-from loguru import logger
 
 from cutmaster.asr import prepare_subtitles
 from cutmaster.cuts import detect_source_cuts
@@ -22,6 +22,12 @@ from cutmaster.models import (
     ShotAnnotationConfig,
     ShotDetectionConfig,
     VLMConfig,
+)
+from cutmaster.observability import log_event
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.analyser import (
+    DialogueSegmentationDetails,
+    ShotAnnotationDetails,
 )
 from cutmaster.workflow_context import WorkflowContext
 from cutmaster.progress import progress_bar
@@ -51,18 +57,6 @@ from cutmaster.video_description import (
 
 
 ANALYSIS_SCHEMA_VERSION = "1.0"
-DIALOGUE_SEGMENTER_SYSTEM = (
-    "You divide the complete source transcript into contiguous spoken-content Segments. "
-    "Every dialogue line must be assigned exactly once and returned in source order. "
-    "Segment boundaries must be compatible with the supplied Shot memberships. "
-    "Return strict JSON only."
-)
-SHOT_ANNOTATOR_SYSTEM = (
-    "You annotate exactly one source-video Shot from five uniformly sampled frames. "
-    "The complete transcript is global narrative context, never visual evidence. "
-    "Describe only people, actions, locations, lighting, colors, objects, and camera properties "
-    "that are visible in the five supplied frames. Return strict JSON only."
-)
 
 
 @dataclass(frozen=True)
@@ -158,6 +152,13 @@ def _write_json_checkpoint(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     temporary_path.replace(path)
+    log_event(
+        "INFO",
+        "analyser",
+        "checkpoint.write",
+        "Analysis checkpoint written",
+        path=path,
+    )
 
 
 def _read_json_checkpoint(path: Path) -> Any | None:
@@ -166,7 +167,13 @@ def _read_json_checkpoint(path: Path) -> Any | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        logger.warning("Ignoring invalid analysis checkpoint: {}", path)
+        log_event(
+            "WARNING",
+            "analyser",
+            "cache.invalid",
+            "Invalid analysis checkpoint was ignored",
+            path=path,
+        )
         return None
 
 
@@ -502,43 +509,21 @@ def _group_dialogue(
 ) -> list[dict[str, Any]]:
     if not dialogue:
         return []
-    operation = "Full-transcript dialogue segmentation"
 
     def validate(parsed: dict[str, Any]) -> list[dict[str, Any]]:
         return _validate_dialogue_segments(parsed, dialogue, shots)
 
-    prompt = """Divide the complete transcript in the maintained context into contiguous
-spoken-content Segments.
-
-Rules:
-1. Assign every dialogue_id exactly once and preserve source order.
-2. A Segment contains one continuous conversation or one continuous monologue.
-3. Return only inclusive first_dialogue_id/last_dialogue_id ranges.
-4. Do not split adjacent lines when their covering_shot_ids overlap. A Segment boundary must
-   fall between two PySceneDetect Shots.
-5. Do not group unrelated dialogue across a narrative, speaker, topic, location, or large time
-   break merely to reduce the number of Segments.
-6. speech_mode must be dialogue or monologue. If a passage contains interaction between
-   speakers, classify it as dialogue.
-7. Topic and summary must be concise and grounded only in the supplied transcript. Participants
-   are derived locally from the assigned dialogue lines and must not be returned.
-
-Return:
-{"segments":[{
-  "first_dialogue_id":1,
-  "last_dialogue_id":4,
-  "speech_mode":"dialogue|monologue",
-  "topic":"specific subject of the passage",
-  "summary":"what is said or narratively established"
-}]}"""
-    return context.call_json(
-        operation=operation,
-        prompt=prompt,
+    package = prompt_registry.build(
+        PromptStage.ANALYSER,
+        PromptTask.DIALOGUE_SEGMENTATION,
+        DialogueSegmentationDetails(
+            dialogue_ids=[int(item["dialogue_id"]) for item in dialogue],
+        ),
+    )
+    return context.call_prompt(
+        package=package,
         config=config,
-        context_keys=["source_metadata", "shot_boundaries", "full_dialogue"],
-        system_prompt=DIALOGUE_SEGMENTER_SYSTEM,
-        validate=validate,
-        output_artifact="dialogue_segments",
+        validate_business=validate,
     )
 
 
@@ -659,7 +644,15 @@ def _split_segment_clips(
             except Exception:
                 existing_duration = -1.0
             if abs(existing_duration - expected_duration) <= 0.1:
-                logger.info("Reusing Segment clip: {}", output)
+                log_event(
+                    "DEBUG",
+                    "analyser",
+                    "cache.hit",
+                    "Reusable Segment clip found",
+                    artifact="segment_clip",
+                    segment_id=segment["segment_id"],
+                    path=output,
+                )
                 segment["clip_path"] = str(output.resolve())
                 continue
             temporary_output = output.with_suffix(".partial.mp4")
@@ -797,6 +790,7 @@ def _validate_shot_annotation(
         CharacterAppearance(**character).validate()
         characters.append(character)
     normalized = {
+        "shot_id": shot_id,
         "visual_description": str(parsed["visual_description"]).strip(),
         "dominant_action": str(parsed["dominant_action"]).strip(),
         "content_type": content_type,
@@ -827,88 +821,6 @@ def _validate_shot_annotation(
     return normalized
 
 
-def _shot_prompt(
-    segment: dict[str, Any],
-    shot: dict[str, Any],
-    sampled_times: list[float],
-) -> str:
-    return f"""Annotate exactly one Shot from the five attached frames, shown in chronological
-order and sampled uniformly inside the Shot.
-
-The maintained full transcript is global context for names and narrative position only. It is
-not evidence that a person, action, object, location, or emotion is visible. Pixel evidence
-always wins. If a visible person's identity cannot be established, assign a stable generic name
-such as person_01 instead of guessing a cast identity.
-
-This Shot has_dialogue={str(bool(shot["dialogue"])).lower()}. Therefore content_type must be:
-- narrative when has_dialogue is true;
-- landscape, emotional, or pantomime when has_dialogue is false.
-
-Identity Likert:
-1 = identity cannot be established from these frames;
-2 = weak person-specific evidence;
-3 = plausible identity with partial facial evidence;
-4 = clear facial match in a meaningful portion;
-5 = repeated, unmistakable facial match.
-
-For interior_exterior choose interior or exterior. For time_of_day choose dawn, day, dusk, or
-night. Choose the single dominant camera scale, angle, and movement; do not return mixed, other,
-or unknown labels. Describe locations concretely from visible structure even when the proper
-place name is unavailable.
-
-<segment>
-{json.dumps({
-    "segment_id": segment["segment_id"],
-    "has_dialogue": segment["has_dialogue"],
-    "speech_mode": segment["speech_mode"],
-    "dialogue_context": segment["dialogue_context"],
-}, ensure_ascii=False)}
-</segment>
-<shot>
-{json.dumps({
-    "shot_id": shot["shot_id"],
-    "timestamp": shot["timestamp"],
-    "dialogue": shot["dialogue"],
-    "sampled_frame_times_sec": sampled_times,
-}, ensure_ascii=False)}
-</shot>
-
-Return:
-{{
-  "shot_id":"{shot['shot_id']}",
-  "visual_description":"literal visible content across the five frames",
-  "dominant_action":"single dominant visible action",
-  "content_type":"narrative|landscape|emotional|pantomime",
-  "narrative_function":"specific function this visible Shot serves",
-  "emotional_tone":"specific visible emotional tone",
-  "emotional_intensity":0.0,
-  "scene":{{
-    "interior_exterior":"interior|exterior",
-    "location":"concrete visible place description",
-    "time_of_day":"dawn|day|dusk|night",
-    "environment_lighting":["visible light source or lighting condition"],
-    "color_palette":["dominant visible color"],
-    "color_tone":"specific color treatment",
-    "set_details":["visible furnishing, landscape element, prop, or architecture"],
-    "weather":"visible weather; empty string when weather is not in frame",
-    "atmosphere":"specific visual atmosphere"
-  }},
-  "characters":[{{
-    "character_id":"stable character or person identifier",
-    "name":"verified name or stable generic person label",
-    "description":"appearance, clothing, expression, pose, and action",
-    "identity_likert":1,
-    "identity_evidence":"pixel-grounded identity evidence or explicit lack of it",
-    "screen_presence":0.0
-  }}],
-  "shot_scale":"extreme_wide|wide|medium|close_up|extreme_close_up",
-  "camera_angle":"eye_level|high_angle|low_angle|overhead|dutch_angle",
-  "camera_movement":"static|pan|tilt|tracking|handheld|zoom|crane",
-  "composition":"subject placement, depth, balance, and screen direction",
-  "visual_evidence":"brief summary of decisive evidence in the five frames"
-}}"""
-
-
 def _annotate_segments(
     segments: list[dict[str, Any]],
     context: WorkflowContext,
@@ -930,22 +842,37 @@ def _annotate_segments(
             global_end = float(shot["time_range"]["end_sec"])
             local_start = global_start - segment_start
             local_end = global_end - segment_start
-            operation = f"Shot visual annotation {shot['shot_id']}"
-            cached_annotation = context.get_successful_call_result(operation)
-            if cached_annotation is not None:
-                annotation = _validate_shot_annotation(
-                    cached_annotation,
+            sampled_times = [
+                round(
+                    global_start
+                    + (global_end - global_start) * (index + 0.5) / sample_frames,
+                    6,
+                )
+                for index in range(sample_frames)
+            ]
+            package = prompt_registry.build(
+                PromptStage.ANALYSER,
+                PromptTask.SHOT_ANNOTATION,
+                ShotAnnotationDetails(
+                    segment=segment,
+                    shot=shot,
+                    sampled_frame_times_sec=sampled_times,
+                ),
+            )
+
+            def validate_annotation(parsed: dict[str, Any]) -> dict[str, Any]:
+                return _validate_shot_annotation(
+                    parsed,
                     shot["shot_id"],
                     bool(shot["dialogue"]),
                 )
-                sampled_times = [
-                    round(
-                        global_start
-                        + (global_end - global_start) * (index + 0.5) / sample_frames,
-                        6,
-                    )
-                    for index in range(sample_frames)
-                ]
+
+            cached_annotation = context.get_successful_prompt_result(
+                package,
+                validate_business=validate_annotation,
+            )
+            if cached_annotation is not None:
+                annotation = cached_annotation
             else:
                 images, sampled_times = _sample_shot_frames(
                     clip_path,
@@ -954,17 +881,10 @@ def _annotate_segments(
                     global_start,
                     sample_frames,
                 )
-                annotation = context.call_json(
-                    operation=operation,
-                    prompt=_shot_prompt(segment, shot, sampled_times),
+                annotation = context.call_prompt(
+                    package=package,
                     config=config,
-                    context_keys=["source_metadata", "full_dialogue"],
-                    system_prompt=SHOT_ANNOTATOR_SYSTEM,
-                    validate=lambda parsed, shot=shot: _validate_shot_annotation(
-                        parsed,
-                        shot["shot_id"],
-                        bool(shot["dialogue"]),
-                    ),
+                    validate_business=validate_annotation,
                     image_data_urls=images,
                     image_labels=[
                         f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
@@ -1002,7 +922,12 @@ def _annotate_segments(
                     **{
                         key: value
                         for key, value in annotation.items()
-                        if key not in {"scene", "characters"}
+                        if key
+                        not in {
+                            "shot_id",
+                            "scene",
+                            "characters",
+                        }
                     },
                 )
             )
@@ -1076,10 +1001,14 @@ def _annotate_segments(
         return description
 
     worker_count = max(1, min(config.max_concurrency, len(segments)))
-    logger.info(
-        "Annotating {} Segments with {} workers; Shots remain serial within each Segment",
-        len(segments),
-        worker_count,
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.progress",
+        "Segment annotation concurrency configured",
+        segments=len(segments),
+        workers=worker_count,
+        shots_within_segment="serial",
     )
     try:
         with ThreadPoolExecutor(
@@ -1109,7 +1038,14 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     ]
     if not required or any(not path.is_file() for path in required):
         return None
-    logger.info("Reusing video material analysis: {}", material_directory)
+    log_event(
+        "INFO",
+        "analyser",
+        "cache.hit",
+        "Complete video material analysis found",
+        artifact="video_material_analysis",
+        material_directory=material_directory,
+    )
     return MaterialAnalysisResult(
         material_directory=material_directory,
         source_srt=material_directory / "source.srt",
@@ -1148,6 +1084,14 @@ def analyse_video_material(
     cached = _cache_result(material_directory)
     if cached is not None:
         return cached
+    log_event(
+        "INFO",
+        "analyser",
+        "cache.miss",
+        "Complete video material analysis was not found",
+        artifact="video_material_analysis",
+        material_directory=material_directory,
+    )
     material_directory.mkdir(parents=True, exist_ok=True)
     history_path = material_directory / "analysis_history.json"
     context = WorkflowContext(history_path)
@@ -1166,8 +1110,15 @@ def analyse_video_material(
         )
     cached_source_metadata = context.get_artifact("source_metadata")
     if shots is None:
-        logger.info(
-            "Analysis stage 1/5: detecting full-video Shot boundaries with PySceneDetect"
+        stage_started = time.monotonic()
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.start",
+            "Full-video Shot detection started",
+            stage="shot_detection",
+            stage_index=1,
+            stage_count=5,
         )
         shots, fps = _detect_full_video_shots(
             video_path,
@@ -1176,11 +1127,27 @@ def analyse_video_material(
         )
         _write_json_checkpoint(shots_path, shots)
         context.set_artifact("shot_boundaries", shots)
-        logger.info("Analysis stage 1/5 complete: {} Shots", len(shots))
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.complete",
+            "Full-video Shot detection completed",
+            stage="shot_detection",
+            stage_index=1,
+            stage_count=5,
+            shots=len(shots),
+            elapsed_sec=time.monotonic() - stage_started,
+        )
     else:
-        logger.info(
-            "Reusing analysis stage 1/5 Shot checkpoint: {} Shots",
-            len(shots),
+        log_event(
+            "INFO",
+            "analyser",
+            "checkpoint.resume",
+            "Shot-boundary checkpoint resumed",
+            stage="shot_detection",
+            stage_index=1,
+            stage_count=5,
+            shots=len(shots),
         )
         if not shots_path.is_file():
             _write_json_checkpoint(shots_path, shots)
@@ -1208,7 +1175,16 @@ def analyse_video_material(
     if cached_source_metadata != source_metadata:
         context.set_artifact("source_metadata", source_metadata)
 
-    logger.info("Analysis stage 2/5: preparing subtitles and dialogue")
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.start",
+        "Subtitle and dialogue preparation started",
+        stage="dialogue_preparation",
+        stage_index=2,
+        stage_count=5,
+    )
     source_srt = prepare_subtitles(
         video_path,
         material_directory,
@@ -1223,10 +1199,27 @@ def analyse_video_material(
             llm_config,
             context=context,
         )
-        logger.info("Analysis stage 2/5 complete")
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.complete",
+            "Subtitle and dialogue preparation completed",
+            stage="dialogue_preparation",
+            stage_index=2,
+            stage_count=5,
+            elapsed_sec=time.monotonic() - stage_started,
+        )
     else:
         processed_subtitle, dialogues_json = dialogue_checkpoint
-        logger.info("Reusing analysis stage 2/5 dialogue checkpoint")
+        log_event(
+            "INFO",
+            "analyser",
+            "checkpoint.resume",
+            "Dialogue checkpoint resumed",
+            stage="dialogue_preparation",
+            stage_index=2,
+            stage_count=5,
+        )
     dialogue_document = json.loads(dialogues_json.read_text(encoding="utf-8"))
     dialogue = _dialogue_with_shot_membership(
         _compact_dialogue(dialogue_document),
@@ -1246,32 +1239,97 @@ def analyse_video_material(
             shots,
         )
     if segments is None:
-        logger.info("Analysis stage 3/5: grouping dialogue and building Segments")
+        stage_started = time.monotonic()
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.start",
+            "Dialogue grouping and Segment construction started",
+            stage="segment_construction",
+            stage_index=3,
+            stage_count=5,
+        )
         dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
         segments = _raw_segments(shots, dialogue, dialogue_groups)
         _write_json_checkpoint(segment_boundaries_path, segments)
         context.set_artifact("segment_boundaries", segments)
-        logger.info("Analysis stage 3/5 complete: {} Segments", len(segments))
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.complete",
+            "Dialogue grouping and Segment construction completed",
+            stage="segment_construction",
+            stage_index=3,
+            stage_count=5,
+            segments=len(segments),
+            elapsed_sec=time.monotonic() - stage_started,
+        )
     else:
-        logger.info(
-            "Reusing analysis stage 3/5 Segment checkpoint: {} Segments",
-            len(segments),
+        log_event(
+            "INFO",
+            "analyser",
+            "checkpoint.resume",
+            "Segment-boundary checkpoint resumed",
+            stage="segment_construction",
+            stage_index=3,
+            stage_count=5,
+            segments=len(segments),
         )
         if not segment_boundaries_path.is_file():
             _write_json_checkpoint(segment_boundaries_path, segments)
 
-    logger.info("Analysis stage 4/5: preparing reusable Segment clips")
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.start",
+        "Reusable Segment clip preparation started",
+        stage="segment_clip_preparation",
+        stage_index=4,
+        stage_count=5,
+        segments=len(segments),
+    )
     _split_segment_clips(video_path, segments, material_directory)
-    logger.info("Analysis stage 4/5 complete")
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.complete",
+        "Reusable Segment clip preparation completed",
+        stage="segment_clip_preparation",
+        stage_index=4,
+        stage_count=5,
+        segments=len(segments),
+        elapsed_sec=time.monotonic() - stage_started,
+    )
 
-    logger.info("Analysis stage 5/5: annotating Shots")
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.start",
+        "Shot annotation started",
+        stage="shot_annotation",
+        stage_index=5,
+        stage_count=5,
+        segments=len(segments),
+    )
     annotated_segments = _annotate_segments(
         segments,
         context,
         vlm_config,
         annotation_config.shot_sample_frames,
     )
-    logger.info("Analysis stage 5/5 complete")
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.complete",
+        "Shot annotation completed",
+        stage="shot_annotation",
+        stage_index=5,
+        stage_count=5,
+        segments=len(annotated_segments),
+        elapsed_sec=time.monotonic() - stage_started,
+    )
     video_description = VideoDescription(
         schema_version=ANALYSIS_SCHEMA_VERSION,
         source=SourceVideoMetadata(**source_metadata),

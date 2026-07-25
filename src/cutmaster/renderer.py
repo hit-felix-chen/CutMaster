@@ -7,9 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from cutmaster.models import RenderConfig
+from cutmaster.observability import log_event
 from cutmaster.progress import progress_bar
 from cutmaster.timecode import parse_range
 
@@ -19,7 +18,14 @@ class RenderError(RuntimeError):
 
 
 def _run(command: list[str]) -> None:
-    logger.debug("Running: {}", " ".join(command))
+    log_event(
+        "DEBUG",
+        "renderer",
+        "stage.progress",
+        "Media command started",
+        executable=command[0],
+        arguments=len(command) - 1,
+    )
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
@@ -186,7 +192,17 @@ def render_montage(
         raise RenderError("Frame-exact rendering requires muted source audio; set original_volume = 0")
     source_meta = probe_media(video_path)
     encoder = select_encoder(config.encoder)
-    logger.info("Rendering {} clips with encoder {}", len(script), encoder)
+    log_event(
+        "INFO",
+        "renderer",
+        "stage.progress",
+        "Clip rendering configured",
+        clips=len(script),
+        encoder=encoder,
+        fps=config.fps,
+        width=config.width,
+        height=config.height,
+    )
     clips_dir = output_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     clip_paths: list[Path] = []
@@ -210,13 +226,16 @@ def render_montage(
                     f"{source_meta['duration']:.3f}s"
                 )
             clip_path = clips_dir / f"clip_{index:04d}.mp4"
-            logger.info(
-                "Clip {}/{}: {:.3f}s -> {:.3f}s ({} frames)",
-                index,
-                len(script),
-                start,
-                end,
-                frame_count,
+            log_event(
+                "DEBUG",
+                "renderer",
+                "stage.progress",
+                "Rendering source clip",
+                clip=index,
+                clips=len(script),
+                source_start_sec=start,
+                source_end_sec=end,
+                frames=frame_count,
             )
             render_clip(
                 video_path,

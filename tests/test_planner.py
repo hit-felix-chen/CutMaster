@@ -288,26 +288,26 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
         def __init__(self) -> None:
             self.artifacts = {}
 
-        def call_json(self, **kwargs):
+        def call_prompt(self, **kwargs):
             with worker_lock:
                 worker_ids.add(threading.get_ident())
             barrier.wait(timeout=2)
             previous_id = kwargs["image_labels"][0].split()[0]
             current_id = kwargs["image_labels"][1].split()[0]
-            return kwargs["validate"](
-                {
-                    "items": [
-                        {
-                            "previous_candidate_id": previous_id,
-                            "current_candidate_id": current_id,
-                            "visual_continuity": 0.8,
-                            "emotional_continuity": 0.7,
-                            "narrative_bridge": 0.6,
-                            "evidence": "coherent hard cut",
-                        }
-                    ]
-                }
-            )
+            parsed = {
+                "items": [
+                    {
+                        "previous_candidate_id": previous_id,
+                        "current_candidate_id": current_id,
+                        "visual_continuity": 0.8,
+                        "emotional_continuity": 0.7,
+                        "narrative_bridge": 0.6,
+                        "evidence": "coherent hard cut",
+                    }
+                ]
+            }
+            kwargs["package"].response_contract.validate_structure(parsed)
+            return kwargs["validate_business"](parsed)
 
         def set_artifact(self, key, value) -> None:
             self.artifacts[key] = value
@@ -512,7 +512,7 @@ def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> 
             "reason": "safe improvement",
         },
     ]
-    monkeypatch.setattr(context, "call_json", lambda **_kwargs: proposed)
+    monkeypatch.setattr(context, "call_prompt", lambda **_kwargs: proposed)
     pairwise_scores = {
         _pair_key("slot_01_candidate_01", "slot_02_candidate_01"): {
             "pairwise_score": 0.5
@@ -585,7 +585,7 @@ def test_review_rejects_patch_that_degrades_precomputed_hard_cut(
     context = WorkflowContext(tmp_path / "history.json")
     monkeypatch.setattr(
         context,
-        "call_json",
+        "call_prompt",
         lambda **_kwargs: [
             {
                 "operation": "replace",

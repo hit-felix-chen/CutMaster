@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
-
-from loguru import logger
 
 from cutmaster.config import load_config
 from cutmaster.models import RunRequest
+from cutmaster.observability import configure_logging, error_summary, log_event
 from cutmaster.orchestrator import run_orchestrator
 
 
@@ -40,9 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "run":
         return 2
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    logger.remove()
-    logger.add(sys.stderr, level="INFO")
-    logger.add(args.output_dir / "cutmaster.log", level="DEBUG", encoding="utf-8")
+    configure_logging(args.output_dir / "cutmaster.log")
     config = load_config(args.config.resolve())
     request = RunRequest(
         video_path=args.video.resolve(),
@@ -58,7 +54,18 @@ def main(argv: list[str] | None = None) -> int:
         max_clip_duration_sec=args.max_clip_duration,
         overwrite=args.overwrite,
     )
-    result = run_orchestrator(request, config)
+    try:
+        result = run_orchestrator(request, config)
+    except Exception as exc:
+        log_event(
+            "ERROR",
+            "orchestrator",
+            "workflow.fail",
+            "CutMaster workflow failed",
+            error_type=type(exc).__name__,
+            reason=error_summary(exc),
+        )
+        raise
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0
 

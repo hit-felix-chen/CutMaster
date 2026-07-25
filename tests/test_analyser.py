@@ -13,9 +13,21 @@ from cutmaster.models import (
 from cutmaster.analyser import (
     _annotate_segments,
     _detect_full_video_shots,
+    _group_dialogue,
     _raw_segments,
     _validate_dialogue_segments,
+    _validate_shot_annotation,
     analyse_video_material,
+)
+from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.analyser import ShotAnnotationDetails
+from cutmaster.video_description import (
+    CameraAngle,
+    CameraMovement,
+    InteriorExterior,
+    SegmentContentType,
+    ShotScale,
+    TimeOfDay,
 )
 
 
@@ -62,6 +74,130 @@ def _group(index: int, dialogue_id: int, shot_index: int):
         "first_shot_index": shot_index,
         "last_shot_index": shot_index,
     }
+
+
+def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
+    shot = _shots(1)[0]
+    shot["dialogue"] = []
+    segment = {
+        "segment_id": "segment_0001",
+        "has_dialogue": False,
+        "speech_mode": "none",
+        "dialogue_context": None,
+    }
+
+    package = prompt_registry.build(
+        PromptStage.ANALYSER,
+        PromptTask.SHOT_ANNOTATION,
+        ShotAnnotationDetails(
+            segment=segment,
+            shot=shot,
+            sampled_frame_times_sec=[0.1, 0.3, 0.5, 0.7, 0.9],
+        ),
+    )
+    properties = package.response_contract.schema["properties"]
+
+    assert properties["content_type"]["enum"] == [
+        SegmentContentType.LANDSCAPE.value,
+        SegmentContentType.EMOTIONAL.value,
+        SegmentContentType.PANTOMIME.value,
+    ]
+    assert properties["scene"]["properties"]["interior_exterior"]["enum"] == [
+        value.value for value in InteriorExterior
+    ]
+    assert properties["scene"]["properties"]["time_of_day"]["enum"] == [
+        value.value for value in TimeOfDay
+    ]
+    assert properties["characters"]["items"]["properties"]["identity_likert"][
+        "enum"
+    ] == [1, 2, 3, 4, 5]
+    assert properties["shot_scale"]["enum"] == [
+        value.value for value in ShotScale
+    ]
+    assert properties["camera_angle"]["enum"] == [
+        value.value for value in CameraAngle
+    ]
+    assert properties["camera_movement"]["enum"] == [
+        value.value for value in CameraMovement
+    ]
+
+    prompt = package.user_prompt
+    for allowed_value in (
+        *InteriorExterior,
+        *TimeOfDay,
+        *ShotScale,
+        *CameraAngle,
+        *CameraMovement,
+    ):
+        assert f'"{allowed_value.value}"' in prompt
+    assert "medium_close_up is not an allowed value" in prompt
+
+
+def test_dialogue_prompt_contract_lists_every_allowed_speech_mode() -> None:
+    captured = {}
+
+    class Context:
+        def call_prompt(self, **kwargs):
+            package = kwargs["package"]
+            captured["prompt"] = package.user_prompt
+            parsed = {
+                "segments": [
+                    {
+                        "first_dialogue_id": 1,
+                        "last_dialogue_id": 1,
+                        "speech_mode": "monologue",
+                        "topic": "introduction",
+                        "summary": "The speaker introduces the topic",
+                    }
+                ]
+            }
+            package.response_contract.validate_structure(parsed)
+            return kwargs["validate_business"](parsed)
+
+    _group_dialogue(
+        Context(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        [_dialogue(1, 0.1, 0.2)],
+        _shots(1),
+    )
+
+    assert '"dialogue"' in captured["prompt"]
+    assert '"monologue"' in captured["prompt"]
+
+
+def test_shot_annotation_normalization_preserves_shot_id() -> None:
+    normalized = _validate_shot_annotation(
+        {
+            "shot_id": "shot_00001",
+            "visual_description": "A woman stands beside a window",
+            "dominant_action": "Standing",
+            "content_type": "emotional",
+            "narrative_function": "Shows a reflective pause",
+            "emotional_tone": "pensive",
+            "emotional_intensity": 0.4,
+            "scene": {
+                "interior_exterior": "interior",
+                "location": "apartment room",
+                "time_of_day": "day",
+                "environment_lighting": ["window light"],
+                "color_palette": ["blue", "beige"],
+                "color_tone": "muted",
+                "set_details": ["window"],
+                "weather": "",
+                "atmosphere": "quiet",
+            },
+            "characters": [],
+            "shot_scale": "medium",
+            "camera_angle": "eye_level",
+            "camera_movement": "static",
+            "composition": "subject beside the window",
+            "visual_evidence": "The same framing appears in all five frames",
+        },
+        "shot_00001",
+        False,
+    )
+
+    assert normalized["shot_id"] == "shot_00001"
 
 
 def test_full_video_shot_detection_builds_complete_boundary_partition(monkeypatch) -> None:
@@ -256,44 +392,44 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     lock = threading.Lock()
 
     class Context:
-        def get_successful_call_result(self, _operation):
+        def get_successful_prompt_result(self, _package, **_kwargs):
             return None
 
-        def call_json(self, **kwargs):
-            shot_id = kwargs["operation"].split()[-1]
+        def call_prompt(self, **kwargs):
+            shot_id = kwargs["package"].operation.split()[-1]
             segment_id, shot_index = shot_id.removeprefix("shot_").split("_")
             with lock:
                 call_order[segment_id].append(shot_index)
             if shot_index == "0":
                 barrier.wait(timeout=2)
-            return kwargs["validate"](
-                {
-                    "shot_id": shot_id,
-                    "visual_description": "A visible landscape",
-                    "dominant_action": "Clouds move",
-                    "content_type": "landscape",
-                    "narrative_function": "Establishes the location",
-                    "emotional_tone": "calm",
-                    "emotional_intensity": 0.2,
-                    "scene": {
-                        "interior_exterior": "exterior",
-                        "location": "open hillside",
-                        "time_of_day": "day",
-                        "environment_lighting": ["sunlight"],
-                        "color_palette": ["green", "blue"],
-                        "color_tone": "natural",
-                        "set_details": ["grass", "sky"],
-                        "weather": "clear",
-                        "atmosphere": "quiet",
-                    },
-                    "characters": [],
-                    "shot_scale": "wide",
-                    "camera_angle": "eye_level",
-                    "camera_movement": "static",
-                    "composition": "horizon across the upper third",
-                    "visual_evidence": "five frames show the same hillside",
-                }
-            )
+            parsed = {
+                "shot_id": shot_id,
+                "visual_description": "A visible landscape",
+                "dominant_action": "Clouds move",
+                "content_type": "landscape",
+                "narrative_function": "Establishes the location",
+                "emotional_tone": "calm",
+                "emotional_intensity": 0.2,
+                "scene": {
+                    "interior_exterior": "exterior",
+                    "location": "open hillside",
+                    "time_of_day": "day",
+                    "environment_lighting": ["sunlight"],
+                    "color_palette": ["green", "blue"],
+                    "color_tone": "natural",
+                    "set_details": ["grass", "sky"],
+                    "weather": "clear",
+                    "atmosphere": "quiet",
+                },
+                "characters": [],
+                "shot_scale": "wide",
+                "camera_angle": "eye_level",
+                "camera_movement": "static",
+                "composition": "horizon across the upper third",
+                "visual_evidence": "five frames show the same hillside",
+            }
+            kwargs["package"].response_contract.validate_structure(parsed)
+            return kwargs["validate_business"](parsed)
 
     descriptions = _annotate_segments(
         segments,

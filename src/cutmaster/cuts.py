@@ -8,11 +8,11 @@ from typing import Any
 
 import cv2
 import numpy as np
-from loguru import logger
 from scenedetect import open_video
 from scenedetect.detectors import AdaptiveDetector
 
 from cutmaster.models import ShotDetectionConfig, SourceWindowOptimizationConfig
+from cutmaster.observability import log_event
 from cutmaster.progress import progress_bar
 from cutmaster.timecode import format_range, parse_range
 
@@ -367,20 +367,28 @@ def optimize_script_source_windows(
                 progress.update()
                 metadata = optimized[index]["cut_optimization"]
                 if metadata["fallback_level"] > 0:
-                    logger.warning(
-                        "Clip {}/{} relaxed internal-cut edge distance: {:.3f}s -> {:.3f}s (level {})",
-                        index + 1,
-                        len(items),
-                        optimization_config.min_boundary_distance_sec,
-                        metadata["effective_min_boundary_distance_sec"],
-                        metadata["fallback_level"],
+                    log_event(
+                        "WARNING",
+                        "source_window",
+                        "fallback.apply",
+                        "Internal-cut edge distance was relaxed",
+                        clip=index + 1,
+                        clips=len(items),
+                        original_distance_sec=optimization_config.min_boundary_distance_sec,
+                        effective_distance_sec=metadata[
+                            "effective_min_boundary_distance_sec"
+                        ],
+                        fallback_level=metadata["fallback_level"],
                     )
-                logger.info(
-                    "Optimized clip {}/{}: shift={:+.3f}s, internal_cuts={}, worst_distance={:.3f}s",
-                    index + 1,
-                    len(items),
-                    metadata["source_shift_sec"],
-                    metadata["num_internal_cuts"],
-                    metadata["max_beat_distance_sec"],
+                log_event(
+                    "DEBUG",
+                    "source_window",
+                    "stage.progress",
+                    "Source window optimized",
+                    clip=index + 1,
+                    clips=len(items),
+                    source_shift_sec=metadata["source_shift_sec"],
+                    internal_cuts=metadata["num_internal_cuts"],
+                    max_beat_distance_sec=metadata["max_beat_distance_sec"],
                 )
     return [item for item in optimized if item is not None]
