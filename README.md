@@ -101,7 +101,7 @@ ceil(target_duration / target_shot_length)
 
 ### 候选检索、路径选择与补丁
 
-候选检索模型根据 Slot 描述和 `video_description.json`，为每个 Slot 返回若干原片区间。每个候选必须满足：
+候选检索模型根据 Slot 描述和 `video_description.json`，为每个 Slot 返回若干原片区间。同一轮中，每次 LLM 请求只包含一个 Slot，多个 Slot 请求按照 `llm.max_concurrency` 并发执行；一个 Slot 校验失败只会让该 Slot 在下一轮扩大 Segment 检索范围，不会回滚其他 Slot。候选 VLM 核验同样按 Slot 独立并发，并由 `vlm.max_concurrency` 控制。每个候选必须满足：
 
 - 由一个或多个连续 Shot 构成；
 - 起止时间严格落在首尾 Shot 边界；
@@ -244,7 +244,6 @@ OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解
 | 配置项 | 含义 | 示例配置默认值 |
 | --- | --- | --- |
 | `candidates_per_slot` | 每个 Slot 最终保留的原片候选数 | `3` |
-| `retrieval_batch_size` | 单次候选检索请求包含的 Slot 数 | `5` |
 | `retrieval_max_rounds` | 主体过滤后候选不足时的最大检索轮数 | `3` |
 | `visual_sample_frames` | 每个候选用于视觉核验的均匀采样帧数 | `4` |
 | `protagonist_visibility_threshold` | 必须出镜主体的最低归一化视觉置信度 | `0.55` |

@@ -53,7 +53,6 @@ replan_max_rounds = 3
 # Stage 4: structured candidate retrieval and visual validation
 [candidate_retrieval]
 candidates_per_slot = 3
-retrieval_batch_size = 5
 retrieval_max_rounds = 3
 visual_sample_frames = 4
 protagonist_visibility_threshold = 0.55

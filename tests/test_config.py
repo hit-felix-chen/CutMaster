@@ -45,7 +45,6 @@ replan_max_rounds = 2
 
 [candidate_retrieval]
 candidates_per_slot = 3
-retrieval_batch_size = 4
 retrieval_max_rounds = 2
 visual_sample_frames = 4
 protagonist_visibility_threshold = 0.6
@@ -86,7 +85,6 @@ threads = 2
     assert config.shot_detection.adaptive_threshold == 2.5
     assert config.shot_annotation.shot_sample_frames == 5
     assert config.slot_planning.replan_max_rounds == 2
-    assert config.candidate_retrieval.retrieval_batch_size == 4
     assert config.beam_search.beam_width == 6
     assert config.script_review.review_rounds == 1
     assert config.source_window_optimization.max_workers == 3

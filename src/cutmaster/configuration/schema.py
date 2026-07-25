@@ -64,7 +64,6 @@ class SlotPlanningConfig:
 @dataclass(frozen=True)
 class CandidateRetrievalConfig:
     candidates_per_slot: int = 3
-    retrieval_batch_size: int = 5
     retrieval_max_rounds: int = 3
     motion_sample_fps: float = 2.0
     motion_workers: int = 4

@@ -156,6 +156,15 @@ def _validate_visual_grounding(
             raise ValueError(
                 f"required_subject_visibility for {candidate_id} must be an integer from 1 to 5"
             )
+        relevance_likert = float(raw["visual_slot_relevance"])
+        if (
+            not relevance_likert.is_integer()
+            or relevance_likert < 1
+            or relevance_likert > 5
+        ):
+            raise ValueError(
+                f"visual_slot_relevance for {candidate_id} must be an integer from 1 to 5"
+            )
         result[candidate_id] = {
             "description": description,
             "visible_subjects": [
@@ -164,9 +173,7 @@ def _validate_visual_grounding(
                 if str(value).strip()
             ],
             "protagonist_visibility_likert": int(visibility_likert),
-            "visual_slot_relevance": max(
-                0.0, min(1.0, float(raw["visual_slot_relevance"]))
-            ),
+            "visual_slot_relevance_likert": int(relevance_likert),
             "visual_evidence": str(raw["visual_evidence"]).strip(),
         }
     if set(result) != expected:
@@ -182,21 +189,27 @@ def add_visual_features(
     *,
     sample_frames: int,
     operation: str,
+    show_progress: bool = True,
 ) -> None:
     candidates = [candidate for slot in slots for candidate in pool[slot["slot_id"]]]
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
-        candidate_image_data_urls = list(
-            progress_iter(
-                executor.map(
-                    lambda candidate: _contact_sheet_data_url(
-                        video_path, candidate, sample_frames
-                    ),
-                    candidates,
-                ),
-                total=len(candidates),
-                description="Candidate contact sheets",
-                unit="candidate",
+        image_results = executor.map(
+            lambda candidate: _contact_sheet_data_url(
+                video_path, candidate, sample_frames
+            ),
+            candidates,
+        )
+        candidate_image_data_urls = (
+            list(
+                progress_iter(
+                    image_results,
+                    total=len(candidates),
+                    description="Candidate contact sheets",
+                    unit="candidate",
+                )
             )
+            if show_progress
+            else list(image_results)
         )
     slots_by_id = {slot["slot_id"]: slot for slot in slots}
     def candidate_spec(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -287,13 +300,16 @@ def add_visual_features(
                 )
             raise
 
-    with progress_bar(
-        total=len(candidates),
-        description="Candidate VLM validation",
-        unit="candidate",
-    ) as progress:
+    if show_progress:
+        with progress_bar(
+            total=len(candidates),
+            description="Candidate VLM validation",
+            unit="candidate",
+        ) as progress:
+            grounded = score_subset(candidates, candidate_image_data_urls)
+            progress.update(len(candidates))
+    else:
         grounded = score_subset(candidates, candidate_image_data_urls)
-        progress.update(len(candidates))
     for candidate in candidates:
         candidate.update(grounded[candidate["candidate_id"]])
 
@@ -353,113 +369,173 @@ def retrieve_candidates(
         ]
         if not pending:
             break
-        batches = [
-            pending[index : index + retrieval_config.retrieval_batch_size]
-            for index in range(0, len(pending), retrieval_config.retrieval_batch_size)
-        ]
-        for batch_index, batch in enumerate(batches, 1):
-            source_segments_by_slot = _retrieval_segment_context(
-                video_description,
-                batch,
-                round_index,
-            )
-            excluded = {
-                slot["slot_id"]: [
-                    item["timestamp"] for item in pool[slot["slot_id"]]
-                ]
-                + [
-                    item["timestamp"]
-                    for item in rejected
-                    if item["slot_id"] == slot["slot_id"]
-                ]
-                for slot in batch
-            }
+        source_segments_by_slot = _retrieval_segment_context(
+            video_description,
+            pending,
+            round_index,
+        )
+        excluded = {
+            slot["slot_id"]: [
+                item["timestamp"] for item in pool[slot["slot_id"]]
+            ]
+            + [
+                item["timestamp"]
+                for item in rejected
+                if item["slot_id"] == slot["slot_id"]
+            ]
+            for slot in pending
+        }
+
+        def retrieve_slot(
+            slot: dict[str, Any],
+        ) -> tuple[str, dict[str, list[dict[str, Any]]] | None]:
+            slot_id = slot["slot_id"]
+            slot_segments = {slot_id: source_segments_by_slot[slot_id]}
             package = prompt_registry.build(
                 PromptStage.PLANNER,
                 PromptTask.CANDIDATE_RETRIEVAL,
                 CandidateRetrievalDetails(
-                    operation=(
-                    f"Candidate retrieval round {round_index} "
-                    f"batch {batch_index}/{len(batches)}"
-                    ),
+                    operation=f"Candidate retrieval round {round_index} slot {slot_id}",
                     candidates_per_slot=retrieval_config.candidates_per_slot,
-                    slots=batch,
-                    excluded_ranges=excluded,
-                    source_segments_by_slot=source_segments_by_slot,
+                    slots=[slot],
+                    excluded_ranges={slot_id: excluded[slot_id]},
+                    source_segments_by_slot=slot_segments,
                 ),
             )
-            batch_pool = context.call_prompt(
-                package=package,
-                config=config,
-                validate_business=lambda parsed, batch=batch: _validate_candidates(
-                    parsed,
-                    batch,
-                    source_segments_by_slot,
-                    retrieval_config.candidates_per_slot,
-                ),
+            try:
+                slot_pool = context.call_prompt(
+                    package=package,
+                    config=config,
+                    validate_business=lambda parsed: _validate_candidates(
+                        parsed,
+                        [slot],
+                        slot_segments,
+                        retrieval_config.candidates_per_slot,
+                    ),
+                )
+            except Exception as exc:
+                log_event(
+                    "WARNING",
+                    "planner.candidate",
+                    "validation.reject",
+                    "Slot candidate retrieval failed; expanding in the next round",
+                    round=round_index,
+                    slot_id=slot_id,
+                    error_type=type(exc).__name__,
+                    reason=error_summary(exc),
+                )
+                return slot_id, None
+            for item_index, candidate in enumerate(slot_pool[slot_id], 1):
+                candidate["candidate_id"] = (
+                    f"{slot_id}_round_{round_index:02d}_candidate_{item_index:02d}"
+                )
+            return slot_id, slot_pool
+
+        llm_workers = max(1, min(config.max_concurrency, len(pending)))
+        log_event(
+            "INFO",
+            "planner.candidate",
+            "stage.progress",
+            "Per-Slot candidate retrieval concurrency configured",
+            round=round_index,
+            slots=len(pending),
+            workers=llm_workers,
+        )
+        with ThreadPoolExecutor(
+            max_workers=llm_workers,
+            thread_name_prefix="candidate-llm",
+        ) as executor:
+            slot_results = list(
+                progress_iter(
+                    executor.map(retrieve_slot, pending),
+                    total=len(pending),
+                    description=f"Candidate LLM retrieval round {round_index}",
+                    unit="slot",
+                )
             )
-            for slot in batch:
-                slot_id = slot["slot_id"]
-                for item_index, candidate in enumerate(batch_pool[slot_id], 1):
-                    candidate["candidate_id"] = (
-                        f"{slot_id}_round_{round_index:02d}_candidate_{item_index:02d}"
-                    )
+
+        round_pool = {
+            slot_id: slot_pool[slot_id]
+            for slot_id, slot_pool in slot_results
+            if slot_pool is not None
+        }
+        successful_slots = [
+            slot for slot in pending if slot["slot_id"] in round_pool
+        ]
+        if not successful_slots:
+            continue
+
+        def validate_slot_visuals(slot: dict[str, Any]) -> None:
+            slot_id = slot["slot_id"]
             add_visual_features(
                 video_path,
-                batch,
-                batch_pool,
+                [slot],
+                {slot_id: round_pool[slot_id]},
                 vlm_config,
                 context,
                 sample_frames=retrieval_config.visual_sample_frames,
                 operation=(
-                    f"Visual candidate validation round {round_index} "
-                    f"batch {batch_index}/{len(batches)}"
+                    f"Visual candidate validation round {round_index} slot {slot_id}"
                 ),
+                show_progress=False,
             )
-            for slot in batch:
-                slot_id = slot["slot_id"]
-                requires_subject = bool(slot.get("required_visible_subjects"))
-                for candidate in batch_pool[slot_id]:
-                    visibility = _normalize_likert_score(
-                        candidate["protagonist_visibility_likert"]
+
+        vlm_workers = max(1, min(vlm_config.max_concurrency, len(successful_slots)))
+        with ThreadPoolExecutor(
+            max_workers=vlm_workers,
+            thread_name_prefix="candidate-vlm",
+        ) as executor:
+            list(
+                progress_iter(
+                    executor.map(validate_slot_visuals, successful_slots),
+                    total=len(successful_slots),
+                    description=f"Candidate VLM validation round {round_index}",
+                    unit="slot",
+                )
+            )
+
+        for slot in successful_slots:
+            slot_id = slot["slot_id"]
+            requires_subject = bool(slot.get("required_visible_subjects"))
+            for candidate in round_pool[slot_id]:
+                visibility = _normalize_likert_score(
+                    candidate["protagonist_visibility_likert"]
+                )
+                duplicate = any(
+                    candidate["timestamp"] == existing["timestamp"]
+                    for existing in pool[slot_id]
+                )
+                visibility_ok = (
+                    not requires_subject
+                    or visibility >= retrieval_config.protagonist_visibility_threshold
+                )
+                if duplicate or not visibility_ok:
+                    if (
+                        not duplicate
+                        and requires_subject
+                        and visibility
+                        >= retrieval_config.protagonist_visibility_fallback_threshold
+                    ):
+                        borderline[slot_id].append(candidate)
+                    rejected.append(
+                        {
+                            "slot_id": slot_id,
+                            "timestamp": candidate["timestamp"],
+                            "candidate_id": candidate["candidate_id"],
+                            "reason": (
+                                "duplicate_range"
+                                if duplicate
+                                else "required_subject_not_visually_confirmed"
+                            ),
+                            "protagonist_visibility_likert": candidate[
+                                "protagonist_visibility_likert"
+                            ],
+                            "protagonist_visibility": visibility,
+                            "visual_evidence": candidate["visual_evidence"],
+                        }
                     )
-                    duplicate = any(
-                        candidate["timestamp"] == existing["timestamp"]
-                        for existing in pool[slot_id]
-                    )
-                    visibility_ok = (
-                        not requires_subject
-                        or visibility >= retrieval_config.protagonist_visibility_threshold
-                    )
-                    if duplicate or not visibility_ok:
-                        if (
-                            not duplicate
-                            and requires_subject
-                            and visibility
-                            >= retrieval_config.protagonist_visibility_fallback_threshold
-                        ):
-                            borderline[slot_id].append(candidate)
-                        rejected.append(
-                            {
-                                "slot_id": slot_id,
-                                "timestamp": candidate["timestamp"],
-                                "candidate_id": candidate["candidate_id"],
-                                "reason": (
-                                    "duplicate_range"
-                                    if duplicate
-                                    else "required_subject_not_visually_confirmed"
-                                ),
-                                "protagonist_visibility_likert": candidate[
-                                    "protagonist_visibility_likert"
-                                ],
-                                "protagonist_visibility": visibility,
-                                "visual_evidence": candidate["visual_evidence"],
-                            }
-                        )
-                        continue
-                    pool[slot_id].append(candidate)
-                if len(pool[slot_id]) >= retrieval_config.candidates_per_slot:
-                        break
+                    continue
+                pool[slot_id].append(candidate)
     fallbacks: list[dict[str, Any]] = []
     for slot_id, candidates in pool.items():
         if len(candidates) >= retrieval_config.candidates_per_slot:
@@ -468,7 +544,7 @@ def retrieve_candidates(
             borderline[slot_id],
             key=lambda item: (
                 int(item["protagonist_visibility_likert"]),
-                float(item["visual_slot_relevance"]),
+                int(item["visual_slot_relevance_likert"]),
                 float(item["semantic_relevance"]),
             ),
             reverse=True,

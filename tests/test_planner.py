@@ -1,12 +1,19 @@
+import json
+import re
 import threading
 
 import pytest
 
-from cutmaster.configuration.schema import LLMConfig, VLMConfig
+from cutmaster.configuration.schema import (
+    CandidateRetrievalConfig,
+    LLMConfig,
+    VLMConfig,
+)
 from cutmaster.planner.candidate_retrieval import (
     _retrieval_segment_context,
     _validate_candidates,
     _validate_visual_grounding,
+    retrieve_candidates,
 )
 from cutmaster.planner.script_review import review_and_patch
 from cutmaster.planner.sequence_selection import (
@@ -191,7 +198,7 @@ def test_beam_search_uses_precomputed_vlm_pairwise_scores() -> None:
     shared = {
         "description": "focal subject",
         "semantic_relevance": 1.0,
-        "visual_slot_relevance": 1.0,
+        "visual_slot_relevance_likert": 5,
         "protagonist_visibility_likert": 5,
         "salience": 1.0,
     }
@@ -373,7 +380,7 @@ def test_candidate_validation_requires_exact_count_and_shot_boundaries() -> None
     assert result["slot_01"][0]["source_shot_ids"] == ["shot_00001"]
 
 
-def test_visual_grounding_requires_integer_likert_visibility() -> None:
+def test_visual_grounding_requires_integer_likert_scores() -> None:
     candidates = [{"candidate_id": "candidate_01"}]
     response = {
         "items": [
@@ -382,16 +389,21 @@ def test_visual_grounding_requires_integer_likert_visibility() -> None:
                 "visible_description": "the focal subject is visible",
                 "visible_subjects": ["focal subject"],
                 "required_subject_visibility": 4,
-                "visual_slot_relevance": 0.8,
+                "visual_slot_relevance": 4,
                 "visual_evidence": "clear face in multiple frames",
             }
         ]
     }
     result = _validate_visual_grounding(response, candidates)
     assert result["candidate_01"]["protagonist_visibility_likert"] == 4
+    assert result["candidate_01"]["visual_slot_relevance_likert"] == 4
 
     response["items"][0]["required_subject_visibility"] = 0.75
     with pytest.raises(ValueError, match="integer from 1 to 5"):
+        _validate_visual_grounding(response, candidates)
+    response["items"][0]["required_subject_visibility"] = 4
+    response["items"][0]["visual_slot_relevance"] = 0.8
+    with pytest.raises(ValueError, match="visual_slot_relevance.*integer from 1 to 5"):
         _validate_visual_grounding(response, candidates)
 
 
@@ -415,7 +427,128 @@ def test_retrieval_context_expands_to_adjacent_segments_on_later_rounds() -> Non
     ] == ["segment_0001", "segment_0002", "segment_0003"]
 
 
-def test_protagonist_visibility_likert_is_normalized_for_unary() -> None:
+def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slots = [
+        {
+            **slot,
+            "planned_duration_sec": 5.0,
+            "source_segment_ids": [f"segment_{index:04d}"],
+            "required_visible_subjects": [],
+        }
+        for index, slot in enumerate(
+            [
+                _slots()[0],
+                _slots()[1],
+                {
+                    **_slots()[0],
+                    "slot_id": "slot_03",
+                    "content_description": "resolution",
+                },
+            ],
+            1,
+        )
+    ]
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("request", {"instruction": "test"})
+    context.set_artifact("video_description", _video_description())
+    barrier = threading.Barrier(len(slots))
+    prompt_slot_ids = []
+    visual_slot_ids = []
+
+    def call_prompt(**kwargs):
+        package = kwargs["package"]
+        match = re.search(r"<slots>\n(.*?)\n</slots>", package.user_prompt, re.DOTALL)
+        assert match is not None
+        prompt_slots = json.loads(match.group(1))
+        assert len(prompt_slots) == 1
+        slot = prompt_slots[0]
+        slot_id = slot["slot_id"]
+        prompt_slot_ids.append(slot_id)
+        barrier.wait(timeout=2)
+        segment_index = int(slot["source_segment_ids"][0].split("_")[-1])
+        start = (segment_index - 1) * 10
+        response = {
+            "candidates": [
+                {
+                    "slot_id": slot_id,
+                    "items": [
+                        {
+                            "timestamp": (
+                                f"00:00:{start:02d},000-00:00:{start + 10:02d},000"
+                            ),
+                            "source_shot_ids": [f"shot_{segment_index:05d}"],
+                            "description": "visible source content",
+                            "matched_dialogue": "",
+                            "semantic_relevance": 0.8,
+                            "emotional_intensity": 0.5,
+                            "salience": 0.7,
+                        }
+                    ],
+                }
+            ]
+        }
+        return kwargs["validate_business"](response)
+
+    def add_visual_features(_video_path, visual_slots, visual_pool, *_args, **_kwargs):
+        assert len(visual_slots) == 1
+        slot_id = visual_slots[0]["slot_id"]
+        visual_slot_ids.append(slot_id)
+        for candidate in visual_pool[slot_id]:
+            candidate.update(
+                {
+                    "description": "visible source content",
+                    "visible_subjects": [],
+                    "protagonist_visibility_likert": 2,
+                    "visual_slot_relevance_likert": 4,
+                    "visual_evidence": "sampled frames match",
+                }
+            )
+
+    monkeypatch.setattr(context, "call_prompt", call_prompt)
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        add_visual_features,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda _video_path, pool, *_args: [
+            candidate.update({"kinetic_energy": 0.5})
+            for candidates in pool.values()
+            for candidate in candidates
+        ],
+    )
+
+    pool = retrieve_candidates(
+        slots,
+        tmp_path / "video.mp4",
+        LLMConfig(
+            model="text",
+            base_url="",
+            api_key="test",
+            max_concurrency=3,
+        ),
+        VLMConfig(
+            model="vision",
+            base_url="",
+            api_key="test",
+            max_concurrency=2,
+        ),
+        CandidateRetrievalConfig(
+            candidates_per_slot=1,
+            retrieval_max_rounds=1,
+        ),
+        context,
+    )
+
+    assert set(prompt_slot_ids) == {"slot_01", "slot_02", "slot_03"}
+    assert set(visual_slot_ids) == {"slot_01", "slot_02", "slot_03"}
+    assert all(len(candidates) == 1 for candidates in pool.values())
+
+
+def test_visual_likert_scores_are_normalized_for_unary() -> None:
     slot = _slots()[0] | {
         "planned_duration_sec": 5.0,
         "required_visible_subjects": ["focal subject"],
@@ -424,13 +557,21 @@ def test_protagonist_visibility_likert_is_normalized_for_unary() -> None:
         "timestamp": "00:00:01,000-00:00:06,000",
         "description": "woman at a cafe",
         "semantic_relevance": 0.9,
-        "visual_slot_relevance": 0.9,
+        "visual_slot_relevance_likert": 5,
         "emotional_intensity": 0.2,
         "kinetic_energy": 0.2,
         "salience": 0.8,
     }
     assert _unary(slot, base | {"protagonist_visibility_likert": 5}) > _unary(
         slot, base | {"protagonist_visibility_likert": 1}
+    )
+    assert _unary(slot, base | {"protagonist_visibility_likert": 5}) > _unary(
+        slot,
+        base
+        | {
+            "protagonist_visibility_likert": 5,
+            "visual_slot_relevance_likert": 1,
+        },
     )
 
 
@@ -442,13 +583,13 @@ def test_unary_uses_requested_quality_weights() -> None:
     candidate = {
         "timestamp": "00:00:01,000-00:00:05,000",
         "semantic_relevance": 0.8,
-        "visual_slot_relevance": 0.7,
+        "visual_slot_relevance_likert": 4,
         "protagonist_visibility_likert": 3,
         "emotional_intensity": 0.4,
         "kinetic_energy": 0.5,
         "salience": 0.9,
     }
-    assert _unary(slot, candidate) == pytest.approx(0.72)
+    assert _unary(slot, candidate) == pytest.approx(0.73)
 
 
 def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> None:
@@ -472,7 +613,7 @@ def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> 
             "timestamp": timestamp,
             "description": "visible scene",
             "semantic_relevance": 0.9,
-            "visual_slot_relevance": 0.9,
+            "visual_slot_relevance_likert": 5,
             "protagonist_visibility_likert": 5,
             "emotional_intensity": 0.5,
             "kinetic_energy": 0.5,
@@ -563,7 +704,7 @@ def test_review_rejects_patch_that_degrades_precomputed_hard_cut(
             "timestamp": timestamp,
             "description": "focal subject visible",
             "semantic_relevance": 1.0,
-            "visual_slot_relevance": 1.0,
+            "visual_slot_relevance_likert": 5,
             "protagonist_visibility_likert": 5,
             "emotional_intensity": 0.5,
             "kinetic_energy": 0.5,

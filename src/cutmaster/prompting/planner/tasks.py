@@ -298,7 +298,7 @@ def _candidate_visual_scoring(
         str(candidate["candidate_id"]) for candidate in details.candidates
     ]
     contract = ResponseContract(
-        version="1.0",
+        version="2.0",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -337,7 +337,10 @@ def _candidate_visual_scoring(
                                 "type": "integer",
                                 "enum": [1, 2, 3, 4, 5],
                             },
-                            "visual_slot_relevance": SCORE_SCHEMA,
+                            "visual_slot_relevance": {
+                                "type": "integer",
+                                "enum": [1, 2, 3, 4, 5],
+                            },
                             "visual_evidence": {
                                 "type": "string",
                                 "minLength": 1,
@@ -368,13 +371,20 @@ Visibility Likert:
 4 = face clearly matches in a meaningful portion;
 5 = repeated, unmistakable face match with dominant visibility.
 
+Visual Slot Relevance Likert:
+1 = visible content conflicts with or is unrelated to the intended Slot content;
+2 = little usable visual evidence supports the intended content;
+3 = partial or ambiguous visual match;
+4 = clear visual match in a meaningful portion;
+5 = repeated, dominant visual evidence strongly matches the intended content.
+
 <candidates>
 {json.dumps(details.candidates, ensure_ascii=False)}
 </candidates>"""
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.CANDIDATE_VISUAL_SCORING,
-        prompt_version="1.0",
+        prompt_version="2.0",
         operation=details.operation,
         system_prompt=(
             "You inspect source-video contact sheets for a professional editor. Resolve the "

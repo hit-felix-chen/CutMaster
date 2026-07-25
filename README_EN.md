@@ -124,7 +124,12 @@ non-empty.
 ### Candidate retrieval, path selection, and patching
 
 The retrieval model grounds each slot in `video_description.json` and returns
-several structured source candidates. Every candidate must:
+several structured source candidates. Each LLM request contains exactly one
+Slot, while requests for different Slots run concurrently up to
+`llm.max_concurrency`. A validation failure advances only that Slot to the next,
+wider Segment-search round without rolling back other Slots. Candidate VLM
+validation is also concurrent per Slot and bounded by `vlm.max_concurrency`.
+Every candidate must:
 
 - contain consecutive source Shots;
 - start and end exactly on Shot boundaries;
@@ -294,7 +299,6 @@ optimization.
 | Key | Purpose | Default |
 | --- | --- | --- |
 | `candidates_per_slot` | Requested source candidates per Slot | `3` |
-| `retrieval_batch_size` | Slots included in one request | `5` |
 | `retrieval_max_rounds` | Maximum candidate-expansion rounds | `3` |
 | `visual_sample_frames` | Candidate visual-validation frames | `4` |
 | `protagonist_visibility_threshold` | Minimum normalized subject visibility | `0.55` |

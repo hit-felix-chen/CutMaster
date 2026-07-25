@@ -260,7 +260,9 @@ def _unary(slot: dict[str, Any], candidate: dict[str, Any]) -> float:
         if requires_subject
         else 1.0
     )
-    visual_relevance = float(candidate["visual_slot_relevance"])
+    visual_relevance = _normalize_likert_score(
+        candidate["visual_slot_relevance_likert"]
+    )
     return (
         0.20 * float(candidate["semantic_relevance"])
         + 0.20 * visual_relevance
@@ -450,7 +452,12 @@ def path_to_script(
                 "selection_scores": {
                     "unary": round(_unary(slot, candidate), 6),
                     "semantic_relevance": candidate["semantic_relevance"],
-                    "visual_slot_relevance": candidate["visual_slot_relevance"],
+                    "visual_slot_relevance_likert": candidate[
+                        "visual_slot_relevance_likert"
+                    ],
+                    "visual_slot_relevance": _normalize_likert_score(
+                        candidate["visual_slot_relevance_likert"]
+                    ),
                     "protagonist_visibility_likert": candidate[
                         "protagonist_visibility_likert"
                     ],

@@ -59,7 +59,6 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
     "slot_planning": {"replan_max_rounds"},
     "candidate_retrieval": {
         "candidates_per_slot",
-        "retrieval_batch_size",
         "retrieval_max_rounds",
         "visual_sample_frames",
         "protagonist_visibility_threshold",
@@ -205,9 +204,6 @@ def _validate_values(config: AppConfig) -> None:
         "candidate_retrieval.candidates_per_slot": (
             config.candidate_retrieval.candidates_per_slot
         ),
-        "candidate_retrieval.retrieval_batch_size": (
-            config.candidate_retrieval.retrieval_batch_size
-        ),
         "candidate_retrieval.retrieval_max_rounds": (
             config.candidate_retrieval.retrieval_max_rounds
         ),
@@ -340,9 +336,6 @@ def load_config(path: Path) -> AppConfig:
         candidate_retrieval=CandidateRetrievalConfig(
             candidates_per_slot=int(
                 candidate_retrieval.get("candidates_per_slot", 3)
-            ),
-            retrieval_batch_size=int(
-                candidate_retrieval.get("retrieval_batch_size", 5)
             ),
             retrieval_max_rounds=int(
                 candidate_retrieval.get("retrieval_max_rounds", 3)
