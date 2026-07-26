@@ -164,6 +164,16 @@ def _optimize_item(
     detection_config: ShotDetectionConfig,
     optimization_config: SourceWindowOptimizationConfig,
 ) -> dict[str, Any]:
+    if item.get("dialogue_anchor") is not None:
+        result = dict(item)
+        result["cut_optimization"] = {
+            "mode": "dialogue_anchor_locked",
+            "source_shift_sec": 0.0,
+            "num_internal_cuts": 0,
+            "fallback_level": 0,
+            "max_beat_distance_sec": 0.0,
+        }
+        return result
     source_start, source_end = parse_range(str(item["timestamp"]))
     output_frames = item.get("output_frame_range")
     if not isinstance(output_frames, list) or len(output_frames) != 2:
@@ -277,7 +287,7 @@ def optimize_script_source_windows(
                 optimized[index] = future.result()
                 progress.update()
                 metadata = optimized[index]["cut_optimization"]
-                if metadata["fallback_level"] > 0:
+                if metadata.get("fallback_level", 0) > 0:
                     log_event(
                         "WARNING",
                         "source_window",
@@ -298,8 +308,11 @@ def optimize_script_source_windows(
                     "Source window optimized",
                     clip=index + 1,
                     clips=len(items),
-                    source_shift_sec=metadata["source_shift_sec"],
-                    internal_cuts=metadata["num_internal_cuts"],
-                    max_beat_distance_sec=metadata["max_beat_distance_sec"],
+                    source_shift_sec=metadata.get("source_shift_sec", 0.0),
+                    internal_cuts=metadata.get("num_internal_cuts", 0),
+                    max_beat_distance_sec=metadata.get(
+                        "max_beat_distance_sec",
+                        0.0,
+                    ),
                 )
     return [item for item in optimized if item is not None]

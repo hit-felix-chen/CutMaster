@@ -36,6 +36,7 @@ from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import (
     DialogueSegmentationDetails,
     ShotAnnotationDetails,
+    VideoSummaryDetails,
 )
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.runtime.progress import progress_bar
@@ -871,12 +872,43 @@ def _annotate_segments(
         annotation_progress.close()
 
 
+def _valid_video_summary(
+    value: Any,
+    segment_ids: list[str],
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not segment_ids:
+        return None
+    contract = prompt_registry.build(
+        PromptStage.ANALYSER,
+        PromptTask.VIDEO_SUMMARY,
+        VideoSummaryDetails(segment_ids=segment_ids),
+    ).response_contract
+    try:
+        return contract.validate_structure(value)
+    except ValueError:
+        return None
+
+
 def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     manifest_path = material_directory / "analysis_manifest.json"
     description_path = material_directory / "video_description.json"
-    if not manifest_path.is_file() or not description_path.is_file():
+    summary_path = material_directory / "video_summary.json"
+    if (
+        not manifest_path.is_file()
+        or not description_path.is_file()
+        or not summary_path.is_file()
+    ):
         return None
     description = json.loads(description_path.read_text(encoding="utf-8"))
+    summary = _valid_video_summary(
+        _read_json_checkpoint(summary_path),
+        [
+            str(segment["segment_id"])
+            for segment in description.get("segments") or []
+        ],
+    )
+    if summary is None:
+        return None
     required = [
         material_directory / "source.srt",
         material_directory / "dialogue_merged.srt",
@@ -903,8 +935,10 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
         processed_subtitle=material_directory / "dialogue_merged.srt",
         dialogues_json=material_directory / "dialogues.json",
         video_description_path=description_path,
+        video_summary_path=summary_path,
         analysis_history_path=material_directory / "analysis_history.json",
         video_description=description,
+        video_summary=summary,
     )
 
 
@@ -966,7 +1000,7 @@ def analyse_video_material(
             "Full-video Shot detection started",
             stage="shot_detection",
             stage_index=1,
-            stage_count=5,
+            stage_count=6,
         )
         shots, fps = _detect_full_video_shots(
             video_path,
@@ -981,7 +1015,7 @@ def analyse_video_material(
             "Full-video Shot detection completed",
             stage="shot_detection",
             stage_index=1,
-            stage_count=5,
+            stage_count=6,
             shots=len(shots),
             elapsed_sec=time.monotonic() - stage_started,
         )
@@ -993,7 +1027,7 @@ def analyse_video_material(
             "Shot-boundary checkpoint resumed",
             stage="shot_detection",
             stage_index=1,
-            stage_count=5,
+            stage_count=6,
             shots=len(shots),
         )
     context.set_artifact("shot_boundaries", shots)
@@ -1016,7 +1050,7 @@ def analyse_video_material(
         "Subtitle and dialogue preparation started",
         stage="dialogue_preparation",
         stage_index=2,
-        stage_count=5,
+        stage_count=6,
     )
     source_srt = prepare_subtitles(
         video_path,
@@ -1039,7 +1073,7 @@ def analyse_video_material(
             "Subtitle and dialogue preparation completed",
             stage="dialogue_preparation",
             stage_index=2,
-            stage_count=5,
+            stage_count=6,
             elapsed_sec=time.monotonic() - stage_started,
         )
     else:
@@ -1051,7 +1085,7 @@ def analyse_video_material(
             "Dialogue checkpoint resumed",
             stage="dialogue_preparation",
             stage_index=2,
-            stage_count=5,
+            stage_count=6,
         )
     dialogue_document = json.loads(dialogues_json.read_text(encoding="utf-8"))
     dialogue = _dialogue_with_shot_membership(
@@ -1075,7 +1109,7 @@ def analyse_video_material(
             "Dialogue grouping and Segment construction started",
             stage="segment_construction",
             stage_index=3,
-            stage_count=5,
+            stage_count=6,
         )
         dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
         segments = _raw_segments(shots, dialogue, dialogue_groups)
@@ -1088,7 +1122,7 @@ def analyse_video_material(
             "Dialogue grouping and Segment construction completed",
             stage="segment_construction",
             stage_index=3,
-            stage_count=5,
+            stage_count=6,
             segments=len(segments),
             elapsed_sec=time.monotonic() - stage_started,
         )
@@ -1100,7 +1134,7 @@ def analyse_video_material(
             "Segment-boundary checkpoint resumed",
             stage="segment_construction",
             stage_index=3,
-            stage_count=5,
+            stage_count=6,
             segments=len(segments),
         )
         if not segment_boundaries_path.is_file():
@@ -1115,7 +1149,7 @@ def analyse_video_material(
         "Reusable Segment clip preparation started",
         stage="segment_clip_preparation",
         stage_index=4,
-        stage_count=5,
+        stage_count=6,
         segments=len(segments),
     )
     _split_segment_clips(video_path, segments, material_directory)
@@ -1126,7 +1160,7 @@ def analyse_video_material(
         "Reusable Segment clip preparation completed",
         stage="segment_clip_preparation",
         stage_index=4,
-        stage_count=5,
+        stage_count=6,
         segments=len(segments),
         elapsed_sec=time.monotonic() - stage_started,
     )
@@ -1139,7 +1173,7 @@ def analyse_video_material(
         "Shot annotation started",
         stage="shot_annotation",
         stage_index=5,
-        stage_count=5,
+        stage_count=6,
         segments=len(segments),
     )
     annotated_segments = _annotate_segments(
@@ -1156,7 +1190,7 @@ def analyse_video_material(
         "Shot annotation completed",
         stage="shot_annotation",
         stage_index=5,
-        stage_count=5,
+        stage_count=6,
         segments=len(annotated_segments),
         elapsed_sec=time.monotonic() - stage_started,
     )
@@ -1180,12 +1214,72 @@ def analyse_video_material(
     description_path = material_directory / "video_description.json"
     _write_json_checkpoint(description_path, description_dict)
     context.set_artifact("video_description", description_dict)
+    summary_path = material_directory / "video_summary.json"
+    video_summary = _valid_video_summary(
+        _read_json_checkpoint(summary_path),
+        [
+            str(segment["segment_id"])
+            for segment in description_dict["segments"]
+        ],
+    )
+    if video_summary is None:
+        stage_started = time.monotonic()
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.start",
+            "Full-video story summarization started",
+            stage="video_summary",
+            stage_index=6,
+            stage_count=6,
+            segments=len(annotated_segments),
+        )
+        package = prompt_registry.build(
+            PromptStage.ANALYSER,
+            PromptTask.VIDEO_SUMMARY,
+            VideoSummaryDetails(
+                segment_ids=[
+                    str(segment["segment_id"])
+                    for segment in description_dict["segments"]
+                ],
+            ),
+        )
+        video_summary = context.call_prompt(
+            package=package,
+            config=llm_config,
+        )
+        _write_json_checkpoint(summary_path, video_summary)
+        log_event(
+            "INFO",
+            "analyser",
+            "stage.complete",
+            "Full-video story summarization completed",
+            stage="video_summary",
+            stage_index=6,
+            stage_count=6,
+            story_beats=len(
+                video_summary["chronological_story_beats"]
+            ),
+            elapsed_sec=time.monotonic() - stage_started,
+        )
+    else:
+        context.set_artifact("video_summary", video_summary)
+        log_event(
+            "INFO",
+            "analyser",
+            "checkpoint.resume",
+            "Full-video story-summary checkpoint resumed",
+            stage="video_summary",
+            stage_index=6,
+            stage_count=6,
+        )
     _write_json_checkpoint(
         material_directory / "analysis_manifest.json",
         {
             **analysis_signature,
             "material_directory": str(material_directory.resolve()),
             "video_description": str(description_path.resolve()),
+            "video_summary": str(summary_path.resolve()),
         },
     )
     return MaterialAnalysisResult(
@@ -1194,6 +1288,8 @@ def analyse_video_material(
         processed_subtitle=processed_subtitle,
         dialogues_json=dialogues_json,
         video_description_path=description_path,
+        video_summary_path=summary_path,
         analysis_history_path=history_path,
         video_description=description_dict,
+        video_summary=video_summary,
     )

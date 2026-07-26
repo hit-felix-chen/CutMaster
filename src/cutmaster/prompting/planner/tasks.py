@@ -24,10 +24,20 @@ SCORE_SCHEMA = {
 
 @dataclass(frozen=True)
 class SlotPlanningDetails:
-    clip_count: int
     target_duration_sec: float
+    target_clip_duration_sec: float
     allowed_segment_ids: list[str]
     retry_note: str
+
+
+@dataclass(frozen=True)
+class DialogueAnchorSelectionDetails:
+    slots: list[dict[str, Any]]
+    video_summary: dict[str, Any]
+    source_segments: list[dict[str, Any]]
+    source_shots: list[dict[str, Any]]
+    max_anchors: int
+    min_anchor_duration_sec: float
 
 
 @dataclass(frozen=True)
@@ -35,6 +45,7 @@ class CandidateRetrievalDetails:
     operation: str
     candidates_per_slot: int
     slots: list[dict[str, Any]]
+    confirmed_candidates: dict[str, list[dict[str, Any]]]
     excluded_ranges: dict[str, list[str]]
     source_segments_by_slot: dict[str, list[dict[str, Any]]]
 
@@ -69,8 +80,7 @@ def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
             "properties": {
                 "slots": {
                     "type": "array",
-                    "minItems": details.clip_count,
-                    "maxItems": details.clip_count,
+                    "minItems": 1,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -108,7 +118,7 @@ def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
                             "target_kinetic_energy": SCORE_SCHEMA,
                             "desired_duration_sec": {
                                 "type": "number",
-                                "exclusiveMinimum": 0.0,
+                                "minimum": 1.5,
                             },
                             "continuity_from_previous": {
                                 "type": "string",
@@ -135,25 +145,43 @@ def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
         },
     )
     retry_note = f"\n{details.retry_note.strip()}\n" if details.retry_note else ""
-    instructions = f"""Create exactly {details.clip_count} sequential edit slots for the
-maintained request, music profile, and structured video description.
+    instructions = f"""Create a sequence of edit slots for the maintained request and structured
+video description. The requested output duration is {details.target_duration_sec:.1f} seconds.
+Choose the number of slots yourself from the narrative needs, available source material, and the
+configured visual-clip target. There is no predetermined clip count. A Slot represents one
+continuous source clip, not an entire narrative chapter. Design the visual rhythm around
+target_clip_duration_sec={details.target_clip_duration_sec:.1f}. The average desired_duration_sec
+must remain within 12.5% of that target, and no individual Slot may exceed
+{details.target_clip_duration_sec * 1.5:.1f} seconds. Assign an initial desired_duration_sec to
+every Slot, with all desired durations totaling the requested output duration within 0.5 seconds.
+Do not pre-snap durations to beats; a later deterministic audio-alignment stage will make small
+boundary adjustments.
 
-Each slot must be realizable from supplied source_segment_ids. Use Shot-level VLM descriptions,
-characters, scenes, dialogue, and Segment summaries as source truth. Never invent props,
+Dialogue length never justifies making a visual Slot longer. Original dialogue is selected in a
+later stage on an independent audio timeline. A long line or continuous exchange starts on its
+corresponding original-picture passage, then continues across other short visual Slots as a
+start-aligned L-cut. Plan enough short visual Slots for the picture to keep cutting while such
+dialogue plays.
+
+Each slot must be realizable from supplied source_segment_ids. Use the reusable story summary for
+plot understanding, and use Shot-level VLM descriptions, characters, scenes, actions, and Segment
+summaries as visual source truth. Never invent props,
 gestures, settings, identities, or actions absent from the description. Keep source_segment_ids
 in nondecreasing source order across slots. Reusing a Segment for adjacent slots is allowed when
 it contains enough distinct Shots.
 
-For a character-focused request, list the focal character in required_visible_subjects whenever
-that character must be seen. Use music sections and energy to vary duration: high kinetic energy
-generally uses shorter clips and low energy uses longer clips. Maintain a coherent progression.
-Every slot after the first must explain how it continues or contrasts with the previous slot.
-Desired durations should total approximately {details.target_duration_sec:.1f} seconds.
+The narrative_role values are reusable labels, not a mandatory five-act template. Every role may
+appear multiple times or not appear at all; do not create one Slot per enum value. For a
+character-focused request, list the focal character in required_visible_subjects whenever that
+character must be seen. Maintain a coherent progression. Every slot after the first must explain
+how it continues or contrasts with the previous slot. Do not use title cards, opening or end
+credits, production logos, legal cards, or blank frames unless the maintained request explicitly
+requires them.
 {retry_note}"""
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.SLOT_PLANNING,
-        prompt_version="1.0",
+        prompt_version="2.0",
         operation="Edit slot planning",
         system_prompt=(
             "You are the planning component of a professional video editor. Plan an output "
@@ -164,7 +192,7 @@ Desired durations should total approximately {details.target_duration_sec:.1f} s
         context_keys=(
             "request",
             "music_profile",
-            "video_description",
+            "source_story_context",
             "planning_feedback",
         ),
         modality=PromptModality.TEXT,
@@ -179,7 +207,6 @@ def _candidate_item_schema() -> dict[str, Any]:
         "required": [
             "timestamp",
             "description",
-            "matched_dialogue",
             "semantic_relevance",
             "emotional_intensity",
             "salience",
@@ -193,12 +220,186 @@ def _candidate_item_schema() -> dict[str, Any]:
                 ),
             },
             "description": {"type": "string", "minLength": 1},
-            "matched_dialogue": {"type": "string"},
             "semantic_relevance": SCORE_SCHEMA,
             "emotional_intensity": SCORE_SCHEMA,
             "salience": SCORE_SCHEMA,
         },
     }
+
+
+def _dialogue_anchor_selection(
+    details: DialogueAnchorSelectionDetails,
+) -> PromptPackage:
+    segments = {
+        str(segment["segment_id"]): segment
+        for segment in details.source_segments
+    }
+    anchor_schemas: list[dict[str, Any]] = []
+    for slot in details.slots:
+        eligible_segments = [
+            segments[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+            if str(segment_id) in segments
+        ]
+        dialogue_ids = [
+            str(dialogue["dialogue_id"])
+            for segment in eligible_segments
+            for dialogue in segment["dialogue_items"]
+        ]
+        if not dialogue_ids:
+            continue
+        anchor_schemas.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "slot_id",
+                    "source_segment_id",
+                    "start_dialogue_id",
+                    "end_dialogue_id",
+                    "narrative_significance",
+                    "request_relevance",
+                    "standalone_meaning",
+                    "importance_likert",
+                    "coherence_likert",
+                ],
+                "properties": {
+                    "slot_id": {
+                        "type": "string",
+                        "const": str(slot["slot_id"]),
+                    },
+                    "source_segment_id": {
+                        "type": "string",
+                        "enum": [
+                            str(segment["segment_id"])
+                            for segment in eligible_segments
+                        ],
+                    },
+                    "start_dialogue_id": {
+                        "type": "string",
+                        "enum": dialogue_ids,
+                    },
+                    "end_dialogue_id": {
+                        "type": "string",
+                        "enum": dialogue_ids,
+                    },
+                    "narrative_significance": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "request_relevance": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "standalone_meaning": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                    "importance_likert": {
+                        "type": "integer",
+                        "enum": [4, 5],
+                    },
+                    "coherence_likert": {
+                        "type": "integer",
+                        "enum": [4, 5],
+                    },
+                },
+            }
+        )
+    minimum = 1 if anchor_schemas else 0
+    contract = ResponseContract(
+        version="2.0",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["anchors"],
+            "properties": {
+                "anchors": {
+                    "type": "array",
+                    "minItems": minimum,
+                    "maxItems": min(
+                        details.max_anchors,
+                        len(anchor_schemas),
+                    ),
+                    "uniqueItems": True,
+                    "items": (
+                        {"oneOf": anchor_schemas}
+                        if anchor_schemas
+                        else {"type": "object"}
+                    ),
+                }
+            },
+        },
+    )
+    instructions = f"""Select a small set of original-dialogue anchors for the maintained user
+request after the visual Slot timeline has been created.
+
+Start from the user request and reusable video_summary. Identify the few moments whose original
+speech most clearly communicates the requested character arc, conflict, decision, revelation, or
+theme. Select at most {details.max_anchors} anchors. Every selected spoken range must last at least
+{details.min_anchor_duration_sec:.1f} seconds and must remain meaningful when heard in the final
+short edit without unexplained surrounding dialogue.
+
+For each anchor, choose one complete long sentence or one coherent range of consecutive
+dialogue_items from the same source Segment. Select the first and last dialogue IDs; every item
+between them is included, including speaker changes and natural pauses. Do not select greetings,
+acknowledgements, exclamations, sentence fragments, generic reactions, or isolated replies such
+as “yes”, “no”, “good”, or “oh”. Do not pad a weak line with unrelated neighboring speech merely
+to satisfy duration.
+
+Every selected anchor uses the same L-cut layout. Its original speech starts exactly at the
+selected Slot's output start. The selected Slot starts with the corresponding original picture
+and sound; if the speech is longer than that Slot, the sound continues across subsequent visual
+Slots. The corresponding portion of original picture and original sound must retain the same
+source-time mapping wherever they coexist. Never enlarge or merge visual Slots to contain speech.
+The complete audio range must stay inside the output timeline and must not overlap another anchor.
+
+Never skip an intervening dialogue item, cross a Segment boundary, join unrelated exchanges,
+reorder dialogue, or manufacture words. Prefer a small set of memorable anchors distributed
+across the requested narrative, never more than one per Slot, and preserve non-overlapping source
+chronology across selected anchors. It is valid to leave most Slots without original speech.
+
+For every selection, explain its narrative_significance, direct request_relevance, and
+standalone_meaning. Give importance_likert and coherence_likert only as 4 or 5; omit the anchor
+entirely if either quality would be lower.
+
+Use each Slot's selected_source_segments for the Segment's plot position, description, emotional
+meaning, characters, and exact selectable dialogue. Use source_shots to ensure the selected
+original-picture window depicts the relevant speaking scene. Avoid voice-over, off-screen speech,
+credits, title cards, and speech over unrelated imagery.
+
+<slots>
+{json.dumps(details.slots, ensure_ascii=False)}
+</slots>
+
+<video_summary>
+{json.dumps(details.video_summary, ensure_ascii=False)}
+</video_summary>
+
+<source_shots>
+{json.dumps(details.source_shots, ensure_ascii=False)}
+</source_shots>
+
+<selected_source_segments>
+{json.dumps(details.source_segments, ensure_ascii=False)}
+</selected_source_segments>"""
+    return PromptPackage(
+        stage=PromptStage.PLANNER,
+        task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
+        prompt_version="2.0",
+        operation="Original dialogue anchor selection",
+        system_prompt=(
+            "You select a few meaningful, coherent original-speech passages that directly serve "
+            "the user's requested story. Each passage may be one complete line or multiple "
+            "consecutive lines. Every passage starts with its corresponding source picture as a "
+            "start-aligned L-cut. Return strict JSON only."
+        ),
+        user_prompt=assemble_user_prompt(instructions, contract),
+        response_contract=contract,
+        context_keys=("request",),
+        modality=PromptModality.TEXT,
+        output_artifact="dialogue_anchor_selection",
+    )
 
 
 def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
@@ -251,13 +452,22 @@ the overlapping Shots deterministically from the validated timestamp.
 
 Prefer each Slot's source_segment_ids, preserve source chronology, and avoid every excluded
 range. Describe only the content expected inside the selected time window, based on its
-overlapping Shot descriptions. Dialogue may support narrative meaning but must not override
-visible identity or action. Score semantic relevance, emotional intensity, and editorial
-salience from 0 to 1.
+overlapping Shot descriptions. Use the maintained video summary for plot understanding; exact
+transcript text is intentionally omitted from visual candidate retrieval. Never let inferred
+speech override visible identity or action. Score semantic relevance, emotional intensity, and
+editorial salience from 0 to 1.
+
+Candidates in confirmed_candidates already passed timestamp validation and VLM visual grounding.
+They are permanently retained. Return only the missing candidates requested by this contract, and
+never duplicate or overlap a confirmed candidate. Excluded ranges also contain rejected windows
+that must not be selected again.
 
 <slots>
 {json.dumps(details.slots, ensure_ascii=False)}
 </slots>
+<confirmed_candidates>
+{json.dumps(details.confirmed_candidates, ensure_ascii=False)}
+</confirmed_candidates>
 <excluded_ranges>
 {json.dumps(details.excluded_ranges, ensure_ascii=False)}
 </excluded_ranges>
@@ -277,7 +487,7 @@ salience from 0 to 1.
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=("request",),
+        context_keys=("request", "video_summary"),
         modality=PromptModality.TEXT,
     )
 
@@ -558,7 +768,7 @@ candidate IDs supplied in the maintained candidate pool."""
         context_keys=(
             "request",
             "music_profile",
-            "video_description",
+            "video_summary",
             "edit_plan",
             "candidate_pool",
             "current_script",
@@ -572,6 +782,11 @@ prompt_registry.register(
     PromptStage.PLANNER,
     PromptTask.SLOT_PLANNING,
     _slot_planning,
+)
+prompt_registry.register(
+    PromptStage.PLANNER,
+    PromptTask.DIALOGUE_ANCHOR_SELECTION,
+    _dialogue_anchor_selection,
 )
 prompt_registry.register(
     PromptStage.PLANNER,

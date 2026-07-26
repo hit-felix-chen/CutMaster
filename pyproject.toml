@@ -5,13 +5,17 @@ description = "Agentic workflow for backend-only long-video montage generation."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "demucs>=4.1,<5",
     "librosa>=0.11,<1",
+    "numpy>=1.26,<2",
     "jsonschema>=4.23,<5",
     "loguru>=0.7.3",
     "openai>=1.77.0",
     "opencv-python>=4.10,<5",
+    "python-dotenv>=1,<2",
     "requests>=2.32.0",
     "scenedetect==0.7.0",
+    "torch>=2.13,<3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "tqdm>=4.67.0",
 ]
 

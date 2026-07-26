@@ -9,10 +9,22 @@ import pytest
 from loguru import logger
 
 from cutmaster.runtime.observability import (
+    VALID_COMPONENTS,
     configure_logging,
     error_summary,
     log_event,
 )
+
+
+def test_dialogue_anchor_stage_is_part_of_log_taxonomy() -> None:
+    assert "planner.anchor" in VALID_COMPONENTS
+    assert "dialogue_audio" in VALID_COMPONENTS
+    log_event(
+        "INFO",
+        "planner.anchor",
+        "stage.start",
+        "Dialogue anchor selection started",
+    )
 
 
 def test_structured_log_format_and_field_normalization(tmp_path: Path) -> None:

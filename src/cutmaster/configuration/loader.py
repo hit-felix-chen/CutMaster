@@ -10,6 +10,7 @@ from cutmaster.configuration.schema import (
     AppConfig,
     BeamSearchConfig,
     CandidateRetrievalConfig,
+    DialogueAnchorConfig,
     LLMConfig,
     MaterialAnalysisConfig,
     RenderConfig,
@@ -56,7 +57,24 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "max_subtitle_duration_sec",
     },
     "shot_annotation": {"shot_sample_frames"},
-    "slot_planning": {"replan_max_rounds"},
+    "slot_planning": {
+        "target_clip_duration_sec",
+        "replan_max_rounds",
+    },
+    "dialogue_anchors": {
+        "max_anchors",
+        "min_anchor_duration_sec",
+        "enable_vocal_separation",
+        "separator_model",
+        "separator_device",
+        "separator_segment_sec",
+        "separator_shifts",
+        "separator_padding_sec",
+        "separated_loudness_lufs",
+        "dialogue_volume",
+        "bgm_duck_volume",
+        "fade_sec",
+    },
     "candidate_retrieval": {
         "candidates_per_slot",
         "retrieval_max_rounds",
@@ -201,6 +219,9 @@ def _validate_values(config: AppConfig) -> None:
         "asr.poll_interval_sec": config.asr.poll_interval_sec,
         "asr.max_chars": config.asr.max_chars,
         "asr.max_subtitle_duration_sec": config.asr.max_subtitle_duration_sec,
+        "slot_planning.target_clip_duration_sec": (
+            config.slot_planning.target_clip_duration_sec
+        ),
         "candidate_retrieval.candidates_per_slot": (
             config.candidate_retrieval.candidates_per_slot
         ),
@@ -225,6 +246,15 @@ def _validate_values(config: AppConfig) -> None:
         "render.fps": config.render.fps,
         "render.threads": config.render.threads,
         "render.audio_sample_rate": config.render.audio_sample_rate,
+        "dialogue_anchors.separator_segment_sec": (
+            config.dialogue_anchors.separator_segment_sec
+        ),
+        "dialogue_anchors.max_anchors": (
+            config.dialogue_anchors.max_anchors
+        ),
+        "dialogue_anchors.min_anchor_duration_sec": (
+            config.dialogue_anchors.min_anchor_duration_sec
+        ),
     }
     invalid_positive = [
         name for name, value in positive.items() if float(value) <= 0
@@ -232,6 +262,10 @@ def _validate_values(config: AppConfig) -> None:
     if invalid_positive:
         raise ValueError(
             f"Config values must be positive: {sorted(invalid_positive)}"
+        )
+    if config.slot_planning.target_clip_duration_sec < 1.5:
+        raise ValueError(
+            "slot_planning.target_clip_duration_sec must be at least 1.5"
         )
     non_negative = {
         "llm.temperature": config.llm.temperature,
@@ -250,6 +284,17 @@ def _validate_values(config: AppConfig) -> None:
         ),
         "render.bgm_volume": config.render.bgm_volume,
         "render.original_volume": config.render.original_volume,
+        "dialogue_anchors.dialogue_volume": config.dialogue_anchors.dialogue_volume,
+        "dialogue_anchors.bgm_duck_volume": (
+            config.dialogue_anchors.bgm_duck_volume
+        ),
+        "dialogue_anchors.fade_sec": config.dialogue_anchors.fade_sec,
+        "dialogue_anchors.separator_shifts": (
+            config.dialogue_anchors.separator_shifts
+        ),
+        "dialogue_anchors.separator_padding_sec": (
+            config.dialogue_anchors.separator_padding_sec
+        ),
     }
     invalid_non_negative = [
         name for name, value in non_negative.items() if float(value) < 0
@@ -271,6 +316,21 @@ def _validate_values(config: AppConfig) -> None:
         )
     if config.render.original_volume != 0.0:
         raise ValueError("render.original_volume must be 0 for frame-exact rendering")
+    if config.dialogue_anchors.separator_device not in {
+        "auto",
+        "cpu",
+        "mps",
+        "cuda",
+    }:
+        raise ValueError(
+            "dialogue_anchors.separator_device must be auto, cpu, mps, or cuda"
+        )
+    if not config.dialogue_anchors.separator_model.strip():
+        raise ValueError("dialogue_anchors.separator_model must not be empty")
+    if not -70.0 <= config.dialogue_anchors.separated_loudness_lufs <= 0.0:
+        raise ValueError(
+            "dialogue_anchors.separated_loudness_lufs must be between -70 and 0"
+        )
 
 
 def load_config(path: Path) -> AppConfig:
@@ -287,6 +347,7 @@ def load_config(path: Path) -> AppConfig:
     asr = _section(data, "asr")
     shot_annotation = _section(data, "shot_annotation")
     slot_planning = _section(data, "slot_planning")
+    dialogue_anchors = _section(data, "dialogue_anchors")
     candidate_retrieval = _section(data, "candidate_retrieval")
     beam_search = _section(data, "beam_search")
     script_review = _section(data, "script_review")
@@ -331,7 +392,43 @@ def load_config(path: Path) -> AppConfig:
             shot_sample_frames=int(shot_annotation.get("shot_sample_frames", 5)),
         ),
         slot_planning=SlotPlanningConfig(
+            target_clip_duration_sec=float(
+                slot_planning.get("target_clip_duration_sec", 4.0)
+            ),
             replan_max_rounds=int(slot_planning.get("replan_max_rounds", 3)),
+        ),
+        dialogue_anchors=DialogueAnchorConfig(
+            max_anchors=int(dialogue_anchors.get("max_anchors", 4)),
+            min_anchor_duration_sec=float(
+                dialogue_anchors.get("min_anchor_duration_sec", 1.5)
+            ),
+            enable_vocal_separation=_boolean(
+                dialogue_anchors,
+                "dialogue_anchors",
+                "enable_vocal_separation",
+                True,
+            ),
+            separator_model=str(
+                dialogue_anchors.get("separator_model") or "htdemucs"
+            ).strip(),
+            separator_device=str(
+                dialogue_anchors.get("separator_device") or "auto"
+            ).strip().lower(),
+            separator_segment_sec=int(
+                dialogue_anchors.get("separator_segment_sec", 7)
+            ),
+            separator_shifts=int(dialogue_anchors.get("separator_shifts", 0)),
+            separator_padding_sec=float(
+                dialogue_anchors.get("separator_padding_sec", 1.0)
+            ),
+            separated_loudness_lufs=float(
+                dialogue_anchors.get("separated_loudness_lufs", -16.0)
+            ),
+            dialogue_volume=float(dialogue_anchors.get("dialogue_volume", 1.0)),
+            bgm_duck_volume=float(
+                dialogue_anchors.get("bgm_duck_volume", 0.08)
+            ),
+            fade_sec=float(dialogue_anchors.get("fade_sec", 0.05)),
         ),
         candidate_retrieval=CandidateRetrievalConfig(
             candidates_per_slot=int(

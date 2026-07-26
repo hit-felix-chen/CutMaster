@@ -28,7 +28,7 @@ def adapt_script(
             break
         start, end = parse_range(str(raw["timestamp"]))
         planned_duration = float(raw.get("planned_duration_sec") or default_clip_cap)
-        if max_clip_duration_sec is not None:
+        if max_clip_duration_sec is not None and raw.get("dialogue_anchor") is None:
             planned_duration = min(planned_duration, max_clip_duration_sec)
         duration = min(end - start, planned_duration, remaining)
         if duration <= 0.001:

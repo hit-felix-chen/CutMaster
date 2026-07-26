@@ -106,7 +106,8 @@ def test_slot_validation_and_accent_alignment() -> None:
     }
     slots = _validate_slots(
         raw,
-        2,
+        8.0,
+        4.0,
         _video_description(),
         set(),
         set(),
@@ -116,6 +117,7 @@ def test_slot_validation_and_accent_alignment() -> None:
         {"accents_sec": [5.0], "beats_sec": [4.0, 5.0]},
         8.0,
         30,
+        4.0,
     )
     assert aligned[0]["output_end_sec"] == 5.0
     assert sum(slot["planned_duration_sec"] for slot in aligned) == 8.0
@@ -138,15 +140,220 @@ def test_slot_validation_rejects_failed_replan_assignments() -> None:
         ]
     }
     with pytest.raises(ValueError, match="visually disproven"):
-        _validate_slots(raw, 1, _video_description(), {"segment_0001"}, set())
+        _validate_slots(
+            raw,
+            4.0,
+            4.0,
+            _video_description(),
+            {"segment_0001"},
+            set(),
+        )
     with pytest.raises(ValueError, match="failed source-Segment assignment"):
         _validate_slots(
             raw,
-            1,
+            4.0,
+            4.0,
             _video_description(),
             set(),
             failed_segment_assignments={("segment_0001",)},
         )
+
+
+def test_slot_validation_accepts_model_selected_slot_count() -> None:
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "setup",
+                "content_description": "The focal subject begins",
+                "target_emotion": "hopeful",
+                "target_emotional_intensity": 0.4,
+                "target_kinetic_energy": 0.3,
+                "desired_duration_sec": 3.0,
+                "continuity_from_previous": "opening",
+                "source_segment_ids": ["segment_0001"],
+                "required_visible_subjects": ["focal subject"],
+            },
+            {
+                "narrative_role": "resolution",
+                "content_description": "The focal subject succeeds",
+                "target_emotion": "fulfilled",
+                "target_emotional_intensity": 0.7,
+                "target_kinetic_energy": 0.4,
+                "desired_duration_sec": 5.0,
+                "continuity_from_previous": "resolves the journey",
+                "source_segment_ids": ["segment_0002"],
+                "required_visible_subjects": ["focal subject"],
+            },
+        ]
+    }
+
+    slots = _validate_slots(
+        raw,
+        8.0,
+        4.0,
+        _video_description(),
+        set(),
+        set(),
+    )
+
+    assert len(slots) == 2
+    assert sum(slot["desired_duration_sec"] for slot in slots) == 8.0
+
+
+def test_slot_validation_rejects_duration_total_far_from_target() -> None:
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "setup",
+                "content_description": "The focal subject begins",
+                "target_emotion": "hopeful",
+                "target_emotional_intensity": 0.4,
+                "target_kinetic_energy": 0.3,
+                "desired_duration_sec": 4.0,
+                "continuity_from_previous": "opening",
+                "source_segment_ids": ["segment_0001"],
+                "required_visible_subjects": ["focal subject"],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="must total"):
+        _validate_slots(
+            raw,
+            8.0,
+            4.0,
+            _video_description(),
+            set(),
+            set(),
+        )
+
+
+def test_slot_validation_rejects_long_visual_slot_for_dialogue() -> None:
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "development",
+                "content_description": "A long exchange begins on synchronized lips",
+                "target_emotion": "urgent",
+                "target_emotional_intensity": 0.7,
+                "target_kinetic_energy": 0.4,
+                "desired_duration_sec": 8.0,
+                "continuity_from_previous": "opening",
+                "source_segment_ids": ["segment_0001"],
+                "required_visible_subjects": ["focal subject"],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="start-aligned L-cut"):
+        _validate_slots(
+            raw,
+            8.0,
+            4.0,
+            _video_description(),
+            set(),
+            set(),
+        )
+
+
+def test_slot_validation_rejects_average_far_from_visual_target() -> None:
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "development",
+                "content_description": f"Story beat {index}",
+                "target_emotion": "urgent",
+                "target_emotional_intensity": 0.7,
+                "target_kinetic_energy": 0.4,
+                "desired_duration_sec": 6.0,
+                "continuity_from_previous": "continues",
+                "source_segment_ids": [f"segment_{index:04d}"],
+                "required_visible_subjects": [],
+            }
+            for index in range(1, 3)
+        ]
+    }
+
+    with pytest.raises(ValueError, match="Average Slot duration"):
+        _validate_slots(
+            raw,
+            12.0,
+            4.0,
+            _video_description(),
+            set(),
+            set(),
+        )
+
+
+def test_slot_average_allows_integer_count_quantization_for_short_output() -> None:
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "development",
+                "content_description": f"Short-output beat {index}",
+                "target_emotion": "focused",
+                "target_emotional_intensity": 0.5,
+                "target_kinetic_energy": 0.5,
+                "desired_duration_sec": 10.0 / 3.0,
+                "continuity_from_previous": "continues",
+                "source_segment_ids": [f"segment_{index:04d}"],
+                "required_visible_subjects": [],
+            }
+            for index in range(1, 4)
+        ]
+    }
+
+    slots = _validate_slots(
+        raw,
+        10.0,
+        4.0,
+        _video_description(),
+        set(),
+        set(),
+    )
+
+    assert len(slots) == 3
+
+
+def test_candidate_retrieval_does_not_request_replacements_for_fixed_anchor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fixed = {
+        "candidate_id": "slot_01_dialogue_anchor",
+        "slot_id": "slot_01",
+        "timestamp": "00:00:01,000-00:00:05,000",
+        "semantic_relevance": 0.8,
+        "emotional_intensity": 0.5,
+        "salience": 1.0,
+        "protagonist_visibility_likert": 3,
+        "visual_slot_relevance_likert": 4,
+        "kinetic_energy": 0.2,
+    }
+    slots = [
+        {
+            "slot_id": "slot_01",
+            "planned_duration_sec": 4.0,
+            "fixed_candidate": fixed,
+        }
+    ]
+    context = WorkflowContext(tmp_path / "planning_history.json")
+    context.set_artifact("video_description", _video_description())
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda *args, **kwargs: None,
+    )
+
+    pool = retrieve_candidates(
+        slots,
+        tmp_path / "unused.mp4",
+        LLMConfig(model="unused", base_url="", api_key="unused"),
+        VLMConfig(model="unused", base_url="", api_key="unused"),
+        CandidateRetrievalConfig(candidates_per_slot=3),
+        context,
+    )
+
+    assert pool == {"slot_01": [fixed]}
 
 
 def test_global_alignment_does_not_exhaust_later_accents() -> None:
@@ -158,6 +365,30 @@ def test_global_alignment_does_not_exhaust_later_accents() -> None:
     )
     assert len(result) == 3
     assert result == sorted(result)
+
+
+def test_music_alignment_keeps_each_boundary_adjustment_local() -> None:
+    slots = [
+        {
+            "slot_id": "slot_01",
+            "desired_duration_sec": 4.0,
+        },
+        {
+            "slot_id": "slot_02",
+            "desired_duration_sec": 4.0,
+        },
+    ]
+
+    aligned = align_slots_to_music(
+        slots,
+        {"accents_sec": [1.0, 7.0], "beats_sec": [1.0, 7.0]},
+        8.0,
+        30,
+        4.0,
+    )
+
+    assert aligned[0]["output_end_sec"] == 4.0
+    assert aligned[1]["output_end_sec"] == 8.0
 
 
 def test_chronology_preflight_accepts_a_complete_path() -> None:
@@ -469,23 +700,23 @@ def test_visual_grounding_requires_integer_likert_scores() -> None:
         _validate_visual_grounding(response, candidates)
 
 
-def test_retrieval_context_expands_to_adjacent_segments_on_later_rounds() -> None:
+def test_retrieval_context_expands_only_when_adjacent_scope_is_requested() -> None:
     slots = [{"slot_id": "slot_01", "source_segment_ids": ["segment_0002"]}]
-    first_round = _retrieval_segment_context(
+    planned_scope = _retrieval_segment_context(
         _video_description(),
         slots,
-        1,
+        include_adjacent=False,
     )
-    second_round = _retrieval_segment_context(
+    adjacent_scope = _retrieval_segment_context(
         _video_description(),
         slots,
-        2,
+        include_adjacent=True,
     )
     assert [
-        segment["segment_id"] for segment in first_round["slot_01"]
+        segment["segment_id"] for segment in planned_scope["slot_01"]
     ] == ["segment_0002"]
     assert [
-        segment["segment_id"] for segment in second_round["slot_01"]
+        segment["segment_id"] for segment in adjacent_scope["slot_01"]
     ] == ["segment_0001", "segment_0002", "segment_0003"]
 
 
@@ -569,8 +800,339 @@ def test_candidate_retrieval_expands_without_calling_infeasible_round(
         context,
     )
 
-    assert operations == ["Candidate retrieval round 2 slot slot_01"]
+    assert operations == ["Candidate retrieval round 3 slot slot_01"]
     assert len(pool["slot_01"]) == 3
+
+
+def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slot = {
+        **_slots()[0],
+        "planned_duration_sec": 4.0,
+        "source_segment_ids": ["segment_0002"],
+        "required_visible_subjects": ["focal subject"],
+    }
+    video_description = _video_description()
+    segment = video_description["segments"][1]
+    segment["time_range"]["end_sec"] = 30.0
+    segment["shots"][0]["time_range"]["end_sec"] = 30.0
+    video_description["segments"][2]["time_range"] = {
+        "start_sec": 30.0,
+        "end_sec": 40.0,
+    }
+    video_description["segments"][2]["shots"][0]["time_range"] = {
+        "start_sec": 30.0,
+        "end_sec": 40.0,
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("request", {"instruction": "test"})
+    context.set_artifact("video_description", video_description)
+    calls: list[dict[str, object]] = []
+
+    def call_prompt(**kwargs):
+        package = kwargs["package"]
+        segment_match = re.search(
+            r"<available_source_segments_by_slot>\n(.*?)\n"
+            r"</available_source_segments_by_slot>",
+            package.user_prompt,
+            re.DOTALL,
+        )
+        confirmed_match = re.search(
+            r"<confirmed_candidates>\n(.*?)\n</confirmed_candidates>",
+            package.user_prompt,
+            re.DOTALL,
+        )
+        assert segment_match is not None
+        assert confirmed_match is not None
+        supplied_segments = json.loads(segment_match.group(1))["slot_01"]
+        confirmed = json.loads(confirmed_match.group(1))["slot_01"]
+        calls.append(
+            {
+                "operation": package.operation,
+                "segment_ids": [
+                    item["segment_id"] for item in supplied_segments
+                ],
+                "confirmed": confirmed,
+            }
+        )
+        timestamps = (
+            [
+                "00:00:10,000-00:00:14,000",
+                "00:00:14,000-00:00:18,000",
+            ]
+            if len(calls) == 1
+            else ["00:00:18,000-00:00:22,000"]
+        )
+        response = {
+            "candidates": [
+                {
+                    "slot_id": "slot_01",
+                    "items": [
+                        {
+                            "timestamp": timestamp,
+                            "description": "visible source content",
+                            "matched_dialogue": "",
+                            "semantic_relevance": 0.8,
+                            "emotional_intensity": 0.5,
+                            "salience": 0.7,
+                        }
+                        for timestamp in timestamps
+                    ],
+                }
+            ]
+        }
+        return kwargs["validate_business"](response)
+
+    def add_visual_features(_video_path, slots, pool, *_args, **_kwargs):
+        for candidate in pool[slots[0]["slot_id"]]:
+            accepted = candidate["timestamp"] != "00:00:14,000-00:00:18,000"
+            candidate.update(
+                {
+                    "description": "visible source content",
+                    "visible_subjects": ["focal subject"] if accepted else [],
+                    "protagonist_visibility_likert": 5 if accepted else 1,
+                    "visual_slot_relevance_likert": 5,
+                    "visual_evidence": (
+                        "clear identity" if accepted else "different identity"
+                    ),
+                }
+            )
+
+    monkeypatch.setattr(context, "call_prompt", call_prompt)
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        add_visual_features,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda _video_path, pool, *_args: [
+            candidate.update({"kinetic_energy": 0.5})
+            for candidates in pool.values()
+            for candidate in candidates
+        ],
+    )
+
+    pool = retrieve_candidates(
+        [slot],
+        tmp_path / "video.mp4",
+        LLMConfig(model="text", base_url="", api_key="test"),
+        VLMConfig(model="vision", base_url="", api_key="test"),
+        CandidateRetrievalConfig(
+            candidates_per_slot=2,
+            retrieval_max_rounds=2,
+        ),
+        context,
+    )
+
+    assert [call["segment_ids"] for call in calls] == [
+        ["segment_0002"],
+        ["segment_0002"],
+    ]
+    assert calls[0]["confirmed"] == []
+    assert calls[1]["confirmed"] == [
+        {
+            "candidate_id": "slot_01_round_01_candidate_01",
+            "timestamp": "00:00:10,000-00:00:14,000",
+            "visible_description": "visible source content",
+            "visual_evidence": "clear identity",
+        }
+    ]
+    assert [candidate["timestamp"] for candidate in pool["slot_01"]] == [
+        "00:00:10,000-00:00:14,000",
+        "00:00:18,000-00:00:22,000",
+    ]
+
+
+def test_vlm_rejection_retries_adjacent_segment_scope(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slot = {
+        **_slots()[0],
+        "planned_duration_sec": 4.0,
+        "source_segment_ids": ["segment_0002"],
+        "required_visible_subjects": ["focal subject"],
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("request", {"instruction": "test"})
+    context.set_artifact("video_description", _video_description())
+    operations: list[str] = []
+
+    def call_prompt(**kwargs):
+        package = kwargs["package"]
+        operations.append(package.operation)
+        timestamps = (
+            [
+                "00:00:00,000-00:00:04,000",
+                "00:00:10,000-00:00:14,000",
+                "00:00:20,000-00:00:24,000",
+            ]
+            if len(operations) == 1
+            else [
+                "00:00:04,000-00:00:08,000",
+                "00:00:14,000-00:00:18,000",
+            ]
+        )
+        response = {
+            "candidates": [
+                {
+                    "slot_id": "slot_01",
+                    "items": [
+                        {
+                            "timestamp": timestamp,
+                            "description": "visible source content",
+                            "matched_dialogue": "",
+                            "semantic_relevance": 0.8,
+                            "emotional_intensity": 0.5,
+                            "salience": 0.7,
+                        }
+                        for timestamp in timestamps
+                    ],
+                }
+            ]
+        }
+        return kwargs["validate_business"](response)
+
+    def add_visual_features(_video_path, slots, pool, *_args, **_kwargs):
+        for candidate in pool[slots[0]["slot_id"]]:
+            accepted = (
+                len(operations) > 1
+                or candidate["timestamp"] == "00:00:10,000-00:00:14,000"
+            )
+            candidate.update(
+                {
+                    "description": "visible source content",
+                    "visible_subjects": ["focal subject"] if accepted else [],
+                    "protagonist_visibility_likert": 5 if accepted else 1,
+                    "visual_slot_relevance_likert": 5,
+                    "visual_evidence": (
+                        "clear identity" if accepted else "different identity"
+                    ),
+                }
+            )
+
+    monkeypatch.setattr(context, "call_prompt", call_prompt)
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        add_visual_features,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda _video_path, pool, *_args: [
+            candidate.update({"kinetic_energy": 0.5})
+            for candidates in pool.values()
+            for candidate in candidates
+        ],
+    )
+
+    pool = retrieve_candidates(
+        [slot],
+        tmp_path / "video.mp4",
+        LLMConfig(model="text", base_url="", api_key="test"),
+        VLMConfig(model="vision", base_url="", api_key="test"),
+        CandidateRetrievalConfig(
+            candidates_per_slot=3,
+            retrieval_max_rounds=2,
+        ),
+        context,
+    )
+
+    assert operations == [
+        "Candidate retrieval round 3 slot slot_01",
+        "Candidate retrieval round 4 slot slot_01",
+    ]
+    assert len(pool["slot_01"]) == 3
+
+
+def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slot = {
+        **_slots()[0],
+        "planned_duration_sec": 4.0,
+        "source_segment_ids": ["segment_0002"],
+        "required_visible_subjects": ["focal subject"],
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("request", {"instruction": "test"})
+    context.set_artifact("video_description", _video_description())
+
+    def call_prompt(**kwargs):
+        response = {
+            "candidates": [
+                {
+                    "slot_id": "slot_01",
+                    "items": [
+                        {
+                            "timestamp": timestamp,
+                            "description": "visible source content",
+                            "matched_dialogue": "",
+                            "semantic_relevance": 0.8,
+                            "emotional_intensity": 0.5,
+                            "salience": 0.7,
+                        }
+                        for timestamp in (
+                            "00:00:00,000-00:00:04,000",
+                            "00:00:10,000-00:00:14,000",
+                            "00:00:20,000-00:00:24,000",
+                        )
+                    ],
+                }
+            ]
+        }
+        return kwargs["validate_business"](response)
+
+    def add_visual_features(_video_path, slots, pool, *_args, **_kwargs):
+        for candidate in pool[slots[0]["slot_id"]]:
+            accepted = candidate["timestamp"] == "00:00:10,000-00:00:14,000"
+            candidate.update(
+                {
+                    "description": "visible source content",
+                    "visible_subjects": ["focal subject"] if accepted else [],
+                    "protagonist_visibility_likert": 5 if accepted else 1,
+                    "visual_slot_relevance_likert": 5,
+                    "visual_evidence": (
+                        "clear identity" if accepted else "different identity"
+                    ),
+                }
+            )
+
+    monkeypatch.setattr(context, "call_prompt", call_prompt)
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        add_visual_features,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        lambda _video_path, pool, *_args: [
+            candidate.update({"kinetic_energy": 0.5})
+            for candidates in pool.values()
+            for candidate in candidates
+        ],
+    )
+
+    pool = retrieve_candidates(
+        [slot],
+        tmp_path / "video.mp4",
+        LLMConfig(model="text", base_url="", api_key="test"),
+        VLMConfig(model="vision", base_url="", api_key="test"),
+        CandidateRetrievalConfig(
+            candidates_per_slot=3,
+            retrieval_max_rounds=1,
+        ),
+        context,
+    )
+
+    assert len(pool["slot_01"]) == 1
+    assert context.get_artifact("retrieval_failure") == {
+        "reason": "insufficient_visually_grounded_candidates",
+        "shortages": {"slot_01": 2},
+        "planned_segment_rounds": 1,
+        "adjacent_expansion_rounds": 1,
+    }
 
 
 def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(

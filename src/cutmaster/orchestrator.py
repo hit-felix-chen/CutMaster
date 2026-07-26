@@ -5,6 +5,7 @@ import shutil
 import time
 
 from cutmaster.editing.source_windows import optimize_script_source_windows
+from cutmaster.editing.dialogue_audio import prepare_dialogue_audio
 from cutmaster.music.analysis import analyze_music, write_music_profile
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
@@ -47,6 +48,7 @@ def run_orchestrator(
     adapted_script_path = output_dir / "script_adapted.json"
     music_profile_path = output_dir / "music_profile.json"
     edit_plan_path = output_dir / "edit_plan.json"
+    dialogue_anchors_path = output_dir / "dialogue_anchors.json"
     candidate_pool_path = output_dir / "candidate_pool.json"
     selection_path = output_dir / "selection_diagnostics.json"
     planning_history_path = output_dir / "planning_history.json"
@@ -126,9 +128,11 @@ def run_orchestrator(
     planning_context = WorkflowContext(planning_history_path)
     planning_context.set_artifact("music_profile", music_profile)
     planning_context.set_artifact("video_description", material.video_description)
+    planning_context.set_artifact("video_summary", material.video_summary)
     planner = Planner(request.video_path, config, planning_context)
 
     planning_seconds = 0.0
+    dialogue_anchor_seconds = 0.0
     retrieval_seconds = 0.0
     pairwise_seconds = 0.0
     selection_seconds = 0.0
@@ -169,6 +173,40 @@ def run_orchestrator(
         )
 
         try:
+            attempt_stage = "dialogue_anchor_selection"
+            stage_started = time.monotonic()
+            log_event(
+                "INFO",
+                "planner.anchor",
+                "stage.start",
+                "Original-dialogue anchor selection started",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+            )
+            slots = planner.anchor_dialogue(slots)
+            planning_context.set_artifact("edit_plan", slots)
+            edit_plan_path.write_text(
+                json.dumps(slots, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            anchors = planning_context.get_artifact("dialogue_anchors", [])
+            dialogue_anchors_path.write_text(
+                json.dumps(anchors, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            elapsed = time.monotonic() - stage_started
+            dialogue_anchor_seconds += elapsed
+            log_event(
+                "INFO",
+                "planner.anchor",
+                "stage.complete",
+                "Original-dialogue anchor selection completed",
+                stage=attempt_stage,
+                attempt=planning_attempt,
+                anchors=len(anchors),
+                elapsed_sec=elapsed,
+            )
+
             attempt_stage = "retrieval"
             stage_started = time.monotonic()
             log_event(
@@ -329,6 +367,7 @@ def run_orchestrator(
         json.dumps(candidate_pool, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     timings["slot_planning"] = planning_seconds
+    timings["dialogue_anchor_selection"] = dialogue_anchor_seconds
     timings["candidate_retrieval"] = retrieval_seconds
     timings["pairwise_visual_scoring"] = pairwise_seconds
 
@@ -430,6 +469,37 @@ def run_orchestrator(
     stage_started = time.monotonic()
     log_event(
         "INFO",
+        "dialogue_audio",
+        "stage.start",
+        "Dialogue audio preparation started",
+        stage="dialogue_audio_preparation",
+        enabled=config.dialogue_anchors.enable_vocal_separation,
+        anchors=sum(
+            item.get("dialogue_anchor") is not None
+            for item in adapted_script
+        ),
+    )
+    adapted_script = prepare_dialogue_audio(
+        request.video_path,
+        adapted_script,
+        output_dir,
+        config.dialogue_anchors,
+    )
+    write_script(adapted_script_path, adapted_script)
+    timings["dialogue_audio_preparation"] = time.monotonic() - stage_started
+    log_event(
+        "INFO",
+        "dialogue_audio",
+        "stage.complete",
+        "Dialogue audio preparation completed",
+        stage="dialogue_audio_preparation",
+        enabled=config.dialogue_anchors.enable_vocal_separation,
+        elapsed_sec=timings["dialogue_audio_preparation"],
+    )
+
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
         "renderer",
         "stage.start",
         "Montage rendering started",
@@ -442,6 +512,7 @@ def run_orchestrator(
         adapted_script,
         output_dir,
         config.render,
+        config.dialogue_anchors,
     )
     timings["rendering"] = time.monotonic() - stage_started
     log_event(
@@ -463,10 +534,12 @@ def run_orchestrator(
         music_profile=str(music_profile_path),
         material_directory=str(material.material_directory),
         video_description=str(material.video_description_path),
+        video_summary=str(material.video_summary_path),
         analysis_history=str(material.analysis_history_path),
         planning_history=str(planning_history_path),
         edit_plan=str(edit_plan_path),
         candidate_pool=str(candidate_pool_path),
+        dialogue_anchors=str(dialogue_anchors_path),
         raw_script=str(raw_script_path),
         adapted_script=str(adapted_script_path),
         montage_video=str(montage_path),

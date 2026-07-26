@@ -435,8 +435,7 @@ def path_to_script(
     for index, (slot, candidate) in enumerate(zip(slots, path, strict=True), 1):
         output_start = float(slot["output_start_sec"])
         output_end = float(slot["output_end_sec"])
-        script.append(
-            {
+        item = {
                 "_id": index,
                 "video_id": 1,
                 "video_name": video_path.name,
@@ -469,5 +468,7 @@ def path_to_script(
                     "salience": candidate["salience"],
                 },
             }
-        )
+        if candidate.get("dialogue_anchor") is not None:
+            item["dialogue_anchor"] = dict(candidate["dialogue_anchor"])
+        script.append(item)
     return script

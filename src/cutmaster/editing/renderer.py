@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import RenderConfig
+from cutmaster.configuration.schema import DialogueAnchorConfig, RenderConfig
 from cutmaster.editing.ffmpeg import (
     RenderError,
     encoder_args,
@@ -70,21 +70,58 @@ def concatenate_clips(clips: list[Path], output: Path) -> None:
     ])
 
 
-def build_final_audio_filter(config: RenderConfig, duration: float) -> str:
+def build_final_audio_filter(
+    config: RenderConfig,
+    duration: float,
+    dialogue_anchors: list[dict[str, Any]] | None = None,
+    dialogue_config: DialogueAnchorConfig | None = None,
+) -> str:
+    dialogue_anchors = dialogue_anchors or []
+    dialogue_config = dialogue_config or DialogueAnchorConfig()
     fade_duration = min(3.0, max(0.1, duration))
     fade_start = max(0.0, duration - fade_duration)
+    duck_condition = "+".join(
+        "between(t\\,"
+        f"{float(anchor['output_audio_start_sec']):.3f}\\,"
+        f"{float(anchor['output_audio_end_sec']):.3f})"
+        for anchor in dialogue_anchors
+    )
+    volume = (
+        f"volume='if({duck_condition}\\,"
+        f"{dialogue_config.bgm_duck_volume}\\,{config.bgm_volume})':eval=frame,"
+        if duck_condition
+        else f"volume={config.bgm_volume},"
+    )
     bgm_filter = (
-        f"[1:a]volume={config.bgm_volume},atrim=0:{duration:.3f},"
+        f"[1:a]{volume}atrim=0:{duration:.3f},"
         f"afade=t=out:st={fade_start:.3f}:d={fade_duration:.3f},asetpts=PTS-STARTPTS"
     )
-    if config.original_volume <= 0:
+    if not dialogue_anchors:
         return f"{bgm_filter}[aout]"
-    return (
-        f"[0:a]volume={config.original_volume},atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[a0];"
-        f"{bgm_filter}[a1];"
-        f"[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
+    parts = [f"{bgm_filter}[abgm]"]
+    labels = ["[abgm]"]
+    for index, anchor in enumerate(dialogue_anchors, start=2):
+        anchor_duration = (
+            float(anchor["source_audio_end_sec"])
+            - float(anchor["source_audio_start_sec"])
+        )
+        fade = min(dialogue_config.fade_sec, anchor_duration / 2.0)
+        delay_ms = round(float(anchor["output_audio_start_sec"]) * 1000)
+        label = f"a{index}"
+        parts.append(
+            f"[{index}:a]volume={dialogue_config.dialogue_volume},"
+            f"afade=t=in:st=0:d={fade:.3f},"
+            f"afade=t=out:st={max(0.0, anchor_duration - fade):.3f}:d={fade:.3f},"
+            f"asetpts=PTS-STARTPTS,adelay={delay_ms}:all=1[{label}]"
+        )
+        labels.append(f"[{label}]")
+    parts.append(
+        "".join(labels)
+        + f"amix=inputs={len(labels)}:duration=longest:"
+        "dropout_transition=0:normalize=0,"
         f"atrim=0:{duration:.3f}[aout]"
     )
+    return ";".join(parts)
 
 
 def mix_bgm(
@@ -93,17 +130,58 @@ def mix_bgm(
     output: Path,
     config: RenderConfig,
     duration: float | None = None,
+    *,
+    source_video: Path | None = None,
+    script: list[dict[str, Any]] | None = None,
+    dialogue_config: DialogueAnchorConfig | None = None,
 ) -> None:
     duration = float(duration if duration is not None else media_duration(montage))
-    audio_filter = build_final_audio_filter(config, duration)
-    run_media_command([
+    dialogue_anchors = [
+        dict(item["dialogue_anchor"])
+        for item in (script or [])
+        if item.get("dialogue_anchor") is not None
+    ]
+    if (
+        any(not anchor.get("prepared_audio_path") for anchor in dialogue_anchors)
+        and source_video is None
+    ):
+        raise RenderError("Dialogue anchors require the source video")
+    audio_filter = build_final_audio_filter(
+        config,
+        duration,
+        dialogue_anchors,
+        dialogue_config,
+    )
+    command = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(montage), "-stream_loop", "-1", "-i", str(bgm),
+    ]
+    for anchor in dialogue_anchors:
+        prepared_audio_path = anchor.get("prepared_audio_path")
+        if prepared_audio_path:
+            command.extend(["-i", str(prepared_audio_path)])
+        else:
+            anchor_duration = (
+                float(anchor["source_audio_end_sec"])
+                - float(anchor["source_audio_start_sec"])
+            )
+            command.extend(
+                [
+                    "-ss",
+                    f"{float(anchor['source_audio_start_sec']):.3f}",
+                    "-t",
+                    f"{anchor_duration:.3f}",
+                    "-i",
+                    str(source_video),
+                ]
+            )
+    command.extend([
         "-filter_complex", audio_filter,
         "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ar", str(config.audio_sample_rate),
         "-ac", "2", "-t", f"{duration:.3f}", "-movflags", "+faststart", str(output),
     ])
+    run_media_command(command)
 
 
 def render_montage(
@@ -112,6 +190,7 @@ def render_montage(
     script: list[dict[str, Any]],
     output_dir: Path,
     config: RenderConfig,
+    dialogue_config: DialogueAnchorConfig | None = None,
 ) -> tuple[Path, Path]:
     check_media_tools()
     if config.original_volume > 0:
@@ -181,5 +260,14 @@ def render_montage(
         for item in script
     )
     expected_duration = expected_frames / config.fps
-    mix_bgm(montage_path, audio_path, output_path, config, expected_duration)
+    mix_bgm(
+        montage_path,
+        audio_path,
+        output_path,
+        config,
+        expected_duration,
+        source_video=video_path,
+        script=script,
+        dialogue_config=dialogue_config,
+    )
     return montage_path, output_path

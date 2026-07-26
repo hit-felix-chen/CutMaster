@@ -41,7 +41,19 @@ api_key_env = "CUTMASTER_TEST_KEY"
 shot_sample_frames = 5
 
 [slot_planning]
+target_clip_duration_sec = 4.5
 replan_max_rounds = 2
+
+[dialogue_anchors]
+enable_vocal_separation = false
+max_anchors = 3
+min_anchor_duration_sec = 2.0
+separator_model = "htdemucs"
+separator_device = "cpu"
+separator_segment_sec = 6
+separator_shifts = 1
+separator_padding_sec = 0.75
+separated_loudness_lufs = -18.0
 
 [candidate_retrieval]
 candidates_per_slot = 3
@@ -84,7 +96,15 @@ threads = 2
     assert config.material_analysis.material_cache_dir == tmp_path / "materials"
     assert config.shot_detection.adaptive_threshold == 2.5
     assert config.shot_annotation.shot_sample_frames == 5
+    assert config.slot_planning.target_clip_duration_sec == 4.5
     assert config.slot_planning.replan_max_rounds == 2
+    assert config.dialogue_anchors.enable_vocal_separation is False
+    assert config.dialogue_anchors.max_anchors == 3
+    assert config.dialogue_anchors.min_anchor_duration_sec == 2.0
+    assert config.dialogue_anchors.separator_device == "cpu"
+    assert config.dialogue_anchors.separator_segment_sec == 6
+    assert config.dialogue_anchors.separator_padding_sec == 0.75
+    assert config.dialogue_anchors.separated_loudness_lufs == -18.0
     assert config.beam_search.beam_width == 6
     assert config.script_review.review_rounds == 1
     assert config.source_window_optimization.max_workers == 3

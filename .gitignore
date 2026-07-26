@@ -4,8 +4,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-config.toml
 outputs/
 
 # ignore cache dictionary
 .cutmaster/
+
+# ignore env file
+.env

@@ -18,7 +18,6 @@ class RunRequest:
     prompt_type: str = "event"
     video_title: str = ""
     subtitle_path: Path | None = None
-    custom_clips: int | None = None
     max_clip_duration_sec: float | None = None
     overwrite: bool = False
 
@@ -33,10 +32,12 @@ class OrchestrationResult:
     music_profile: str
     material_directory: str
     video_description: str
+    video_summary: str
     analysis_history: str
     planning_history: str
     edit_plan: str
     candidate_pool: str
+    dialogue_anchors: str
     raw_script: str
     adapted_script: str
     montage_video: str

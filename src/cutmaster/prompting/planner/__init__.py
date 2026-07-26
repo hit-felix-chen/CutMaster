@@ -3,6 +3,7 @@
 from cutmaster.prompting.planner.tasks import (
     CandidateRetrievalDetails,
     CandidateVisualScoringDetails,
+    DialogueAnchorSelectionDetails,
     PairwiseScoringDetails,
     ScriptReviewDetails,
     SlotPlanningDetails,
@@ -11,6 +12,7 @@ from cutmaster.prompting.planner.tasks import (
 __all__ = [
     "CandidateRetrievalDetails",
     "CandidateVisualScoringDetails",
+    "DialogueAnchorSelectionDetails",
     "PairwiseScoringDetails",
     "ScriptReviewDetails",
     "SlotPlanningDetails",

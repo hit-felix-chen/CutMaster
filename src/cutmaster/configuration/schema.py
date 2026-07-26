@@ -58,7 +58,24 @@ class ShotAnnotationConfig:
 
 @dataclass(frozen=True)
 class SlotPlanningConfig:
+    target_clip_duration_sec: float = 4.0
     replan_max_rounds: int = 3
+
+
+@dataclass(frozen=True)
+class DialogueAnchorConfig:
+    max_anchors: int = 4
+    min_anchor_duration_sec: float = 1.5
+    enable_vocal_separation: bool = True
+    separator_model: str = "htdemucs"
+    separator_device: str = "auto"
+    separator_segment_sec: int = 7
+    separator_shifts: int = 0
+    separator_padding_sec: float = 1.0
+    separated_loudness_lufs: float = -16.0
+    dialogue_volume: float = 1.0
+    bgm_duck_volume: float = 0.08
+    fade_sec: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,7 @@ class AppConfig:
     asr: ASRConfig
     shot_annotation: ShotAnnotationConfig
     slot_planning: SlotPlanningConfig
+    dialogue_anchors: DialogueAnchorConfig
     candidate_retrieval: CandidateRetrievalConfig
     beam_search: BeamSearchConfig
     script_review: ScriptReviewConfig

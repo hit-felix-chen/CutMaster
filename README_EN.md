@@ -19,11 +19,11 @@ NarratoAI adapter as an independent Python project.
 
 CutMaster currently performs reusable full-video Shot/Segment analysis,
 LLM-assisted dialogue reconstruction, structured music analysis, abstract
-edit-slot planning, structured-video multi-candidate retrieval, temporally
-dependent Beam Search, versioned script patching,
-source-window refinement against visual cuts, and deterministic FFmpeg
-rendering. Source audio is muted in the final video; only the selected BGM is
-retained.
+edit-slot planning, original-dialogue anchoring, structured-video
+multi-candidate retrieval, temporally dependent Beam Search, versioned script
+patching, source-window refinement against visual cuts, and deterministic
+FFmpeg rendering. Ordinary clips remain muted; only selected dialogue anchors
+contribute source audio.
 
 ## Workflow
 
@@ -38,9 +38,11 @@ source video + BGM + instruction
   -> save each Segment as an independent reusable video file
   -> annotate Segments in parallel and Shots serially, one Shot and five frames per VLM call
   -> write a reusable video_description.json
+  -> summarize the fully annotated video into a reusable video_summary.json
   -> analyze BGM beats, accents, energy curves, and sections into a structured profile
-  -> let the LLM plan abstract edit slots without source timestamps
+  -> plan abstract edit slots from the request, music profile, story summary, and visual structure
   -> globally adjust slot durations so every output boundary lands on a music accent
+  -> select a few original-dialogue anchors from the summary and each Slot's selected Segments
   -> select several fixed-duration source windows from real Segment and Shot descriptions
   -> measure candidate motion directly from the source video
   -> compute both an independently best path and a temporally dependent Beam Search path
@@ -53,7 +55,8 @@ source video + BGM + instruction
        - prefer at least 1 second between internal cuts and clip boundaries
   -> render every clip to an exact output-frame count
   -> concatenate normalized video-only clips
-  -> loop and fade the BGM, keeping source audio muted
+  -> batch-separate and cache final anchor vocals with one Demucs invocation
+  -> mix separated anchor dialogue over a looped/faded BGM and duck it under speech
   -> output.mp4 + structured intermediate artifacts
 ```
 
@@ -105,6 +108,13 @@ Shot annotations are stored independently under
 state and does not record model calls, full prompts, context snapshots, or raw
 responses.
 
+After every Shot and Segment is annotated, the text model writes
+`video_summary.json`, covering the coherent plot, chronological story beats,
+character arcs, themes, and ending. This artifact is cached per source video.
+Later planning and candidate retrieval use it instead of the complete
+transcript for plot understanding. Only dialogue-anchor selection additionally
+receives the exact dialogue inside the Segments selected by each Slot.
+
 ### Music profiling and abstract planning
 
 CutMaster uses `librosa` to measure RMS, onset strength, spectral centroid, and
@@ -113,19 +123,21 @@ series, beats, strong accents, section boundaries and roles, and
 energy-dependent suggested clip-duration ranges. Beats and accents are repeated
 when the BGM will loop in the final render.
 
-Initial planning enables model thinking and requests
-`ceil(target_duration / target_shot_length)` slots by default. The model
-describes each slot's content, narrative role, target emotional intensity,
-target kinetic energy, continuity requirement, and desired duration. It is not
-allowed to produce source timestamps. A global dynamic program then adjusts all
-boundaries together so cuts land on music accents while remaining monotonic and
-non-empty.
+Initial planning enables model thinking and lets the model choose the Slot
+count. `slot_planning.target_clip_duration_sec` is a soft duration target for
+ordinary continuous clips. Every `narrative_role` may be repeated or omitted;
+the labels do not impose a five-act template. The model describes each Slot's
+content, narrative role, target emotional intensity, target kinetic energy,
+continuity requirement, and desired duration. It is not allowed to produce
+source timestamps. A global dynamic program then adjusts all boundaries
+together so cuts land on music accents while remaining monotonic and non-empty.
 
 ### Candidate retrieval, path selection, and patching
 
-The retrieval model grounds each slot in `video_description.json` and returns
-several structured source candidates. Each LLM request contains exactly one
-Slot, while requests for different Slots run concurrently up to
+The retrieval model grounds each Slot in `video_summary.json` plus
+dialogue-stripped Segment and Shot visual descriptions, then returns several
+structured source candidates. Each LLM request contains exactly one Slot, while
+requests for different Slots run concurrently up to
 `llm.max_concurrency`. Before calling the model, Python computes how many
 non-overlapping fixed-duration windows fit in the current Segment scope. If the
 scope cannot satisfy the missing candidate count, no LLM request is made and
@@ -209,23 +221,26 @@ path used here is not stable in that environment.
 
 ```bash
 uv sync
-cp config.example.toml config.toml
+cp .env.example .env
 ```
 
-`config.toml` is ignored by Git. The loader accepts either a key stored directly
-as `api_key` or the name of an environment variable stored as `api_key_env`.
-For environment-based configuration, use the following entry in `[llm]`,
-`[vlm]`, and `[asr]`:
+Put the real credential in `.env`:
+
+```dotenv
+DASHSCOPE_API_KEY="..."
+```
+
+The `[llm]`, `[vlm]`, and `[asr]` tables in `config.toml` all reference it:
 
 ```toml
 api_key_env = "DASHSCOPE_API_KEY"
 ```
 
-Then export the key before running CutMaster:
-
-```bash
-export DASHSCOPE_API_KEY="..."
-```
+At every CLI startup, CutMaster loads `.env` from the directory containing the
+selected `config.toml` without overriding variables already present in the
+process environment. This also works when the benchmark launches CutMaster
+from another working directory. `config.toml` is the single version-controlled
+workflow configuration; `.env` is ignored by Git and stores credentials only.
 
 ## Configuration
 
@@ -297,9 +312,46 @@ optimization.
 
 | Key | Purpose | Default |
 | --- | --- | --- |
+| `target_clip_duration_sec` | Soft duration target for ordinary continuous clips; does not fix Slot count | `4.0` |
 | `replan_max_rounds` | Maximum replans after retrieval or chronology failure | `3` |
 
-### Stage 4: `[candidate_retrieval]`
+### Stage 4: `[dialogue_anchors]`
+
+After music alignment, the planner selects a small set of original-dialogue
+anchors from each Slot's assigned Segments. An anchor may be one complete long
+line or an inclusive range of consecutive dialogue items in the same Segment.
+The model receives the user request, reusable story summary, complete
+descriptions of the Segments selected by each Slot, relevant Shot descriptions,
+and exact dialogue from only those Segments. It does not receive the music
+profile or the full line-by-line transcript.
+The model returns the first and last dialogue IDs; all intervening lines,
+speaker changes, and natural pauses remain in the range. A Slot bounds the
+corresponding source-picture passage, not the dialogue duration. Every anchor
+uses a start-aligned L-cut: speech and its corresponding source picture begin
+at the selected Slot start, and longer speech continues over following visual
+Slots. Wherever original picture and sound coexist, they retain the same
+source-time mapping. If proposed anchors conflict, Python deterministically
+selects the non-overlapping subset with the most dialogue passages, breaking a
+tie by the greatest total speech duration. Selection rejects
+fragments, generic reactions, and lines that lack standalone meaning, narrative
+importance, or direct relevance to the user's request.
+
+| Key | Purpose | Default |
+| --- | --- | --- |
+| `max_anchors` | Maximum number of original-dialogue anchors | `4` |
+| `min_anchor_duration_sec` | Minimum duration of a selected coherent spoken range | `1.5` |
+| `enable_vocal_separation` | Separate final anchor vocals with Demucs | `true` |
+| `separator_model` | Demucs model | `htdemucs` |
+| `separator_device` | `auto` chooses CUDA, MPS, then CPU | `auto` |
+| `separator_segment_sec` | Demucs chunk size used to bound memory | `7` |
+| `separator_shifts` | Shift-ensemble count; zero is fastest | `0` |
+| `separator_padding_sec` | Context added around each line before separation | `1.0` |
+| `separated_loudness_lufs` | Target loudness for each separated line | `-16.0` |
+| `dialogue_volume` | Selected original-dialogue volume | `1.0` |
+| `bgm_duck_volume` | BGM volume during anchored dialogue | `0.08` |
+| `fade_sec` | Short fade at each dialogue excerpt edge | `0.05` |
+
+### Stage 5: `[candidate_retrieval]`
 
 | Key | Purpose | Default |
 | --- | --- | --- |
@@ -362,10 +414,9 @@ All `run` options:
 | `--config PATH` | no | TOML config; defaults to `config.toml` |
 | `--subtitle PATH` | no | Existing SRT; bypasses Fun-ASR |
 | `--target-duration SEC` | no | Target output duration; default `60` |
-| `--target-shot-length SEC` | no | Nominal clip duration; default `4` |
+| `--target-shot-length SEC` | no | Fallback duration used during adaptation; does not constrain Slot count; default `4` |
 | `--prompt-type TYPE` | no | Metadata supplied to script generation; default `event` |
 | `--video-title TEXT` | no | Human-readable source title supplied to the model |
-| `--custom-clips N` | no | Override the calculated clip count |
 | `--max-clip-duration SEC` | no | Hard cap applied during duration adaptation |
 | `--overwrite` | no | Replace an existing run output |
 
@@ -385,6 +436,7 @@ Each material-analysis cache directory contains:
 | `segments/segment_XXXX.mp4` | Independently saved Segment video files |
 | `shot_annotations/shot_XXXXX.json` | Reusable final structured annotation for one Shot |
 | `video_description.json` | Structured Segment, Shot, scene, character, and dialogue descriptions |
+| `video_summary.json` | Reusable plot summary, story beats, character arcs, themes, and ending |
 | `analysis_history.json` | Lightweight material-analysis state without model-call content |
 | `analysis_manifest.json` | Cache input, model, schema, and detector signature |
 
@@ -395,6 +447,7 @@ Each task output directory contains:
 | `source.srt`, `dialogues.json`, `dialogue_merged.srt` | Task audit copies from the material cache |
 | `music_profile.json` | Music energy, beats, accents, sections, and suggested durations |
 | `edit_plan.json` | Accent-aligned abstract edit slots without source timestamps |
+| `dialogue_anchors.json` | Ordered dialogue items, speakers, Slot, source-audio, and output ranges |
 | `candidate_pool.json` | Structured-video candidates, model scores, and local motion features |
 | `selection_diagnostics.json` | Independent-best and Beam Search paths with scores |
 | `planning_history.json` | Planning artifacts and versioned scripts/patches without model-call content |
@@ -402,7 +455,7 @@ Each task output directory contains:
 | `script_adapted.json` | Frame-grid output ranges, beat alignment, refined source ranges, and cut diagnostics |
 | `clips/clip_XXXX.mp4` | Normalized, video-only intermediate clips |
 | `montage.mp4` | Concatenated video-only montage before BGM mixing |
-| `output.mp4` | Final montage with looped/faded BGM and muted source audio |
+| `output.mp4` | Final montage with looped/faded BGM and selected original dialogue |
 | `result.json` | Final paths, durations, clip counts, wall time, and per-stage timings |
 | `cutmaster.log` | INFO/DEBUG backend execution log |
 

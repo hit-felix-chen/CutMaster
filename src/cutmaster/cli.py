@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from cutmaster.configuration.loader import load_config
 from cutmaster.contracts.workflow import RunRequest
 from cutmaster.runtime.observability import configure_logging, error_summary, log_event
@@ -27,21 +29,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--target-shot-length", type=float, default=4.0)
     run.add_argument("--prompt-type", default="event")
     run.add_argument("--video-title", default="")
-    run.add_argument("--custom-clips", type=int)
     run.add_argument("--max-clip-duration", type=float)
     run.add_argument("--overwrite", action="store_true")
     return parser
+
+
+def _load_runtime_environment(config_path: Path) -> None:
+    load_dotenv(config_path.parent / ".env", override=False)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command != "run":
         return 2
+    config_path = args.config.resolve()
+    _load_runtime_environment(config_path)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Benchmark adapters commonly pipe child output before forwarding it to a real
     # terminal, so isatty() alone cannot determine whether colors are visible.
     configure_logging(args.output_dir / "cutmaster.log", console_color=True)
-    config = load_config(args.config.resolve())
+    config = load_config(config_path)
     request = RunRequest(
         video_path=args.video.resolve(),
         audio_path=args.audio.resolve(),
@@ -52,7 +59,6 @@ def main(argv: list[str] | None = None) -> int:
         prompt_type=args.prompt_type,
         video_title=args.video_title,
         subtitle_path=args.subtitle.resolve() if args.subtitle else None,
-        custom_clips=args.custom_clips,
         max_clip_duration_sec=args.max_clip_duration,
         overwrite=args.overwrite,
     )

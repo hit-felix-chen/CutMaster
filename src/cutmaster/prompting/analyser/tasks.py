@@ -47,6 +47,11 @@ class ShotAnnotationDetails:
     sampled_frame_times_sec: list[float]
 
 
+@dataclass(frozen=True)
+class VideoSummaryDetails:
+    segment_ids: list[str]
+
+
 def _dialogue_reconstruction(
     details: DialogueReconstructionDetails,
 ) -> PromptPackage:
@@ -397,6 +402,125 @@ medium_close_up is not an allowed value. Describe locations concretely from visi
     )
 
 
+def _video_summary(details: VideoSummaryDetails) -> PromptPackage:
+    contract = ResponseContract(
+        version="1.0",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "schema_version",
+                "title",
+                "logline",
+                "synopsis",
+                "chronological_story_beats",
+                "character_arcs",
+                "themes",
+                "ending",
+            ],
+            "properties": {
+                "schema_version": {"type": "string", "const": "1.0"},
+                "title": {"type": "string", "minLength": 1},
+                "logline": {"type": "string", "minLength": 1},
+                "synopsis": {"type": "string", "minLength": 1},
+                "chronological_story_beats": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "source_segment_ids",
+                            "summary",
+                            "characters",
+                            "narrative_significance",
+                        ],
+                        "properties": {
+                            "source_segment_ids": {
+                                "type": "array",
+                                "minItems": 1,
+                                "uniqueItems": True,
+                                "items": {
+                                    "type": "string",
+                                    "enum": details.segment_ids,
+                                },
+                            },
+                            "summary": {"type": "string", "minLength": 1},
+                            "characters": {
+                                "type": "array",
+                                "uniqueItems": True,
+                                "items": {"type": "string", "minLength": 1},
+                            },
+                            "narrative_significance": {
+                                "type": "string",
+                                "minLength": 1,
+                            },
+                        },
+                    },
+                },
+                "character_arcs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "character",
+                            "arc",
+                            "key_segment_ids",
+                        ],
+                        "properties": {
+                            "character": {"type": "string", "minLength": 1},
+                            "arc": {"type": "string", "minLength": 1},
+                            "key_segment_ids": {
+                                "type": "array",
+                                "uniqueItems": True,
+                                "items": {
+                                    "type": "string",
+                                    "enum": details.segment_ids,
+                                },
+                            },
+                        },
+                    },
+                },
+                "themes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "ending": {"type": "string", "minLength": 1},
+            },
+        },
+    )
+    instructions = """Create a reusable, grounded story summary after all source-video Segments
+and Shots have been annotated.
+
+Use the complete structured VideoDescription as source truth. Integrate visible actions, Segment
+summaries, dialogue meaning, character relationships, turning points, consequences, and ending.
+Resolve the story chronologically. Give enough context for later editing models to understand why
+events and lines matter without rereading the full transcript.
+
+Do not reproduce the transcript, enumerate individual dialogue lines, infer events absent from
+the annotations, or describe editing choices. The synopsis should read as a coherent account of
+the whole work. Story beats must cite the exact source Segment IDs that support them. Character
+arcs must distinguish the major characters and explain meaningful change over time."""
+    return PromptPackage(
+        stage=PromptStage.ANALYSER,
+        task=PromptTask.VIDEO_SUMMARY,
+        prompt_version="1.0",
+        operation="Full-video story summarization",
+        system_prompt=(
+            "You synthesize a reusable story understanding from a fully annotated source video. "
+            "Ground every statement in the supplied structure and return strict JSON only."
+        ),
+        user_prompt=assemble_user_prompt(instructions, contract),
+        response_contract=contract,
+        context_keys=("source_metadata", "video_description"),
+        modality=PromptModality.TEXT,
+        output_artifact="video_summary",
+    )
+
+
 prompt_registry.register(
     PromptStage.ANALYSER,
     PromptTask.DIALOGUE_RECONSTRUCTION,
@@ -411,4 +535,9 @@ prompt_registry.register(
     PromptStage.ANALYSER,
     PromptTask.SHOT_ANNOTATION,
     _shot_annotation,
+)
+prompt_registry.register(
+    PromptStage.ANALYSER,
+    PromptTask.VIDEO_SUMMARY,
+    _video_summary,
 )

@@ -1,0 +1,166 @@
+# Stage 0a: text-only LLM service
+# model: OpenAI-compatible 文本模型名称。
+# base_url: 模型服务的 OpenAI-compatible API 地址。
+# api_key_env: 保存 API Key 的环境变量名；也可在实际配置中改用 api_key。
+# enable_thinking: 是否为该服务的模型调用开启 thinking。
+# temperature: 生成采样温度，越低结果越稳定。
+# max_tokens: 单次响应允许生成的最大 token 数。
+# timeout_sec: 单次模型请求的超时时间（秒）。
+# max_retries: 首次请求失败后的完整重试次数。
+# max_concurrency: LLM 请求的最大并发数，供台词、规划、检索和复核阶段共用。
+[llm]
+model = "qwen3.7-plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+enable_thinking = true
+temperature = 0.1
+max_tokens = 40000
+timeout_sec = 600.0
+max_retries = 3
+max_concurrency = 10
+
+# Stage 0b: vision-language model service
+# 字段含义与 [llm] 相同，但配置完全独立。
+# model/base_url/api_key_env: 视觉语言模型及其服务和密钥来源。
+# enable_thinking/temperature/max_tokens: 控制视觉请求的推理与输出。
+# timeout_sec/max_retries: 控制单次视觉请求及其失败重试。
+# max_concurrency: VLM 最大并发数，逐 Shot 标注、候选核验和片段对评分共用。
+[vlm]
+model = "qwen3.7-plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+enable_thinking = true
+temperature = 0.1
+max_tokens = 40000
+timeout_sec = 600.0
+max_retries = 3
+max_concurrency = 10
+
+# Stage 1: reusable source-material analysis
+# material_cache_dir: 按视频素材和分析配置保存可复用中间产物与最终描述的根目录。
+[material_analysis]
+material_cache_dir = ".cutmaster/materials"
+
+# adaptive_threshold: PySceneDetect AdaptiveDetector 的自适应切镜阈值。
+# adaptive_min_content_val: 判定切镜所需的最低内容变化值。
+# adaptive_min_scene_len_sec: 允许生成的最短 Shot 时长（秒）。
+# duplicate_frame_threshold: 去除近重复采样帧时使用的灰度平均绝对差阈值。
+# 这组切镜参数也会被最终的源窗口优化阶段复用。
+[shot_detection]
+adaptive_threshold = 2.0
+adaptive_min_content_val = 15.0
+adaptive_min_scene_len_sec = 0.25
+duplicate_frame_threshold = 1.0
+
+# backend: ASR 服务后端，当前支持 bailian。
+# api_key_env: 保存 ASR API Key 的环境变量名；也可在实际配置中改用 api_key。
+# reuse: 是否复用已有的非空 source.srt 和 ASR 音频。
+# timeout_sec: 一个异步 ASR 任务允许等待的总时长（秒）。
+# poll_interval_sec: 查询异步 ASR 任务状态的间隔（秒）。
+# max_chars: 初始字幕条目的期望最大字符数。
+# max_subtitle_duration_sec: 初始字幕条目的期望最大持续时间（秒）。
+[asr]
+backend = "bailian"
+api_key_env = "DASHSCOPE_API_KEY"
+reuse = true
+timeout_sec = 1800.0
+poll_interval_sec = 2.0
+max_chars = 20
+max_subtitle_duration_sec = 3.5
+
+# shot_sample_frames: 每个 Shot 送给 VLM 标注的均匀采样帧数；当前固定要求为 5。
+[shot_annotation]
+shot_sample_frames = 5
+
+# Stage 2: music analysis currently has no user-tunable parameters.
+# 本阶段由 librosa 自动生成能量、onset、beat、重音和音乐段落画像。
+
+# Stage 3: music-aware edit-Slot planning
+# target_clip_duration_sec: 画面 Slot 的目标时长（秒）；平均时长须接近该值，
+# 单个 Slot 最长为该值的 1.5 倍。长原声通过 J/L-cut 跨 Slot，不会拉长画面 Slot。
+# replan_max_rounds: 候选不足或严格时序路径无解时，最多重新规划 Slot 的轮数。
+[slot_planning]
+target_clip_duration_sec = 4.0
+replan_max_rounds = 3
+
+# Stage 4: original-dialogue anchor selection and mixing
+# max_anchors: 一条成片最多选择多少段原声；只保留最有剧情价值的少量台词。
+# min_anchor_duration_sec: 每段原声的最短连续时长，过滤无意义的零碎短句。
+# enable_vocal_separation: 是否用 Demucs 从最终选中的原声锚点中分离人声。
+# separator_model: 使用的 Demucs 模型名称。
+# separator_device: 分离设备；auto 按 CUDA、MPS、CPU 的顺序自动选择。
+# separator_segment_sec: Demucs 内部分块长度（秒），调小可降低峰值内存。
+# separator_shifts: 随机平移集成次数；增加可能改善质量，但会增加耗时。
+# separator_padding_sec: 分离前在每段台词首尾增加的源音频上下文（秒）。
+# separated_loudness_lufs: 分离后每段人声的目标响度。
+# dialogue_volume: 最终混音中原声台词的音量倍率。
+# bgm_duck_volume: 原声台词播放期间背景音乐的音量倍率。
+# fade_sec: 每段原声台词首尾淡入淡出的持续时间（秒）。
+[dialogue_anchors]
+max_anchors = 5
+min_anchor_duration_sec = 3
+enable_vocal_separation = true
+separator_model = "htdemucs"
+separator_device = "auto"
+separator_segment_sec = 7
+separator_shifts = 0
+separator_padding_sec = 1.0
+separated_loudness_lufs = -16.0
+dialogue_volume = 1.0
+bgm_duck_volume = 0.5
+fade_sec = 0.3
+
+# Stage 5a: structured candidate retrieval and visual validation
+# candidates_per_slot: 每个非锚点 Slot 最终希望保留的候选片段数。
+# retrieval_max_rounds: 分别用于 Slot 指定 Segment、以及“指定 Segment＋前后各一个
+# Segment”扩展范围的最大补检轮数。两阶段耗尽后保留已通过候选继续后续流程。
+# visual_sample_frames: 每个候选片段送给 VLM 核验的均匀采样帧数。
+# protagonist_visibility_threshold: 必须出镜主体的最低归一化身份置信度。
+# protagonist_visibility_fallback_threshold: 多轮补检后允许使用的最低身份置信度。
+# motion_sample_fps: 计算候选运动强度时的视频采样帧率。
+# motion_workers: 并行解码与计算候选运动特征的 worker 数。
+[candidate_retrieval]
+candidates_per_slot = 3
+retrieval_max_rounds = 3
+visual_sample_frames = 4
+protagonist_visibility_threshold = 0.55
+protagonist_visibility_fallback_threshold = 0.5
+motion_sample_fps = 2.0
+motion_workers = 4
+
+# Stage 5b: chronological sequence selection
+# beam_width: Beam Search 每一层保留的最高分路径数量；越大搜索更充分但占用更多计算。
+[beam_search]
+beam_width = 8
+
+# Stage 6: candidate-constrained script review
+# review_rounds: 在既有候选池内让 LLM 复核并提出脚本替换的轮数。
+[script_review]
+review_rounds = 1
+
+# Stage 7: source-window optimization against visual cuts and music beats
+# search_margin_sec: 围绕候选窗口搜索更合适视觉切点的时间范围（秒）。
+# min_boundary_distance_sec: 内部切点距离片段首尾的首选安全距离（秒）。
+# max_workers: 并行执行源窗口切点优化的最大 worker 数。
+[source_window_optimization]
+search_margin_sec = 2.0
+min_boundary_distance_sec = 1.0
+max_workers = 8
+
+# Stage 8: frame-exact rendering and BGM mixing
+# width/height: 最终视频画布的像素尺寸。
+# fps: 最终输出帧率，同时定义帧精确时间轴的网格。
+# encoder: FFmpeg 视频编码器；auto 会选择当前环境可用的合适编码器。
+# threads: 使用 libx264 时的编码线程数。
+# bgm_volume: 最终背景音乐的音量倍率。
+# original_volume: 普通原片音频音量；帧精确模式必须保持为 0。
+# audio_sample_rate: 最终 AAC 音轨的采样率（Hz）。
+[render]
+width = 1920
+height = 1080
+fps = 30
+encoder = "auto"
+threads = 8
+bgm_volume = 0.3
+original_volume = 0.0
+audio_sample_rate = 48000

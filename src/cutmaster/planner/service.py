@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.planner.candidate_retrieval import retrieve_candidates
+from cutmaster.planner.dialogue_anchors import select_dialogue_anchors
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import RunRequest
 from cutmaster.runtime.workflow_context import WorkflowContext
@@ -96,12 +97,16 @@ class Planner:
             music_profile,
             self.config.llm,
             self.context,
+            target_clip_duration_sec=(
+                self.config.slot_planning.target_clip_duration_sec
+            ),
         )
         return align_slots_to_music(
             slots,
             music_profile,
             request.target_output_length_sec,
             self.config.render.fps,
+            self.config.slot_planning.target_clip_duration_sec,
         )
 
     def retrieve(self, slots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -111,6 +116,17 @@ class Planner:
             self.config.llm,
             self.config.vlm,
             self.config.candidate_retrieval,
+            self.context,
+        )
+
+    def anchor_dialogue(
+        self,
+        slots: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return select_dialogue_anchors(
+            slots,
+            self.config.llm,
+            self.config.dialogue_anchors,
             self.context,
         )
 
@@ -200,5 +216,6 @@ __all__ = [
     "retrieve_candidates",
     "review_and_patch",
     "select_paths",
+    "select_dialogue_anchors",
     "validate_chronological_path",
 ]

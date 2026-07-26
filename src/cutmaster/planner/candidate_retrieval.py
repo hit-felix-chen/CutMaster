@@ -188,7 +188,6 @@ def _validate_candidates(
                 )
             ]
             description = str(raw.get("description") or "").strip()
-            matched_dialogue = str(raw.get("matched_dialogue") or "").strip()
             if not description:
                 raise ValueError(f"Candidate for {slot_id} lacks structured visual context")
             result[slot_id].append(
@@ -200,7 +199,6 @@ def _validate_candidates(
                     "source_shot_ids": source_shot_ids,
                     "structured_context": description,
                     "description": description,
-                    "matched_dialogue": matched_dialogue,
                     "semantic_relevance": max(
                         0.0, min(1.0, float(raw["semantic_relevance"]))
                     ),
@@ -402,19 +400,18 @@ def add_visual_features(
 def _retrieval_segment_context(
     video_description: dict[str, Any],
     slots: list[dict[str, Any]],
-    round_index: int,
+    *,
+    include_adjacent: bool,
 ) -> dict[str, list[dict[str, Any]]]:
     segments = video_description["segments"]
     segment_positions = {
         str(segment["segment_id"]): index
         for index, segment in enumerate(segments)
     }
-    radius = max(0, round_index - 1)
+    radius = 1 if include_adjacent else 0
     result: dict[str, list[dict[str, Any]]] = {}
     for slot in slots:
         selected_positions: set[int] = set()
-        if round_index >= 3:
-            selected_positions.update(range(len(segments)))
         for segment_id in slot["source_segment_ids"]:
             position = segment_positions[str(segment_id)]
             selected_positions.update(
@@ -424,7 +421,25 @@ def _retrieval_segment_context(
                 )
             )
         result[slot["slot_id"]] = [
-            segments[position] for position in sorted(selected_positions)
+            {
+                **{
+                    key: value
+                    for key, value in segments[position].items()
+                    if key not in {"clip_path", "dialogue_context"}
+                },
+                "shots": [
+                    {
+                        key: value
+                        for key, value in shot.items()
+                        if key not in {
+                            "dialogue",
+                            "sampled_frame_times_sec",
+                        }
+                    }
+                    for shot in segments[position]["shots"]
+                ],
+            }
+            for position in sorted(selected_positions)
         ]
     return result
 
@@ -438,7 +453,17 @@ def retrieve_candidates(
     context: WorkflowContext,
 ) -> dict[str, list[dict[str, Any]]]:
     pool: dict[str, list[dict[str, Any]]] = {
-        slot["slot_id"]: [] for slot in slots
+        slot["slot_id"]: (
+            [dict(slot["fixed_candidate"])]
+            if slot.get("fixed_candidate") is not None
+            else []
+        )
+        for slot in slots
+    }
+    fixed_slot_ids = {
+        str(slot["slot_id"])
+        for slot in slots
+        if slot.get("fixed_candidate") is not None
     }
     video_description = context.get_artifact("video_description")
     if video_description is None:
@@ -447,18 +472,44 @@ def retrieve_candidates(
     borderline: dict[str, list[dict[str, Any]]] = {
         slot["slot_id"]: [] for slot in slots
     }
-    for round_index in range(1, retrieval_config.retrieval_max_rounds + 1):
+    primary_rounds = retrieval_config.retrieval_max_rounds
+    adjacent_rounds = retrieval_config.retrieval_max_rounds
+    total_rounds = primary_rounds + adjacent_rounds
+    primary_scope_exhausted: set[str] = set()
+    adjacent_scope_exhausted: set[str] = set()
+    for round_index in range(1, total_rounds + 1):
+        include_adjacent = round_index > primary_rounds
+        scope = "adjacent_segments" if include_adjacent else "planned_segments"
+        scope_round = (
+            round_index - primary_rounds
+            if include_adjacent
+            else round_index
+        )
+        exhausted_slots = (
+            adjacent_scope_exhausted
+            if include_adjacent
+            else primary_scope_exhausted
+        )
         pending = [
             slot
             for slot in slots
+            if slot["slot_id"] not in fixed_slot_ids
             if len(pool[slot["slot_id"]]) < retrieval_config.candidates_per_slot
+            if slot["slot_id"] not in exhausted_slots
         ]
         if not pending:
-            break
+            if all(
+                slot["slot_id"] in fixed_slot_ids
+                or len(pool[slot["slot_id"]])
+                >= retrieval_config.candidates_per_slot
+                for slot in slots
+            ):
+                break
+            continue
         source_segments_by_slot = _retrieval_segment_context(
             video_description,
             pending,
-            round_index,
+            include_adjacent=include_adjacent,
         )
         excluded = {
             slot["slot_id"]: [
@@ -474,7 +525,7 @@ def retrieve_candidates(
 
         def retrieve_slot(
             slot: dict[str, Any],
-        ) -> tuple[str, dict[str, list[dict[str, Any]]] | None]:
+        ) -> tuple[str, dict[str, list[dict[str, Any]]] | None, bool]:
             slot_id = slot["slot_id"]
             slot_segments = {slot_id: source_segments_by_slot[slot_id]}
             candidates_needed = (
@@ -493,12 +544,25 @@ def retrieve_candidates(
                     "Candidate scope lacks enough non-overlapping fixed-duration windows; "
                     "expanding in the next round",
                     round=round_index,
+                    scope=scope,
+                    scope_round=scope_round,
                     slot_id=slot_id,
                     candidates_needed=candidates_needed,
                     available_capacity=available_capacity,
                     planned_duration_sec=float(slot["planned_duration_sec"]),
                 )
-                return slot_id, None
+                return slot_id, None, True
+            confirmed_candidates = {
+                slot_id: [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "timestamp": candidate["timestamp"],
+                        "visible_description": candidate["description"],
+                        "visual_evidence": candidate["visual_evidence"],
+                    }
+                    for candidate in pool[slot_id]
+                ]
+            }
             package = prompt_registry.build(
                 PromptStage.PLANNER,
                 PromptTask.CANDIDATE_RETRIEVAL,
@@ -506,6 +570,7 @@ def retrieve_candidates(
                     operation=f"Candidate retrieval round {round_index} slot {slot_id}",
                     candidates_per_slot=candidates_needed,
                     slots=[slot],
+                    confirmed_candidates=confirmed_candidates,
                     excluded_ranges={slot_id: excluded[slot_id]},
                     source_segments_by_slot=slot_segments,
                 ),
@@ -529,16 +594,18 @@ def retrieve_candidates(
                     "validation.reject",
                     "Slot candidate retrieval failed; expanding in the next round",
                     round=round_index,
+                    scope=scope,
+                    scope_round=scope_round,
                     slot_id=slot_id,
                     error_type=type(exc).__name__,
                     reason=error_summary(exc),
                 )
-                return slot_id, None
+                return slot_id, None, False
             for item_index, candidate in enumerate(slot_pool[slot_id], 1):
                 candidate["candidate_id"] = (
                     f"{slot_id}_round_{round_index:02d}_candidate_{item_index:02d}"
                 )
-            return slot_id, slot_pool
+            return slot_id, slot_pool, False
 
         llm_workers = max(1, min(config.max_concurrency, len(pending)))
         log_event(
@@ -547,6 +614,8 @@ def retrieve_candidates(
             "stage.progress",
             "Per-Slot candidate retrieval concurrency configured",
             round=round_index,
+            scope=scope,
+            scope_round=scope_round,
             slots=len(pending),
             workers=llm_workers,
         )
@@ -563,9 +632,14 @@ def retrieve_candidates(
                 )
             )
 
+        exhausted_slots.update(
+            slot_id
+            for slot_id, _slot_pool, exhausted in slot_results
+            if exhausted
+        )
         round_pool = {
             slot_id: slot_pool[slot_id]
-            for slot_id, slot_pool in slot_results
+            for slot_id, slot_pool, _exhausted in slot_results
             if slot_pool is not None
         }
         successful_slots = [
@@ -650,6 +724,8 @@ def retrieve_candidates(
                 pool[slot_id].append(candidate)
     fallbacks: list[dict[str, Any]] = []
     for slot_id, candidates in pool.items():
+        if slot_id in fixed_slot_ids:
+            continue
         if len(candidates) >= retrieval_config.candidates_per_slot:
             continue
         for candidate in sorted(
@@ -690,6 +766,7 @@ def retrieve_candidates(
     shortages = {
         slot_id: retrieval_config.candidates_per_slot - len(candidates)
         for slot_id, candidates in pool.items()
+        if slot_id not in fixed_slot_ids
         if len(candidates) < retrieval_config.candidates_per_slot
     }
     context.set_artifact("candidate_rejections", rejected)
@@ -698,17 +775,34 @@ def retrieve_candidates(
         failure = {
             "reason": "insufficient_visually_grounded_candidates",
             "shortages": shortages,
-            "rounds": retrieval_config.retrieval_max_rounds,
+            "planned_segment_rounds": primary_rounds,
+            "adjacent_expansion_rounds": adjacent_rounds,
         }
         context.set_artifact("retrieval_failure", failure)
-        raise ValueError(
-            "Could not obtain required visually grounded candidates: "
-            + json.dumps(shortages, ensure_ascii=False)
+        empty_slots = [
+            slot_id
+            for slot_id in shortages
+            if not pool[slot_id]
+        ]
+        if empty_slots:
+            raise ValueError(
+                "No visually grounded candidate remains for Slots: "
+                + json.dumps(empty_slots, ensure_ascii=False)
+            )
+        log_event(
+            "ERROR",
+            "planner.candidate",
+            "validation.reject",
+            "Candidate retrieval exhausted; continuing with smaller candidate pools",
+            shortages=shortages,
+            planned_segment_rounds=primary_rounds,
+            adjacent_expansion_rounds=adjacent_rounds,
         )
     for slot_id, candidates in pool.items():
         candidates.sort(key=lambda item: parse_range(item["timestamp"])[0])
         for index, candidate in enumerate(candidates, 1):
-            candidate["candidate_id"] = f"{slot_id}_candidate_{index:02d}"
+            if slot_id not in fixed_slot_ids:
+                candidate["candidate_id"] = f"{slot_id}_candidate_{index:02d}"
     add_kinetic_features(
         video_path,
         pool,

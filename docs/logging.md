@@ -46,6 +46,7 @@ analyser
 dialogue
 music
 planner.slot
+planner.anchor
 planner.candidate
 planner.sequence
 planner.review
