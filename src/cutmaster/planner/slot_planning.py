@@ -4,6 +4,7 @@ from typing import Any
 
 from cutmaster.configuration.schema import LLMConfig
 from cutmaster.contracts.workflow import RunRequest
+from cutmaster.music.analysis import compact_music_profile
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planner import SlotPlanningDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
@@ -45,29 +46,6 @@ def _source_story_context(
                 "emotional_tone": segment["emotional_tone"],
                 "emotional_intensity": segment["emotional_intensity"],
                 "appearing_characters": segment["appearing_characters"],
-                "shots": [
-                    {
-                        key: shot[key]
-                        for key in (
-                            "shot_id",
-                            "time_range",
-                            "visual_description",
-                            "dominant_action",
-                            "content_type",
-                            "narrative_function",
-                            "emotional_tone",
-                            "emotional_intensity",
-                            "scene",
-                            "characters",
-                            "shot_scale",
-                            "camera_angle",
-                            "camera_movement",
-                            "composition",
-                            "visual_evidence",
-                        )
-                    }
-                    for shot in segment["shots"]
-                ],
             }
             for segment in video_description["segments"]
         ],
@@ -112,7 +90,7 @@ def _validate_slots(
         str(segment["segment_id"]): index
         for index, segment in enumerate(source_segments)
     }
-    previous_segment_index = -1
+    previous_segment_end_index = -1
     for index, item in enumerate(raw, 1):
         if not isinstance(item, dict):
             raise ValueError(f"Slot {index} must be an object")
@@ -148,12 +126,17 @@ def _validate_slots(
             raise ValueError(f"Slot {index} reuses a visually disproven source Segment")
         if tuple(segment_ids) in failed_segment_assignments:
             raise ValueError(f"Slot {index} repeats a failed source-Segment assignment")
-        primary_segment_index = min(
+        segment_start_index = min(
             segment_order[segment_id] for segment_id in segment_ids
         )
-        if primary_segment_index < previous_segment_index:
-            raise ValueError("Slot source Segments must be in nondecreasing source order")
-        previous_segment_index = primary_segment_index
+        segment_end_index = max(
+            segment_order[segment_id] for segment_id in segment_ids
+        )
+        if segment_start_index <= previous_segment_end_index:
+            raise ValueError(
+                "Slot source Segment ranges must be in strictly increasing source order"
+            )
+        previous_segment_end_index = segment_end_index
         raw_required_subjects = item.get("required_visible_subjects")
         if not isinstance(raw_required_subjects, list):
             raise ValueError(f"Slot {index} must list required_visible_subjects")
@@ -210,7 +193,10 @@ def plan_edit_slots(
     target_clip_duration_sec: float,
 ) -> list[dict[str, Any]]:
     context.set_artifact("request", _request_metadata(request))
-    context.set_artifact("music_profile", music_profile)
+    context.set_artifact(
+        "music_profile",
+        compact_music_profile(music_profile),
+    )
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError("Video description must be available before edit-slot planning")
@@ -251,6 +237,10 @@ def plan_edit_slots(
                 if str(segment["segment_id"]) not in forbidden_segment_ids
             ],
             retry_note=retry_note,
+            mode="full",
+            existing_slots=[],
+            target_slot_constraints={},
+            rejection_feedback=[],
         ),
     )
     return context.call_prompt(
@@ -265,6 +255,246 @@ def plan_edit_slots(
             failed_segment_assignments,
         ),
     )
+
+
+def _targeted_slot_constraints(
+    slots: list[dict[str, Any]],
+    target_slot_ids: set[str],
+    video_description: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    source_segments = video_description["segments"]
+    segment_ids = [str(segment["segment_id"]) for segment in source_segments]
+    segment_order = {
+        segment_id: index for index, segment_id in enumerate(segment_ids)
+    }
+
+    def start_index(slot: dict[str, Any]) -> int:
+        return min(
+            segment_order[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+        )
+
+    def end_index(slot: dict[str, Any]) -> int:
+        return max(
+            segment_order[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+        )
+
+    constraints: dict[str, dict[str, Any]] = {}
+    for index, slot in enumerate(slots):
+        slot_id = str(slot["slot_id"])
+        if slot_id not in target_slot_ids:
+            continue
+        previous_slot = next(
+            (
+                slots[position]
+                for position in range(index - 1, -1, -1)
+                if str(slots[position]["slot_id"]) not in target_slot_ids
+            ),
+            None,
+        )
+        next_slot = next(
+            (
+                slots[position]
+                for position in range(index + 1, len(slots))
+                if str(slots[position]["slot_id"]) not in target_slot_ids
+            ),
+            None,
+        )
+        lower = end_index(previous_slot) + 1 if previous_slot is not None else 0
+        upper = (
+            start_index(next_slot) - 1
+            if next_slot is not None
+            else len(segment_ids) - 1
+        )
+        if lower > upper:
+            raise ValueError(
+                f"No chronological Segment interval remains for {slot_id}"
+            )
+        constraints[slot_id] = {
+            "desired_duration_sec": float(slot["desired_duration_sec"]),
+            "planned_duration_sec": float(slot["planned_duration_sec"]),
+            "allowed_segment_ids": segment_ids[lower : upper + 1],
+            "previous_fixed_slot": (
+                {
+                    "slot_id": previous_slot["slot_id"],
+                    "source_segment_ids": previous_slot["source_segment_ids"],
+                    "content_description": previous_slot["content_description"],
+                }
+                if previous_slot is not None
+                else None
+            ),
+            "next_fixed_slot": (
+                {
+                    "slot_id": next_slot["slot_id"],
+                    "source_segment_ids": next_slot["source_segment_ids"],
+                    "content_description": next_slot["content_description"],
+                }
+                if next_slot is not None
+                else None
+            ),
+            "previous_source_segment_ids": list(slot["source_segment_ids"]),
+            "forbidden_segment_assignments": [],
+        }
+    return constraints
+
+
+def _validate_targeted_slots(
+    parsed: dict[str, Any],
+    slots: list[dict[str, Any]],
+    constraints: dict[str, dict[str, Any]],
+    video_description: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_slots = parsed.get("slots")
+    if not isinstance(raw_slots, list):
+        raise ValueError("Targeted Slot replan must contain a slots array")
+    expected_ids = set(constraints)
+    replacements: dict[str, dict[str, Any]] = {}
+    for item in raw_slots:
+        if not isinstance(item, dict):
+            raise ValueError("Each targeted Slot replacement must be an object")
+        slot_id = str(item.get("slot_id") or "")
+        if slot_id not in expected_ids or slot_id in replacements:
+            raise ValueError(f"Unexpected targeted Slot ID: {slot_id}")
+        constraint = constraints[slot_id]
+        duration = float(item["desired_duration_sec"])
+        if abs(duration - float(constraint["desired_duration_sec"])) > DURATION_TOLERANCE_SEC:
+            raise ValueError(f"Targeted replan changed desired duration for {slot_id}")
+        planned_duration = float(item["planned_duration_sec"])
+        if (
+            abs(
+                planned_duration
+                - float(constraint["planned_duration_sec"])
+            )
+            > DURATION_TOLERANCE_SEC
+        ):
+            raise ValueError(f"Targeted replan changed planned duration for {slot_id}")
+        segment_ids = [
+            str(value).strip()
+            for value in item.get("source_segment_ids") or []
+            if str(value).strip()
+        ]
+        allowed = set(constraint["allowed_segment_ids"])
+        if not segment_ids or any(segment_id not in allowed for segment_id in segment_ids):
+            raise ValueError(
+                f"Targeted replan placed {slot_id} outside its chronological interval"
+            )
+        if segment_ids in constraint["forbidden_segment_assignments"]:
+            raise ValueError(
+                f"Targeted replan repeated a forbidden Segment assignment for {slot_id}"
+            )
+        required_subjects = [
+            str(value).strip()
+            for value in item.get("required_visible_subjects") or []
+            if str(value).strip()
+        ]
+        replacement = {
+            "slot_id": slot_id,
+            "narrative_role": str(item["narrative_role"]),
+            "content_description": str(item["content_description"]).strip(),
+            "target_emotion": str(item["target_emotion"]),
+            "target_emotional_intensity": max(
+                0.0, min(1.0, float(item["target_emotional_intensity"]))
+            ),
+            "target_kinetic_energy": max(
+                0.0, min(1.0, float(item["target_kinetic_energy"]))
+            ),
+            "desired_duration_sec": duration,
+            "planned_duration_sec": planned_duration,
+            "continuity_from_previous": str(item["continuity_from_previous"]),
+            "source_segment_ids": segment_ids,
+            "required_visible_subjects": required_subjects,
+        }
+        if not replacement["content_description"]:
+            raise ValueError(f"Targeted replan left {slot_id} without visible content")
+        replacements[slot_id] = replacement
+    if set(replacements) != expected_ids:
+        raise ValueError(
+            f"Targeted replan omitted Slots: {sorted(expected_ids - set(replacements))}"
+        )
+
+    merged: list[dict[str, Any]] = []
+    for slot in slots:
+        slot_id = str(slot["slot_id"])
+        if slot_id not in replacements:
+            merged.append(slot)
+            continue
+        updated = dict(slot)
+        updated.update(replacements[slot_id])
+        merged.append(updated)
+
+    segment_order = {
+        str(segment["segment_id"]): index
+        for index, segment in enumerate(video_description["segments"])
+    }
+    previous_end_index = -1
+    for slot in merged:
+        current_start_index = min(
+            segment_order[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+        )
+        current_end_index = max(
+            segment_order[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+        )
+        if current_start_index <= previous_end_index:
+            raise ValueError(
+                "Targeted Slot replacements violate strictly increasing source order"
+            )
+        previous_end_index = current_end_index
+    return merged
+
+
+def redesign_edit_slots(
+    slots: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    config: LLMConfig,
+    context: WorkflowContext,
+) -> list[dict[str, Any]]:
+    target_slot_ids = {
+        str(failure["slot_id"]) for failure in failures
+    }
+    if not target_slot_ids:
+        return slots
+    video_description = context.get_artifact("video_description")
+    if video_description is None:
+        raise RuntimeError("Video description must be available for targeted Slot replanning")
+    constraints = _targeted_slot_constraints(
+        slots,
+        target_slot_ids,
+        video_description,
+    )
+    package = prompt_registry.build(
+        PromptStage.PLANNER,
+        PromptTask.SLOT_PLANNING,
+        SlotPlanningDetails(
+            target_duration_sec=sum(
+                float(slot["planned_duration_sec"]) for slot in slots
+            ),
+            target_clip_duration_sec=(
+                sum(float(slot["planned_duration_sec"]) for slot in slots)
+                / len(slots)
+            ),
+            allowed_segment_ids=[],
+            retry_note="",
+            mode="targeted",
+            existing_slots=slots,
+            target_slot_constraints=constraints,
+            rejection_feedback=failures,
+        ),
+    )
+    redesigned = context.call_prompt(
+        package=package,
+        config=config,
+        validate_business=lambda parsed: _validate_targeted_slots(
+            parsed,
+            slots,
+            constraints,
+            video_description,
+        ),
+    )
+    context.set_artifact("edit_plan", redesigned)
+    return redesigned
 
 
 def align_slots_to_music(

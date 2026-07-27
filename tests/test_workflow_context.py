@@ -145,7 +145,12 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
         lambda _delay: None,
     )
 
-    result = WorkflowContext(tmp_path / "history.json").call_prompt(
+    call_tree_path = tmp_path / "planning_calls.json"
+    context = WorkflowContext(
+        tmp_path / "history.json",
+        model_call_tree_path=call_tree_path,
+    )
+    result = context.call_prompt(
         package=package,
         config=LLMConfig(
             model="test",
@@ -155,6 +160,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
         ),
         validate_business=validate,
     )
+    context.save_model_call_tree()
 
     assert result == {"ok": True}
     assert "Candidate is too short" not in prompts[0]
@@ -162,3 +168,26 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     assert "Duplicate candidate range" not in prompts[1]
     assert "Candidate is too short" in prompts[2]
     assert "Duplicate candidate range" in prompts[2]
+    tree = json.loads(call_tree_path.read_text(encoding="utf-8"))
+    root = tree["root"]
+    assert root["stage"] == "planning"
+    assert root["call_count"] == 1
+    assert root["attempt_count"] == 3
+    call = root["children"][0]["calls"][0]
+    assert call["status"] == "success"
+    assert [attempt["status"] for attempt in call["attempts"]] == [
+        "response_rejected",
+        "response_rejected",
+        "accepted",
+    ]
+    assert [attempt["response"] for attempt in call["attempts"]] == [
+        '{"ok":true}',
+        '{"ok":true}',
+        '{"ok":true}',
+    ]
+    persisted = call_tree_path.read_text(encoding="utf-8")
+    assert "Retrieve candidates" not in persisted
+    assert "Return JSON" not in persisted
+    assert call["attempts"][0]["prompt"]["prompt_id"] == (
+        "planner.candidate_retrieval"
+    )

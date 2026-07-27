@@ -156,5 +156,28 @@ def analyze_music(
     }
 
 
+def compact_music_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the macro musical structure useful to model reasoning."""
+    return {
+        "planned_duration_sec": float(profile["planned_duration_sec"]),
+        "tempo_bpm": float(profile["tempo_bpm"]),
+        "sections": [
+            {
+                "section_id": str(section["section_id"]),
+                "start_sec": float(section["start_sec"]),
+                "end_sec": float(section["end_sec"]),
+                "role": str(section["role"]),
+                "mean_energy": float(section["mean_energy"]),
+                "energy_trend": str(section["energy_trend"]),
+                "suggested_clip_duration_sec": [
+                    float(value)
+                    for value in section["suggested_clip_duration_sec"]
+                ],
+            }
+            for section in profile["sections"]
+        ],
+    }
+
+
 def write_music_profile(path: Path, profile: dict[str, Any]) -> None:
     path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

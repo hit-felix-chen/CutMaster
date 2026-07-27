@@ -80,7 +80,6 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "retrieval_max_rounds",
         "visual_sample_frames",
         "protagonist_visibility_threshold",
-        "protagonist_visibility_fallback_threshold",
         "motion_sample_fps",
         "motion_workers",
     },
@@ -306,13 +305,10 @@ def _validate_values(config: AppConfig) -> None:
     if config.shot_annotation.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must equal 5")
     threshold = config.candidate_retrieval.protagonist_visibility_threshold
-    fallback = (
-        config.candidate_retrieval.protagonist_visibility_fallback_threshold
-    )
-    if not 0.0 <= fallback <= threshold <= 1.0:
+    if not 0.0 <= threshold <= 1.0:
         raise ValueError(
-            "Candidate visibility thresholds must satisfy "
-            "0 <= fallback <= threshold <= 1"
+            "candidate_retrieval.protagonist_visibility_threshold "
+            "must be between 0 and 1"
         )
     if config.render.original_volume != 0.0:
         raise ValueError("render.original_volume must be 0 for frame-exact rendering")
@@ -447,12 +443,6 @@ def load_config(path: Path) -> AppConfig:
             protagonist_visibility_threshold=float(
                 candidate_retrieval.get(
                     "protagonist_visibility_threshold",
-                    0.55,
-                )
-            ),
-            protagonist_visibility_fallback_threshold=float(
-                candidate_retrieval.get(
-                    "protagonist_visibility_fallback_threshold",
                     0.5,
                 )
             ),

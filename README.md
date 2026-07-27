@@ -145,7 +145,7 @@ CutMaster 对候选计算结构化语义相关性、真实画面相关性、主�
 - 每个 Slot 单独取最高分候选得到的独立最优路径；
 - 在原片时间严格单调且片段不重叠的硬约束下，将相邻连续性和音乐能量变化纳入路径分数的 Beam Search 全局路径。
 
-选择后，复核 LLM 只能使用候选池中已有的 `candidate_id` 进行 `keep/replace` 补丁，不能直接创造新时间戳。补丁会选择可共同成立的最大子集；冲突补丁会单独拒绝并记录原因，不再导致整批回滚。`planning_history.json` 只保存规划产物、脚本版本、已接纳补丁和拒绝原因，不记录模型调用内容。CutMaster 对完整的 API 请求、JSON 解析和语义校验事务进行指数退避重试，不会接受残缺结果。
+选择后，复核 LLM 只能使用候选池中已有的 `candidate_id` 进行 `keep/replace` 补丁，不能直接创造新时间戳。补丁会选择可共同成立的最大子集；冲突补丁会单独拒绝并记录原因，不再导致整批回滚。`planning_history.json` 只保存规划产物、脚本版本、已接纳补丁和拒绝原因。`planning_calls.json` 按任务和调用组织规划阶段的调用树，保留每次重试的完整模型回复，但 Prompt 只记录 ID、版本、指纹、字符数和上下文字段等元数据，不保存 Prompt 正文或上下文快照。CutMaster 对完整的 API 请求、JSON 解析和语义校验事务进行指数退避重试，不会接受残缺结果。
 
 ### 视觉切点优化
 
@@ -296,10 +296,9 @@ OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解
 | 配置项 | 含义 | 示例配置默认值 |
 | --- | --- | --- |
 | `candidates_per_slot` | 每个 Slot 最终保留的原片候选数 | `3` |
-| `retrieval_max_rounds` | 主体过滤后候选不足时的最大检索轮数 | `3` |
+| `retrieval_max_rounds` | 指定 Segment 首次检索后的重试次数；相邻 Segment 再检索同样次数 | `3` |
 | `visual_sample_frames` | 每个候选用于视觉核验的均匀采样帧数 | `4` |
-| `protagonist_visibility_threshold` | 必须出镜主体的最低归一化视觉置信度 | `0.55` |
-| `protagonist_visibility_fallback_threshold` | 多轮补检后的最低归一化身份置信度 | `0.5` |
+| `protagonist_visibility_threshold` | 必须出镜主体的最低归一化视觉置信度 | `0.5` |
 | `motion_sample_fps` | 候选运动强度的采样帧率 | `2.0` |
 | `motion_workers` | 候选运动特征解码 worker 数 | `4` |
 
@@ -395,6 +394,7 @@ uv run cutmaster run \
 | `candidate_pool.json` | 每个 Slot 的结构化视频候选、模型分数和本地运动特征 |
 | `selection_diagnostics.json` | VLM Pairwise Beam Search 的候选路径、路径分数和评分数量 |
 | `planning_history.json` | 规划产物和脚本版本/补丁状态，不含模型调用内容 |
+| `planning_calls.json` | 规划调用树；包含每次重试的完整模型回复和 Prompt 元数据，不含 Prompt 正文 |
 | `script_raw.json` | 最终选中的候选路径及 Slot/候选 ID |
 | `script_adapted.json` | 输出帧范围、节拍对齐、优化后的原片范围和切点诊断信息 |
 | `clips/clip_XXXX.mp4` | 标准化的无声中间视频片段 |

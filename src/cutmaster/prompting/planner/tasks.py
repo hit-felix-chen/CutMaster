@@ -28,6 +28,10 @@ class SlotPlanningDetails:
     target_clip_duration_sec: float
     allowed_segment_ids: list[str]
     retry_note: str
+    mode: str
+    existing_slots: list[dict[str, Any]]
+    target_slot_constraints: dict[str, dict[str, Any]]
+    rejection_feedback: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -71,84 +75,157 @@ class ScriptReviewDetails:
 
 
 def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
+    common_required = [
+        "narrative_role",
+        "content_description",
+        "target_emotion",
+        "target_emotional_intensity",
+        "target_kinetic_energy",
+        "desired_duration_sec",
+        "continuity_from_previous",
+        "source_segment_ids",
+        "required_visible_subjects",
+    ]
+
+    def slot_schema(
+        allowed_segment_ids: list[str],
+        *,
+        slot_id: str | None = None,
+        desired_duration_sec: float | None = None,
+        planned_duration_sec: float | None = None,
+    ) -> dict[str, Any]:
+        required = [*common_required]
+        properties: dict[str, Any] = {
+            "narrative_role": {
+                "type": "string",
+                "enum": [
+                    "setup",
+                    "development",
+                    "turning_point",
+                    "climax",
+                    "resolution",
+                ],
+            },
+            "content_description": {"type": "string", "minLength": 1},
+            "target_emotion": {"type": "string", "minLength": 1},
+            "target_emotional_intensity": SCORE_SCHEMA,
+            "target_kinetic_energy": SCORE_SCHEMA,
+            "desired_duration_sec": (
+                {"type": "number", "const": desired_duration_sec}
+                if desired_duration_sec is not None
+                else {"type": "number", "minimum": 1.5}
+            ),
+            "continuity_from_previous": {"type": "string", "minLength": 1},
+            "source_segment_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {
+                    "type": "string",
+                    "enum": allowed_segment_ids,
+                },
+            },
+            "required_visible_subjects": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+        }
+        if slot_id is not None:
+            required.insert(0, "slot_id")
+            properties["slot_id"] = {"type": "string", "const": slot_id}
+        if planned_duration_sec is not None:
+            required.append("planned_duration_sec")
+            properties["planned_duration_sec"] = {
+                "type": "number",
+                "const": planned_duration_sec,
+            }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": required,
+            "properties": properties,
+        }
+
+    targeted = details.mode == "targeted"
+    if details.mode not in {"full", "targeted"}:
+        raise ValueError(f"Unknown slot planning mode: {details.mode}")
+    if targeted:
+        target_schemas = [
+            slot_schema(
+                list(constraint["allowed_segment_ids"]),
+                slot_id=slot_id,
+                desired_duration_sec=float(constraint["desired_duration_sec"]),
+                planned_duration_sec=float(constraint["planned_duration_sec"]),
+            )
+            for slot_id, constraint in details.target_slot_constraints.items()
+        ]
+        slots_schema: dict[str, Any] = {
+            "type": "array",
+            "minItems": len(target_schemas),
+            "maxItems": len(target_schemas),
+            "items": {"oneOf": target_schemas},
+        }
+    else:
+        slots_schema = {
+            "type": "array",
+            "minItems": 1,
+            "items": slot_schema(details.allowed_segment_ids),
+        }
     contract = ResponseContract(
-        version="1.0",
+        version="2.1",
         schema={
             "type": "object",
             "additionalProperties": False,
             "required": ["slots"],
-            "properties": {
-                "slots": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "narrative_role",
-                            "content_description",
-                            "target_emotion",
-                            "target_emotional_intensity",
-                            "target_kinetic_energy",
-                            "desired_duration_sec",
-                            "continuity_from_previous",
-                            "source_segment_ids",
-                            "required_visible_subjects",
-                        ],
-                        "properties": {
-                            "narrative_role": {
-                                "type": "string",
-                                "enum": [
-                                    "setup",
-                                    "development",
-                                    "turning_point",
-                                    "climax",
-                                    "resolution",
-                                ],
-                            },
-                            "content_description": {
-                                "type": "string",
-                                "minLength": 1,
-                            },
-                            "target_emotion": {
-                                "type": "string",
-                                "minLength": 1,
-                            },
-                            "target_emotional_intensity": SCORE_SCHEMA,
-                            "target_kinetic_energy": SCORE_SCHEMA,
-                            "desired_duration_sec": {
-                                "type": "number",
-                                "minimum": 1.5,
-                            },
-                            "continuity_from_previous": {
-                                "type": "string",
-                                "minLength": 1,
-                            },
-                            "source_segment_ids": {
-                                "type": "array",
-                                "minItems": 1,
-                                "uniqueItems": True,
-                                "items": {
-                                    "type": "string",
-                                    "enum": details.allowed_segment_ids,
-                                },
-                            },
-                            "required_visible_subjects": {
-                                "type": "array",
-                                "uniqueItems": True,
-                                "items": {"type": "string", "minLength": 1},
-                            },
-                        },
-                    },
-                }
-            },
+            "properties": {"slots": slots_schema},
         },
     )
     retry_note = f"\n{details.retry_note.strip()}\n" if details.retry_note else ""
-    instructions = f"""Create a sequence of edit slots for the maintained request and structured
+    if targeted:
+        instructions = f"""Redesign only the specified failed edit Slots. This is a local repair
+of an existing plan, not a new timeline. Return exactly one replacement for every Slot in
+target_slot_constraints in a single response. Preserve every target slot_id and its exact
+desired_duration_sec and planned_duration_sec. The original planned_duration_sec is the
+authoritative visual clip duration because it already incorporates beat-aligned boundary
+adjustments. Do not return or modify any other Slot.
+
+Use the maintained request, compact music profile, and original structured source story context
+from the first planning call. Treat existing_slot_plan as authoritative for all unaffected Slots. Each
+replacement must fit chronologically between its previous_fixed_slot and next_fixed_slot and may
+use only that Slot's allowed_segment_ids. Multiple replacement Slots must remain in strictly
+increasing source order, with every Slot's maximum Segment index strictly lower than the next
+Slot's minimum Segment index. Never repeat a source_segment_ids assignment listed in
+forbidden_segment_assignments.
+
+The VLM reviewers rejected the earlier candidates or the deterministic capacity check proved
+that the assigned source range cannot contain the required number of distinct, non-overlapping
+windows. Use rejection_feedback to correct the actual cause. Redesign the Slot's visible event,
+required_visible_subjects, and source_segment_ids so that one continuous
+planned_duration_sec-long passage is visually realizable. Do not merely paraphrase the failed
+description while retaining unsupported subjects or source evidence. Role, team, and object
+subjects do not require a named-person face match; use precise required subjects that the source
+descriptions can visibly establish.
+
+Do not change output timing, add or remove Slots, or redesign dialogue anchors. Do not use title
+cards, opening or end credits, production logos, legal cards, or blank frames unless explicitly
+required by the maintained request.
+
+<existing_slot_plan>
+{json.dumps(details.existing_slots, ensure_ascii=False)}
+</existing_slot_plan>
+<target_slot_constraints>
+{json.dumps(details.target_slot_constraints, ensure_ascii=False)}
+</target_slot_constraints>
+<rejection_feedback>
+{json.dumps(details.rejection_feedback, ensure_ascii=False)}
+</rejection_feedback>
+{retry_note}"""
+    else:
+        instructions = f"""Create a sequence of edit slots for the maintained request and structured
 video description. The requested output duration is {details.target_duration_sec:.1f} seconds.
 Choose the number of slots yourself from the narrative needs, available source material, and the
-configured visual-clip target. There is no predetermined clip count. A Slot represents one
+compact music profile's macro energy sections. There is no predetermined clip count. A Slot represents one
 continuous source clip, not an entire narrative chapter. Design the visual rhythm around
 target_clip_duration_sec={details.target_clip_duration_sec:.1f}. The average desired_duration_sec
 must remain within 12.5% of that target, and no individual Slot may exceed
@@ -164,11 +241,11 @@ start-aligned L-cut. Plan enough short visual Slots for the picture to keep cutt
 dialogue plays.
 
 Each slot must be realizable from supplied source_segment_ids. Use the reusable story summary for
-plot understanding, and use Shot-level VLM descriptions, characters, scenes, actions, and Segment
-summaries as visual source truth. Never invent props,
+plot understanding, and use Segment summaries and appearing characters as visual source truth.
+Never invent props,
 gestures, settings, identities, or actions absent from the description. Keep source_segment_ids
-in nondecreasing source order across slots. Reusing a Segment for adjacent slots is allowed when
-it contains enough distinct Shots.
+in strictly increasing source order across Slots: every Slot's maximum Segment index must be
+strictly lower than the next Slot's minimum Segment index. Never reuse one Segment in two Slots.
 
 The narrative_role values are reusable labels, not a mandatory five-act template. Every role may
 appear multiple times or not appear at all; do not create one Slot per enum value. For a
@@ -181,8 +258,12 @@ requires them.
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.SLOT_PLANNING,
-        prompt_version="2.0",
-        operation="Edit slot planning",
+        prompt_version="3.1",
+        operation=(
+            "Targeted edit slot replanning"
+            if targeted
+            else "Edit slot planning"
+        ),
         system_prompt=(
             "You are the planning component of a professional video editor. Plan an output "
             "timeline but do not select source timestamps. Return strict JSON only."
@@ -196,7 +277,11 @@ requires them.
             "planning_feedback",
         ),
         modality=PromptModality.TEXT,
-        output_artifact="edit_plan_unaligned",
+        output_artifact=(
+            "targeted_slot_replan"
+            if targeted
+            else "edit_plan_unaligned"
+        ),
     )
 
 
@@ -557,13 +642,27 @@ Each image is visibly labeled with its candidate ID.
 
 Resolve the requested focal subject and editorial goal from the maintained request and source
 title. For a named real person or fictional character, use visual identity knowledge appropriate
-to that source to distinguish the actual subject from other people. Judge every candidate from
-sampled pixels. ASR, dialogue implications, slot descriptions, clothing, gender, scene
-familiarity, or narrative role are not identity evidence.
+to that source to distinguish the actual subject from other people.
 
-A prominent different person must receive required_subject_visibility=1. Before assigning 3 or
-higher, at least one sampled frame must contain a sufficiently clear face or person-specific
-visual evidence matching the requested identity.
+Use the attached sampled pixels as primary evidence. Each candidate also includes its source
+Segment video description and the Shot descriptions overlapping the exact candidate window.
+Use those structured visual annotations as supporting evidence for visible identity, team or
+group membership, objects, and actions. In particular, character identity_evidence, readable
+jersey names or numbers, and Shot visual_evidence may corroborate a sampled frame.
+
+The Segment dialogue_context and candidate_dialogue contain ASR dialogue associated with the
+source. Dialogue may provide supporting evidence about the named speaker, player, action, or
+event when its timestamp overlaps the candidate and agrees with the visual evidence. It is not,
+by itself, proof that a mentioned person is visible: commentary may describe off-screen action,
+earlier events, or another camera view. Do not use the intended Slot description, generic
+clothing, gender, scene familiarity, or narrative role as identity evidence. Never let dialogue,
+a Segment summary, or a Shot description override contradictory sampled pixels, and do not
+transfer identity evidence from a non-overlapping Shot.
+
+A prominent confirmed different person must receive required_subject_visibility=1. Before
+assigning 3 or higher, the combined sampled frames, overlapping Shot visual annotations, and
+time-aligned dialogue must provide a plausible match to the requested identity; dialogue alone
+is insufficient.
 
 Visibility Likert:
 1 = visible person is a different identity;

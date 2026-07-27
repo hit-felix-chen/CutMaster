@@ -69,6 +69,10 @@ def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
             target_clip_duration_sec=4.0,
             allowed_segment_ids=["segment_0001", "segment_0002"],
             retry_note="",
+            mode="full",
+            existing_slots=[],
+            target_slot_constraints={},
+            rejection_feedback=[],
         ),
     )
     slots_schema = package.response_contract.schema["properties"]["slots"]
@@ -87,6 +91,74 @@ def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
     assert "duration within 0.5 seconds" in package.user_prompt
     assert "opening or end" in package.user_prompt
     assert "credits, production logos" in package.user_prompt
+    assert package.context_keys == (
+        "request",
+        "music_profile",
+        "source_story_context",
+        "planning_feedback",
+    )
+
+
+def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None:
+    constraints = {
+        "slot_02": {
+            "desired_duration_sec": 3.0,
+            "planned_duration_sec": 3.2,
+            "allowed_segment_ids": ["segment_0001", "segment_0002"],
+        },
+        "slot_04": {
+            "desired_duration_sec": 4.0,
+            "planned_duration_sec": 3.8,
+            "allowed_segment_ids": ["segment_0003", "segment_0004"],
+        },
+    }
+    package = prompt_registry.build(
+        PromptStage.PLANNER,
+        PromptTask.SLOT_PLANNING,
+        SlotPlanningDetails(
+            target_duration_sec=20.0,
+            target_clip_duration_sec=4.0,
+            allowed_segment_ids=[],
+            retry_note="",
+            mode="targeted",
+            existing_slots=[{"slot_id": "slot_01"}],
+            target_slot_constraints=constraints,
+            rejection_feedback=[
+                {
+                    "slot_id": "slot_02",
+                    "reason": "no_vlm_approved_candidates",
+                },
+                {
+                    "slot_id": "slot_04",
+                    "reason": "insufficient_non_overlapping_capacity",
+                },
+            ],
+        ),
+    )
+    slots_schema = package.response_contract.schema["properties"]["slots"]
+
+    assert package.operation == "Targeted edit slot replanning"
+    assert slots_schema["minItems"] == 2
+    assert slots_schema["maxItems"] == 2
+    assert {
+        schema["properties"]["slot_id"]["const"]
+        for schema in slots_schema["items"]["oneOf"]
+    } == {"slot_02", "slot_04"}
+    planned_durations = {
+        schema["properties"]["slot_id"]["const"]: schema["properties"][
+            "planned_duration_sec"
+        ]["const"]
+        for schema in slots_schema["items"]["oneOf"]
+    }
+    assert planned_durations == {"slot_02": 3.2, "slot_04": 3.8}
+    assert all(
+        "planned_duration_sec" in schema["required"]
+        for schema in slots_schema["items"]["oneOf"]
+    )
+    assert "single response" in package.user_prompt
+    assert "authoritative visual clip duration" in package.user_prompt
+    assert "<existing_slot_plan>" in package.user_prompt
+    assert "<rejection_feedback>" in package.user_prompt
 
 
 def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:

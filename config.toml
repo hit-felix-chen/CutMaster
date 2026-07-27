@@ -9,7 +9,7 @@
 # max_retries: 首次请求失败后的完整重试次数。
 # max_concurrency: LLM 请求的最大并发数，供台词、规划、检索和复核阶段共用。
 [llm]
-model = "qwen3.7-plus"
+model = "qwen3.7-max"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key_env = "DASHSCOPE_API_KEY"
 enable_thinking = true
@@ -112,19 +112,18 @@ fade_sec = 0.3
 
 # Stage 5a: structured candidate retrieval and visual validation
 # candidates_per_slot: 每个非锚点 Slot 最终希望保留的候选片段数。
-# retrieval_max_rounds: 分别用于 Slot 指定 Segment、以及“指定 Segment＋前后各一个
-# Segment”扩展范围的最大补检轮数。两阶段耗尽后保留已通过候选继续后续流程。
+# retrieval_max_rounds: 重试次数。指定 Segment 先正常检索一次，再重试该次数；
+# 随后在“指定 Segment＋前后各一个 Segment”范围内再检索该次数。
+# Targeted Slot 重规划发生在检索轮次之间，不占用或增加候选检索轮次。
 # visual_sample_frames: 每个候选片段送给 VLM 核验的均匀采样帧数。
 # protagonist_visibility_threshold: 必须出镜主体的最低归一化身份置信度。
-# protagonist_visibility_fallback_threshold: 多轮补检后允许使用的最低身份置信度。
 # motion_sample_fps: 计算候选运动强度时的视频采样帧率。
 # motion_workers: 并行解码与计算候选运动特征的 worker 数。
 [candidate_retrieval]
 candidates_per_slot = 3
 retrieval_max_rounds = 3
 visual_sample_frames = 4
-protagonist_visibility_threshold = 0.55
-protagonist_visibility_fallback_threshold = 0.5
+protagonist_visibility_threshold = 0.5
 motion_sample_fps = 2.0
 motion_workers = 4
 

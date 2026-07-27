@@ -35,6 +35,7 @@ class OrchestrationResult:
     video_summary: str
     analysis_history: str
     planning_history: str
+    planning_calls: str
     edit_plan: str
     candidate_pool: str
     dialogue_anchors: str

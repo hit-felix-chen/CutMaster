@@ -6,7 +6,11 @@ import time
 
 from cutmaster.editing.source_windows import optimize_script_source_windows
 from cutmaster.editing.dialogue_audio import prepare_dialogue_audio
-from cutmaster.music.analysis import analyze_music, write_music_profile
+from cutmaster.music.analysis import (
+    analyze_music,
+    compact_music_profile,
+    write_music_profile,
+)
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
 from cutmaster.runtime.observability import error_summary, log_event
@@ -52,9 +56,12 @@ def run_orchestrator(
     candidate_pool_path = output_dir / "candidate_pool.json"
     selection_path = output_dir / "selection_diagnostics.json"
     planning_history_path = output_dir / "planning_history.json"
+    planning_calls_path = output_dir / "planning_calls.json"
     result_path = output_dir / "result.json"
-    if request.overwrite and planning_history_path.exists():
-        planning_history_path.unlink()
+    if request.overwrite:
+        for stale_path in (planning_history_path, planning_calls_path):
+            if stale_path.exists():
+                stale_path.unlink()
     timings: dict[str, float] = {}
     started = time.monotonic()
     log_event(
@@ -125,8 +132,14 @@ def run_orchestrator(
         elapsed_sec=timings["music_analysis"],
     )
 
-    planning_context = WorkflowContext(planning_history_path)
-    planning_context.set_artifact("music_profile", music_profile)
+    planning_context = WorkflowContext(
+        planning_history_path,
+        model_call_tree_path=planning_calls_path,
+    )
+    planning_context.set_artifact(
+        "music_profile",
+        compact_music_profile(music_profile),
+    )
     planning_context.set_artifact("video_description", material.video_description)
     planning_context.set_artifact("video_summary", material.video_summary)
     planner = Planner(request.video_path, config, planning_context)
@@ -219,6 +232,11 @@ def run_orchestrator(
                 slots=len(slots),
             )
             candidate_pool = planner.retrieve(slots)
+            planning_context.set_artifact("edit_plan", slots)
+            edit_plan_path.write_text(
+                json.dumps(slots, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             elapsed = time.monotonic() - stage_started
             retrieval_seconds += elapsed
             log_event(
@@ -348,6 +366,7 @@ def run_orchestrator(
                 failed_slots=failed_slots,
             )
             if planning_attempt > config.slot_planning.replan_max_rounds:
+                planning_context.save_model_call_tree(status="failed")
                 raise
             log_event(
                 "WARNING",
@@ -390,6 +409,7 @@ def run_orchestrator(
             raw_script,
             pairwise_scores,
         )
+    planning_context.save_model_call_tree()
     write_script(raw_script_path, raw_script)
     selection_path.write_text(
         json.dumps(selection, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -537,6 +557,7 @@ def run_orchestrator(
         video_summary=str(material.video_summary_path),
         analysis_history=str(material.analysis_history_path),
         planning_history=str(planning_history_path),
+        planning_calls=str(planning_calls_path),
         edit_plan=str(edit_plan_path),
         candidate_pool=str(candidate_pool_path),
         dialogue_anchors=str(dialogue_anchors_path),

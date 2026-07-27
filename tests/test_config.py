@@ -60,7 +60,6 @@ candidates_per_slot = 3
 retrieval_max_rounds = 2
 visual_sample_frames = 4
 protagonist_visibility_threshold = 0.6
-protagonist_visibility_fallback_threshold = 0.5
 motion_sample_fps = 3.0
 motion_workers = 2
 
@@ -98,6 +97,7 @@ threads = 2
     assert config.shot_annotation.shot_sample_frames == 5
     assert config.slot_planning.target_clip_duration_sec == 4.5
     assert config.slot_planning.replan_max_rounds == 2
+    assert config.candidate_retrieval.protagonist_visibility_threshold == 0.6
     assert config.dialogue_anchors.enable_vocal_separation is False
     assert config.dialogue_anchors.max_anchors == 3
     assert config.dialogue_anchors.min_anchor_duration_sec == 2.0

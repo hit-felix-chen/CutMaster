@@ -85,8 +85,7 @@ class CandidateRetrievalConfig:
     motion_sample_fps: float = 2.0
     motion_workers: int = 4
     visual_sample_frames: int = 4
-    protagonist_visibility_threshold: float = 0.55
-    protagonist_visibility_fallback_threshold: float = 0.5
+    protagonist_visibility_threshold: float = 0.5
 
 
 @dataclass(frozen=True)

@@ -16,7 +16,11 @@ from cutmaster.planner.sequence_selection import (
     select_paths,
     validate_chronological_path,
 )
-from cutmaster.planner.slot_planning import align_slots_to_music, plan_edit_slots
+from cutmaster.planner.slot_planning import (
+    align_slots_to_music,
+    plan_edit_slots,
+    redesign_edit_slots,
+)
 
 
 def _merge_planning_feedback(
@@ -117,6 +121,12 @@ class Planner:
             self.config.vlm,
             self.config.candidate_retrieval,
             self.context,
+            replan_slots=lambda current_slots, failures: redesign_edit_slots(
+                current_slots,
+                failures,
+                self.config.llm,
+                self.context,
+            ),
         )
 
     def anchor_dialogue(
@@ -213,6 +223,7 @@ __all__ = [
     "path_to_script",
     "plan_edit_slots",
     "precompute_pairwise_scores",
+    "redesign_edit_slots",
     "retrieve_candidates",
     "review_and_patch",
     "select_paths",

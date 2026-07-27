@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,90 @@ def _validate_visual_grounding(
         raise ValueError(f"Visual validation omitted IDs: {sorted(expected - set(result))}")
     return result
 
+
+def _candidate_segment_video_descriptions(
+    candidate: dict[str, Any],
+    video_description: dict[str, Any],
+) -> list[dict[str, Any]]:
+    candidate_range = parse_range(candidate["timestamp"])
+    requested_segment_ids = {
+        str(segment_id) for segment_id in candidate["source_segment_ids"]
+    }
+    result: list[dict[str, Any]] = []
+    for segment in video_description["segments"]:
+        if str(segment["segment_id"]) not in requested_segment_ids:
+            continue
+        segment_context = {
+            key: segment[key]
+            for key in (
+                "segment_id",
+                "time_range",
+                "content_type",
+                "timeline_role",
+                "dialogue_context",
+                "segment_summary",
+                "narrative_function",
+                "emotional_tone",
+                "appearing_characters",
+            )
+            if key in segment
+        }
+        segment_context["overlapping_shots"] = [
+            {
+                key: shot[key]
+                for key in (
+                    "shot_id",
+                    "time_range",
+                    "visual_description",
+                    "dominant_action",
+                    "scene",
+                    "characters",
+                    "shot_scale",
+                    "camera_angle",
+                    "camera_movement",
+                    "composition",
+                    "visual_evidence",
+                )
+                if key in shot
+            }
+            for shot in segment["shots"]
+            if _ranges_overlap(
+                candidate_range,
+                (
+                    float(shot["time_range"]["start_sec"]),
+                    float(shot["time_range"]["end_sec"]),
+                ),
+            )
+        ]
+        candidate_dialogues: dict[str, dict[str, Any]] = {}
+        for shot in segment["shots"]:
+            for dialogue in shot.get("dialogue", []):
+                dialogue_range = (
+                    float(dialogue["time_range"]["start_sec"]),
+                    float(dialogue["time_range"]["end_sec"]),
+                )
+                if not _ranges_overlap(candidate_range, dialogue_range):
+                    continue
+                dialogue_id = str(dialogue["dialogue_id"])
+                candidate_dialogues[dialogue_id] = {
+                    key: dialogue[key]
+                    for key in (
+                        "dialogue_id",
+                        "time_range",
+                        "speaker",
+                        "text",
+                        "speech_mode",
+                    )
+                    if key in dialogue
+                }
+        segment_context["candidate_dialogue"] = sorted(
+            candidate_dialogues.values(),
+            key=lambda dialogue: float(dialogue["time_range"]["start_sec"]),
+        )
+        result.append(segment_context)
+    return result
+
+
 def add_visual_features(
     video_path: Path,
     slots: list[dict[str, Any]],
@@ -296,6 +381,12 @@ def add_visual_features(
             else list(image_results)
         )
     slots_by_id = {slot["slot_id"]: slot for slot in slots}
+    video_description = context.get_artifact("video_description")
+    if video_description is None:
+        raise RuntimeError(
+            "Video description must be available before candidate visual validation"
+        )
+
     def candidate_spec(candidate: dict[str, Any]) -> dict[str, Any]:
         return {
             "candidate_id": candidate["candidate_id"],
@@ -305,6 +396,12 @@ def add_visual_features(
             ],
             "required_visible_subjects": slots_by_id[candidate["slot_id"]].get(
                 "required_visible_subjects", []
+            ),
+            "source_segment_video_descriptions": (
+                _candidate_segment_video_descriptions(
+                    candidate,
+                    video_description,
+                )
             ),
         }
 
@@ -451,6 +548,12 @@ def retrieve_candidates(
     vlm_config: VLMConfig,
     retrieval_config: CandidateRetrievalConfig,
     context: WorkflowContext,
+    *,
+    replan_slots: Callable[
+        [list[dict[str, Any]], list[dict[str, Any]]],
+        list[dict[str, Any]],
+    ]
+    | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     pool: dict[str, list[dict[str, Any]]] = {
         slot["slot_id"]: (
@@ -469,14 +572,12 @@ def retrieve_candidates(
     if video_description is None:
         raise RuntimeError("Video description must be available before candidate retrieval")
     rejected: list[dict[str, Any]] = []
-    borderline: dict[str, list[dict[str, Any]]] = {
-        slot["slot_id"]: [] for slot in slots
-    }
-    primary_rounds = retrieval_config.retrieval_max_rounds
+    primary_rounds = retrieval_config.retrieval_max_rounds + 1
     adjacent_rounds = retrieval_config.retrieval_max_rounds
     total_rounds = primary_rounds + adjacent_rounds
     primary_scope_exhausted: set[str] = set()
     adjacent_scope_exhausted: set[str] = set()
+    freshly_replanned: set[str] = set()
     for round_index in range(1, total_rounds + 1):
         include_adjacent = round_index > primary_rounds
         scope = "adjacent_segments" if include_adjacent else "planned_segments"
@@ -506,10 +607,20 @@ def retrieve_candidates(
             ):
                 break
             continue
-        source_segments_by_slot = _retrieval_segment_context(
-            video_description,
-            pending,
-            include_adjacent=include_adjacent,
+        source_segments_by_slot: dict[str, list[dict[str, Any]]] = {}
+        for slot in pending:
+            slot_id = str(slot["slot_id"])
+            source_segments_by_slot.update(
+                _retrieval_segment_context(
+                    video_description,
+                    [slot],
+                    include_adjacent=(
+                        include_adjacent and slot_id not in freshly_replanned
+                    ),
+                )
+            )
+        freshly_replanned.difference_update(
+            str(slot["slot_id"]) for slot in pending
         )
         excluded = {
             slot["slot_id"]: [
@@ -525,7 +636,11 @@ def retrieve_candidates(
 
         def retrieve_slot(
             slot: dict[str, Any],
-        ) -> tuple[str, dict[str, list[dict[str, Any]]] | None, bool]:
+        ) -> tuple[
+            str,
+            dict[str, list[dict[str, Any]]] | None,
+            dict[str, Any] | None,
+        ]:
             slot_id = slot["slot_id"]
             slot_segments = {slot_id: source_segments_by_slot[slot_id]}
             candidates_needed = (
@@ -537,12 +652,28 @@ def retrieve_candidates(
                 excluded[slot_id],
             )
             if available_capacity < candidates_needed:
+                capacity_failure = {
+                    "slot_id": slot_id,
+                    "reason": "insufficient_non_overlapping_capacity",
+                    "round": round_index,
+                    "scope": scope,
+                    "scope_round": scope_round,
+                    "available_capacity": available_capacity,
+                    "candidates_needed": candidates_needed,
+                    "excluded_ranges": excluded[slot_id],
+                    "source_segment_ids": list(slot["source_segment_ids"]),
+                }
                 log_event(
                     "WARNING",
                     "planner.candidate",
                     "fallback.apply",
-                    "Candidate scope lacks enough non-overlapping fixed-duration windows; "
-                    "expanding in the next round",
+                    (
+                        "Candidate scope lacks enough non-overlapping fixed-duration "
+                        "windows; queuing targeted Slot replanning"
+                        if replan_slots is not None
+                        else "Candidate scope lacks enough non-overlapping fixed-duration "
+                        "windows; expanding in the next round"
+                    ),
                     round=round_index,
                     scope=scope,
                     scope_round=scope_round,
@@ -551,7 +682,7 @@ def retrieve_candidates(
                     available_capacity=available_capacity,
                     planned_duration_sec=float(slot["planned_duration_sec"]),
                 )
-                return slot_id, None, True
+                return slot_id, None, capacity_failure
             confirmed_candidates = {
                 slot_id: [
                     {
@@ -600,12 +731,12 @@ def retrieve_candidates(
                     error_type=type(exc).__name__,
                     reason=error_summary(exc),
                 )
-                return slot_id, None, False
+                return slot_id, None, None
             for item_index, candidate in enumerate(slot_pool[slot_id], 1):
                 candidate["candidate_id"] = (
                     f"{slot_id}_round_{round_index:02d}_candidate_{item_index:02d}"
                 )
-            return slot_id, slot_pool, False
+            return slot_id, slot_pool, None
 
         llm_workers = max(1, min(config.max_concurrency, len(pending)))
         log_event(
@@ -634,135 +765,197 @@ def retrieve_candidates(
 
         exhausted_slots.update(
             slot_id
-            for slot_id, _slot_pool, exhausted in slot_results
-            if exhausted
+            for slot_id, _slot_pool, capacity_failure in slot_results
+            if capacity_failure is not None
         )
+        capacity_failures = [
+            capacity_failure
+            for _slot_id, _slot_pool, capacity_failure in slot_results
+            if capacity_failure is not None
+        ]
         round_pool = {
             slot_id: slot_pool[slot_id]
-            for slot_id, slot_pool, _exhausted in slot_results
+            for slot_id, slot_pool, _capacity_failure in slot_results
             if slot_pool is not None
         }
         successful_slots = [
             slot for slot in pending if slot["slot_id"] in round_pool
         ]
-        if not successful_slots:
-            continue
+        if successful_slots:
 
-        def validate_slot_visuals(slot: dict[str, Any]) -> None:
-            slot_id = slot["slot_id"]
-            add_visual_features(
-                video_path,
-                [slot],
-                {slot_id: round_pool[slot_id]},
-                vlm_config,
-                context,
-                sample_frames=retrieval_config.visual_sample_frames,
-                operation=(
-                    f"Visual candidate validation round {round_index} slot {slot_id}"
-                ),
-                show_progress=False,
-            )
-
-        vlm_workers = max(1, min(vlm_config.max_concurrency, len(successful_slots)))
-        with ThreadPoolExecutor(
-            max_workers=vlm_workers,
-            thread_name_prefix="candidate-vlm",
-        ) as executor:
-            list(
-                progress_iter(
-                    executor.map(validate_slot_visuals, successful_slots),
-                    total=len(successful_slots),
-                    description=f"Candidate VLM validation round {round_index}",
-                    unit="slot",
+            def validate_slot_visuals(slot: dict[str, Any]) -> None:
+                slot_id = slot["slot_id"]
+                add_visual_features(
+                    video_path,
+                    [slot],
+                    {slot_id: round_pool[slot_id]},
+                    vlm_config,
+                    context,
+                    sample_frames=retrieval_config.visual_sample_frames,
+                    operation=(
+                        f"Visual candidate validation round {round_index} slot {slot_id}"
+                    ),
+                    show_progress=False,
                 )
-            )
 
-        for slot in successful_slots:
-            slot_id = slot["slot_id"]
-            requires_subject = bool(slot.get("required_visible_subjects"))
-            for candidate in round_pool[slot_id]:
-                visibility = _normalize_likert_score(
-                    candidate["protagonist_visibility_likert"]
-                )
-                overlap = any(
-                    _ranges_overlap(
-                        parse_range(candidate["timestamp"]),
-                        parse_range(existing["timestamp"]),
+            vlm_workers = max(
+                1,
+                min(vlm_config.max_concurrency, len(successful_slots)),
+            )
+            with ThreadPoolExecutor(
+                max_workers=vlm_workers,
+                thread_name_prefix="candidate-vlm",
+            ) as executor:
+                list(
+                    progress_iter(
+                        executor.map(validate_slot_visuals, successful_slots),
+                        total=len(successful_slots),
+                        description=f"Candidate VLM validation round {round_index}",
+                        unit="slot",
                     )
-                    for existing in pool[slot_id]
                 )
-                visibility_ok = (
-                    not requires_subject
-                    or visibility >= retrieval_config.protagonist_visibility_threshold
-                )
-                if overlap or not visibility_ok:
-                    if (
-                        not overlap
-                        and requires_subject
-                        and visibility
-                        >= retrieval_config.protagonist_visibility_fallback_threshold
-                    ):
-                        borderline[slot_id].append(candidate)
-                    rejected.append(
-                        {
-                            "slot_id": slot_id,
-                            "timestamp": candidate["timestamp"],
-                            "candidate_id": candidate["candidate_id"],
-                            "reason": (
-                                "overlapping_range"
-                                if overlap
-                                else "required_subject_not_visually_confirmed"
+
+            for slot in successful_slots:
+                slot_id = slot["slot_id"]
+                requires_subject = bool(slot.get("required_visible_subjects"))
+                for candidate in round_pool[slot_id]:
+                    visibility = _normalize_likert_score(
+                        candidate["protagonist_visibility_likert"]
+                    )
+                    overlap = any(
+                        _ranges_overlap(
+                            parse_range(candidate["timestamp"]),
+                            parse_range(existing["timestamp"]),
+                        )
+                        for existing in pool[slot_id]
+                    )
+                    visibility_ok = (
+                        not requires_subject
+                        or visibility
+                        >= retrieval_config.protagonist_visibility_threshold
+                    )
+                    if overlap or not visibility_ok:
+                        rejection_reason = (
+                            "overlapping_range"
+                            if overlap
+                            else "required_subject_not_visually_confirmed"
+                        )
+                        log_event(
+                            "WARNING",
+                            "planner.candidate",
+                            "validation.reject",
+                            "Candidate rejected after VLM review",
+                            round=round_index,
+                            scope=scope,
+                            scope_round=scope_round,
+                            slot_id=slot_id,
+                            candidate_id=candidate["candidate_id"],
+                            timestamp=candidate["timestamp"],
+                            reason=rejection_reason,
+                            required_visible_subjects=list(
+                                slot.get("required_visible_subjects") or []
                             ),
-                            "protagonist_visibility_likert": candidate[
+                            protagonist_visibility_likert=candidate[
                                 "protagonist_visibility_likert"
                             ],
-                            "protagonist_visibility": visibility,
-                            "visual_evidence": candidate["visual_evidence"],
-                        }
-                    )
-                    continue
-                pool[slot_id].append(candidate)
-    fallbacks: list[dict[str, Any]] = []
-    for slot_id, candidates in pool.items():
-        if slot_id in fixed_slot_ids:
-            continue
-        if len(candidates) >= retrieval_config.candidates_per_slot:
-            continue
-        for candidate in sorted(
-            borderline[slot_id],
-            key=lambda item: (
-                int(item["protagonist_visibility_likert"]),
-                int(item["visual_slot_relevance_likert"]),
-                float(item["semantic_relevance"]),
-            ),
-            reverse=True,
-        ):
-            if any(
-                _ranges_overlap(
-                    parse_range(candidate["timestamp"]),
-                    parse_range(existing["timestamp"]),
-                )
-                for existing in candidates
-            ):
+                            protagonist_visibility=visibility,
+                            visibility_threshold=(
+                                retrieval_config.protagonist_visibility_threshold
+                            ),
+                            visual_evidence=candidate["visual_evidence"],
+                        )
+                        rejected.append(
+                            {
+                                "slot_id": slot_id,
+                                "timestamp": candidate["timestamp"],
+                                "candidate_id": candidate["candidate_id"],
+                                "reason": rejection_reason,
+                                "planned_content_description": slot[
+                                    "content_description"
+                                ],
+                                "required_visible_subjects": list(
+                                    slot.get("required_visible_subjects") or []
+                                ),
+                                "visible_description": candidate["description"],
+                                "visible_subjects": list(
+                                    candidate.get("visible_subjects") or []
+                                ),
+                                "visual_slot_relevance_likert": candidate.get(
+                                    "visual_slot_relevance_likert"
+                                ),
+                                "protagonist_visibility_likert": candidate[
+                                    "protagonist_visibility_likert"
+                                ],
+                                "protagonist_visibility": visibility,
+                                "visual_evidence": candidate["visual_evidence"],
+                            }
+                        )
+                        continue
+                    pool[slot_id].append(candidate)
+
+        targeted_failures = list(capacity_failures)
+        for slot in successful_slots:
+            slot_id = str(slot["slot_id"])
+            if pool[slot_id]:
                 continue
-            candidate["visual_validation_mode"] = "borderline_identity_fallback"
-            candidates.append(candidate)
-            fallbacks.append(
+            slot_rejections = [
+                item
+                for item in rejected
+                if item["slot_id"] == slot_id
+            ]
+            targeted_failures.append(
                 {
                     "slot_id": slot_id,
-                    "candidate_id": candidate["candidate_id"],
-                    "timestamp": candidate["timestamp"],
-                    "protagonist_visibility_likert": candidate[
-                        "protagonist_visibility_likert"
-                    ],
-                    "protagonist_visibility": _normalize_likert_score(
-                        candidate["protagonist_visibility_likert"]
+                    "reason": "no_vlm_approved_candidates",
+                    "round": round_index,
+                    "scope": scope,
+                    "scope_round": scope_round,
+                    "source_segment_ids": list(slot["source_segment_ids"]),
+                    "planned_content_description": slot["content_description"],
+                    "required_visible_subjects": list(
+                        slot.get("required_visible_subjects") or []
                     ),
-                    "reason": "exact_candidate_count_after_exhaustive_visual_retrieval",
+                    "vlm_rejections": slot_rejections,
                 }
             )
-            if len(candidates) >= retrieval_config.candidates_per_slot:
-                break
+
+        if replan_slots is not None and targeted_failures:
+            target_slot_ids = {
+                str(failure["slot_id"]) for failure in targeted_failures
+            }
+            log_event(
+                "WARNING",
+                "planner.slot",
+                "fallback.apply",
+                "Redesigning failed Slots in one targeted planning call",
+                round=round_index,
+                slot_ids=sorted(target_slot_ids),
+                reasons={
+                    failure["slot_id"]: failure["reason"]
+                    for failure in targeted_failures
+                },
+            )
+            redesigned_slots = replan_slots(slots, targeted_failures)
+            slots[:] = redesigned_slots
+            for slot_id in target_slot_ids:
+                pool[slot_id] = []
+                primary_scope_exhausted.discard(slot_id)
+                adjacent_scope_exhausted.discard(slot_id)
+            rejected = [
+                item
+                for item in rejected
+                if item["slot_id"] not in target_slot_ids
+            ]
+            freshly_replanned.update(target_slot_ids)
+            log_event(
+                "INFO",
+                "planner.slot",
+                "stage.complete",
+                "Targeted Slot replanning completed; retrying only failed Slots",
+                round=round_index,
+                slot_ids=sorted(target_slot_ids),
+            )
+            continue
     shortages = {
         slot_id: retrieval_config.candidates_per_slot - len(candidates)
         for slot_id, candidates in pool.items()
@@ -770,7 +963,6 @@ def retrieve_candidates(
         if len(candidates) < retrieval_config.candidates_per_slot
     }
     context.set_artifact("candidate_rejections", rejected)
-    context.set_artifact("candidate_fallbacks", fallbacks)
     if shortages:
         failure = {
             "reason": "insufficient_visually_grounded_candidates",

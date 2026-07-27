@@ -356,10 +356,9 @@ importance, or direct relevance to the user's request.
 | Key | Purpose | Default |
 | --- | --- | --- |
 | `candidates_per_slot` | Requested source candidates per Slot | `3` |
-| `retrieval_max_rounds` | Maximum candidate-expansion rounds | `3` |
+| `retrieval_max_rounds` | Retries after the first planned-Segment search; the same count is then used for adjacent-Segment searches | `3` |
 | `visual_sample_frames` | Candidate visual-validation frames | `4` |
-| `protagonist_visibility_threshold` | Minimum normalized subject visibility | `0.55` |
-| `protagonist_visibility_fallback_threshold` | Exhaustive-retrieval identity fallback | `0.5` |
+| `protagonist_visibility_threshold` | Minimum normalized subject visibility | `0.5` |
 | `motion_sample_fps` | Candidate motion sampling rate | `2.0` |
 | `motion_workers` | Candidate motion decoding workers | `4` |
 
@@ -451,6 +450,7 @@ Each task output directory contains:
 | `candidate_pool.json` | Structured-video candidates, model scores, and local motion features |
 | `selection_diagnostics.json` | Independent-best and Beam Search paths with scores |
 | `planning_history.json` | Planning artifacts and versioned scripts/patches without model-call content |
+| `planning_calls.json` | Planning call tree with every retry response in full and Prompt metadata only |
 | `script_raw.json` | Final selected path with slot and candidate IDs |
 | `script_adapted.json` | Frame-grid output ranges, beat alignment, refined source ranges, and cut diagnostics |
 | `clips/clip_XXXX.mp4` | Normalized, video-only intermediate clips |
