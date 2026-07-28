@@ -17,6 +17,7 @@ from cutmaster.analyser.service import (
     _group_dialogue,
     _raw_segments,
     _sample_shot_frames,
+    _video_summary_context,
     _validate_dialogue_segments,
     _validate_shot_annotation,
     analyse_video_material,
@@ -60,6 +61,40 @@ def _dialogue(dialogue_id: int, start: float, end: float):
         "speaker": f"Speaker {dialogue_id}",
         "text": f"line {dialogue_id}",
     }
+
+
+def test_video_summary_context_excludes_shots_and_keeps_complete_dialogue() -> None:
+    full_dialogue = [
+        {
+            "dialogue_id": 1,
+            "start_sec": 1.0,
+            "end_sec": 2.0,
+            "speaker": "Speaker 1",
+            "text": "Complete line.",
+        }
+    ]
+    context = _video_summary_context(
+        {
+            "segments": [
+                {
+                    "segment_id": "segment_0001",
+                    "time_range": {"start_sec": 0.0, "end_sec": 3.0},
+                    "segment_summary": "A visible event.",
+                    "shots": [{"shot_id": "shot_00001"}],
+                }
+            ]
+        },
+        full_dialogue,
+    )
+
+    assert context["segments"] == [
+        {
+            "segment_id": "segment_0001",
+            "time_range": {"start_sec": 0.0, "end_sec": 3.0},
+            "segment_summary": "A visible event.",
+        }
+    ]
+    assert context["full_dialogue"] == full_dialogue
 
 
 def test_shot_sampling_repeats_last_decodable_frame(monkeypatch, tmp_path) -> None:

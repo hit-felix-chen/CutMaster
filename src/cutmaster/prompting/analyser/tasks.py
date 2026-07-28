@@ -493,12 +493,14 @@ def _video_summary(details: VideoSummaryDetails) -> PromptPackage:
         },
     )
     instructions = """Create a reusable, grounded story summary after all source-video Segments
-and Shots have been annotated.
+have been annotated.
 
-Use the complete structured VideoDescription as source truth. Integrate visible actions, Segment
-summaries, dialogue meaning, character relationships, turning points, consequences, and ending.
-Resolve the story chronologically. Give enough context for later editing models to understand why
-events and lines matter without rereading the full transcript.
+The maintained video_summary_context contains every Segment field except the internal shots list,
+plus the complete chronological ASR transcript. Treat Segment summaries as visual source truth
+and the transcript as spoken narrative context. Integrate visible actions, dialogue meaning,
+character relationships, turning points, consequences, and ending. Resolve the story
+chronologically. Give enough context for later editing models to understand why events and lines
+matter without receiving Shot-level annotations again.
 
 Do not reproduce the transcript, enumerate individual dialogue lines, infer events absent from
 the annotations, or describe editing choices. The synopsis should read as a coherent account of
@@ -507,15 +509,16 @@ arcs must distinguish the major characters and explain meaningful change over ti
     return PromptPackage(
         stage=PromptStage.ANALYSER,
         task=PromptTask.VIDEO_SUMMARY,
-        prompt_version="1.0",
+        prompt_version="2.0",
         operation="Full-video story summarization",
         system_prompt=(
-            "You synthesize a reusable story understanding from a fully annotated source video. "
-            "Ground every statement in the supplied structure and return strict JSON only."
+            "You synthesize reusable story understanding from Segment-level video descriptions "
+            "and the complete ASR transcript. Ground every statement in the supplied structure "
+            "and return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=("source_metadata", "video_description"),
+        context_keys=("source_metadata", "video_summary_context"),
         modality=PromptModality.TEXT,
         output_artifact="video_summary",
     )

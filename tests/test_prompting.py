@@ -279,9 +279,14 @@ def test_video_summary_contract_is_grounded_in_known_segments() -> None:
         "segment_0001",
         "segment_0002",
     ]
-    assert package.context_keys == ("source_metadata", "video_description")
+    assert package.prompt_version == "2.0"
+    assert package.context_keys == (
+        "source_metadata",
+        "video_summary_context",
+    )
     assert package.output_artifact == "video_summary"
-    assert "without rereading the full transcript" in package.user_prompt
+    assert "every Segment field except the internal shots list" in package.user_prompt
+    assert "complete chronological ASR transcript" in package.user_prompt
 
 
 def test_registry_rebuilds_prompt_with_accumulated_failure_reasons() -> None:

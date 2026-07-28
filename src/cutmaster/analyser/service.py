@@ -889,6 +889,23 @@ def _valid_video_summary(
         return None
 
 
+def _video_summary_context(
+    video_description: dict[str, Any],
+    full_dialogue: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "segments": [
+            {
+                key: value
+                for key, value in segment.items()
+                if key != "shots"
+            }
+            for segment in video_description["segments"]
+        ],
+        "full_dialogue": full_dialogue,
+    }
+
+
 def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     manifest_path = material_directory / "analysis_manifest.json"
     description_path = material_directory / "video_description.json"
@@ -1214,6 +1231,10 @@ def analyse_video_material(
     description_path = material_directory / "video_description.json"
     _write_json_checkpoint(description_path, description_dict)
     context.set_artifact("video_description", description_dict)
+    context.set_artifact(
+        "video_summary_context",
+        _video_summary_context(description_dict, dialogue),
+    )
     summary_path = material_directory / "video_summary.json"
     video_summary = _valid_video_summary(
         _read_json_checkpoint(summary_path),
