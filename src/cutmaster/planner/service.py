@@ -5,6 +5,7 @@ from typing import Any
 
 from cutmaster.planner.candidate_retrieval import retrieve_candidates
 from cutmaster.planner.dialogue_anchors import select_dialogue_anchors
+from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import RunRequest
 from cutmaster.runtime.workflow_context import WorkflowContext
@@ -90,6 +91,12 @@ class Planner:
         self.video_path = video_path
         self.config = config
         self.context = context
+        video_description = context.get_artifact("video_description")
+        if video_description is None:
+            raise RuntimeError(
+                "Video description must be available before Planner initialization"
+            )
+        self.media = SegmentMediaReader(video_path, video_description)
 
     def plan_slots(
         self,
@@ -116,7 +123,7 @@ class Planner:
     def retrieve(self, slots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         return retrieve_candidates(
             slots,
-            self.video_path,
+            self.media,
             self.config.llm,
             self.config.vlm,
             self.config.candidate_retrieval,
@@ -153,7 +160,7 @@ class Planner:
         candidate_pool: dict[str, list[dict[str, Any]]],
     ) -> dict[str, dict[str, Any]]:
         return precompute_pairwise_scores(
-            self.video_path,
+            self.media,
             slots,
             candidate_pool,
             self.config.vlm,

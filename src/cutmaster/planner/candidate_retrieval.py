@@ -4,7 +4,6 @@ import json
 import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any
 
 import cv2
@@ -18,6 +17,7 @@ from cutmaster.prompting.planner import (
 )
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planner.scoring import _contact_sheet_data_url, _normalize_likert_score
+from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.runtime.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
 
@@ -351,7 +351,7 @@ def _candidate_segment_video_descriptions(
 
 
 def add_visual_features(
-    video_path: Path,
+    media: SegmentMediaReader,
     slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
     config: VLMConfig,
@@ -365,7 +365,7 @@ def add_visual_features(
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
         image_results = executor.map(
             lambda candidate: _contact_sheet_data_url(
-                video_path, candidate, sample_frames
+                media, candidate, sample_frames
             ),
             candidates,
         )
@@ -476,7 +476,7 @@ def add_visual_features(
                 )
                 return score_subset(
                     subset,
-                    [_contact_sheet_data_url(video_path, candidate, 1)],
+                    [_contact_sheet_data_url(media, candidate, 1)],
                     f"{suffix} resampled",
                     resampled=True,
                 )
@@ -544,7 +544,7 @@ def _retrieval_segment_context(
 
 def retrieve_candidates(
     slots: list[dict[str, Any]],
-    video_path: Path,
+    media: SegmentMediaReader,
     config: LLMConfig,
     vlm_config: VLMConfig,
     retrieval_config: CandidateRetrievalConfig,
@@ -784,7 +784,7 @@ def retrieve_candidates(
         ]
         if successful_slots:
             add_kinetic_features(
-                video_path,
+                media,
                 round_pool,
                 retrieval_config.motion_sample_fps,
                 retrieval_config.motion_workers,
@@ -839,7 +839,7 @@ def retrieve_candidates(
             def validate_slot_visuals(slot: dict[str, Any]) -> None:
                 slot_id = slot["slot_id"]
                 add_visual_features(
-                    video_path,
+                    media,
                     [slot],
                     {slot_id: round_pool[slot_id]},
                     vlm_config,
@@ -1056,7 +1056,7 @@ def retrieve_candidates(
             if slot_id not in fixed_slot_ids:
                 candidate["candidate_id"] = f"{slot_id}_candidate_{index:02d}"
     add_kinetic_features(
-        video_path,
+        media,
         {
             slot_id: pool[slot_id]
             for slot_id in fixed_slot_ids
@@ -1068,26 +1068,25 @@ def retrieve_candidates(
     return pool
 
 
-def _candidate_motion(video: cv2.VideoCapture, start: float, end: float, fps: float) -> float:
+def _candidate_motion(
+    media: SegmentMediaReader,
+    start: float,
+    end: float,
+    fps: float,
+) -> float:
     values: list[float] = []
-    previous = None
     sample_step = 1.0 / max(fps, 0.1)
+    sample_times: list[float] = []
     next_sample = start
-    video.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
-    while True:
-        ok, frame = video.read()
-        if not ok:
-            break
-        time_sec = float(video.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
-        if time_sec >= end:
-            break
-        if time_sec + 1e-6 < next_sample:
-            continue
+    while next_sample < end:
+        sample_times.append(next_sample)
+        next_sample += sample_step
+    previous = None
+    for frame in media.sample_frames(sample_times):
         gray = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
         if previous is not None:
             values.append(float(cv2.absdiff(gray, previous).mean()) / 255.0)
         previous = gray
-        next_sample += sample_step
     if not values:
         return 0.0
     raw = sum(values) / len(values)
@@ -1095,7 +1094,7 @@ def _candidate_motion(video: cv2.VideoCapture, start: float, end: float, fps: fl
 
 
 def add_kinetic_features(
-    video_path: Path,
+    media: SegmentMediaReader,
     pool: dict[str, list[dict[str, Any]]],
     sample_fps: float,
     max_workers: int = 4,
@@ -1104,29 +1103,21 @@ def add_kinetic_features(
     if not candidates:
         return
     worker_count = max(1, min(max_workers, len(candidates)))
-    groups = [candidates[index::worker_count] for index in range(worker_count)]
     progress = progress_bar(
         total=len(candidates),
         description="Candidate motion analysis",
         unit="candidate",
     )
 
-    def process(group: list[dict[str, Any]]) -> None:
-        video = cv2.VideoCapture(str(video_path))
-        if not video.isOpened():
-            raise RuntimeError(f"Could not open source video: {video_path}")
-        try:
-            for candidate in group:
-                start, end = parse_range(candidate["timestamp"])
-                candidate["kinetic_energy"] = round(
-                    _candidate_motion(video, start, end, sample_fps), 4
-                )
-                progress.update()
-        finally:
-            video.release()
+    def process(candidate: dict[str, Any]) -> None:
+        start, end = parse_range(candidate["timestamp"])
+        candidate["kinetic_energy"] = round(
+            _candidate_motion(media, start, end, sample_fps), 4
+        )
+        progress.update()
 
     try:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            list(executor.map(process, groups))
+            list(executor.map(process, candidates))
     finally:
         progress.close()

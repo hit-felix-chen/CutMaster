@@ -11,6 +11,7 @@ from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planner import PairwiseScoringDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planner.scoring import _edge_contact_sheet_data_url, _normalize_likert_score
+from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.runtime.progress import progress_iter
 from cutmaster.timecode import parse_range
 
@@ -57,7 +58,7 @@ def _validate_pairwise_grounding(
 
 
 def precompute_pairwise_scores(
-    video_path: Path,
+    media: SegmentMediaReader,
     slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
     config: VLMConfig,
@@ -88,7 +89,7 @@ def precompute_pairwise_scores(
             edge,
             candidate_id,
             _edge_contact_sheet_data_url(
-                video_path,
+                media,
                 candidate,
                 edge,
                 max(2, min(4, sample_frames)),

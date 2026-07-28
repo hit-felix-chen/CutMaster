@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import base64
 import math
-from pathlib import Path
 from typing import Any
 
 import cv2
 
+from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.timecode import parse_range
 
 def _sampled_contact_sheet_data_url(
-    video_path: Path,
+    media: SegmentMediaReader,
     candidate: dict[str, Any],
     sample_times: list[float],
     label: str,
@@ -20,21 +20,10 @@ def _sampled_contact_sheet_data_url(
         raise ValueError("A contact sheet requires at least one sample time")
     frame_width = 480
     frame_height = 270
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise RuntimeError(f"Could not open source video: {video_path}")
-    frames: list[Any] = []
-    try:
-        for sample_time in sample_times:
-            capture.set(cv2.CAP_PROP_POS_MSEC, sample_time * 1000)
-            ok, frame = capture.read()
-            if not ok:
-                raise RuntimeError(
-                    f"Could not decode visual sample for {candidate['candidate_id']}"
-                )
-            frames.append(cv2.resize(frame, (frame_width, frame_height)))
-    finally:
-        capture.release()
+    frames = [
+        cv2.resize(frame, (frame_width, frame_height))
+        for frame in media.sample_frames(sample_times)
+    ]
     columns = math.ceil(math.sqrt(count))
     rows = math.ceil(count / columns)
     sheet = __import__("numpy").zeros(
@@ -63,7 +52,7 @@ def _sampled_contact_sheet_data_url(
 
 
 def _contact_sheet_data_url(
-    video_path: Path,
+    media: SegmentMediaReader,
     candidate: dict[str, Any],
     sample_frames: int,
 ) -> str:
@@ -74,7 +63,7 @@ def _contact_sheet_data_url(
         for index in range(count)
     ]
     return _sampled_contact_sheet_data_url(
-        video_path,
+        media,
         candidate,
         sample_times,
         f"{candidate['candidate_id']}  {candidate['timestamp']}",
@@ -82,7 +71,7 @@ def _contact_sheet_data_url(
 
 
 def _edge_contact_sheet_data_url(
-    video_path: Path,
+    media: SegmentMediaReader,
     candidate: dict[str, Any],
     edge: str,
     sample_frames: int,
@@ -101,7 +90,7 @@ def _edge_contact_sheet_data_url(
         for index in range(count)
     ]
     return _sampled_contact_sheet_data_url(
-        video_path,
+        media,
         candidate,
         sample_times,
         f"{candidate['candidate_id']}  {edge.upper()}",
