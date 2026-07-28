@@ -147,7 +147,6 @@ def run_orchestrator(
     planning_seconds = 0.0
     dialogue_anchor_seconds = 0.0
     retrieval_seconds = 0.0
-    pairwise_seconds = 0.0
     selection_seconds = 0.0
     slots: list[dict] = []
     candidate_pool: dict[str, list[dict]] = {}
@@ -273,30 +272,6 @@ def run_orchestrator(
                 elapsed_sec=elapsed,
             )
 
-            attempt_stage = "pairwise_visual_scoring"
-            stage_started = time.monotonic()
-            log_event(
-                "INFO",
-                "planner.sequence",
-                "stage.start",
-                "Pairwise visual scoring started",
-                stage=attempt_stage,
-                attempt=planning_attempt,
-            )
-            pairwise_scores = planner.score_pairs(slots, candidate_pool)
-            elapsed = time.monotonic() - stage_started
-            pairwise_seconds += elapsed
-            log_event(
-                "INFO",
-                "planner.sequence",
-                "stage.complete",
-                "Pairwise visual scoring completed",
-                stage=attempt_stage,
-                attempt=planning_attempt,
-                pairs=len(pairwise_scores),
-                elapsed_sec=elapsed,
-            )
-
             attempt_stage = "beam_selection"
             stage_started = time.monotonic()
             log_event(
@@ -307,10 +282,9 @@ def run_orchestrator(
                 stage=attempt_stage,
                 attempt=planning_attempt,
             )
-            beam_path, selection = planner.select(
+            beam_path, selection, pairwise_scores = planner.select(
                 slots,
                 candidate_pool,
-                pairwise_scores,
             )
             elapsed = time.monotonic() - stage_started
             selection_seconds += elapsed
@@ -330,8 +304,6 @@ def run_orchestrator(
             elapsed = max(0.0, time.monotonic() - stage_started)
             if attempt_stage == "retrieval":
                 retrieval_seconds += elapsed
-            elif attempt_stage == "pairwise_visual_scoring":
-                pairwise_seconds += elapsed
             else:
                 selection_seconds += elapsed
             if not isinstance(exc, NoFeasiblePathError) and attempt_stage != "retrieval":
@@ -388,7 +360,6 @@ def run_orchestrator(
     timings["slot_planning"] = planning_seconds
     timings["dialogue_anchor_selection"] = dialogue_anchor_seconds
     timings["candidate_retrieval"] = retrieval_seconds
-    timings["pairwise_visual_scoring"] = pairwise_seconds
 
     stage_started = time.monotonic()
     log_event(

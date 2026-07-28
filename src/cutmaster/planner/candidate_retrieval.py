@@ -16,14 +16,13 @@ from cutmaster.prompting.planner import (
     CandidateVisualScoringDetails,
 )
 from cutmaster.runtime.workflow_context import WorkflowContext
-from cutmaster.planner.scoring import _contact_sheet_data_url, _normalize_likert_score
+from cutmaster.planner.scoring import _contact_sheet_data_url
 from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.runtime.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
 
 
 _TIMESTAMP_TOLERANCE_SEC = 0.0011
-_VISUALLY_STATIC_MAX_KINETIC_ENERGY = 0.01
 
 
 def _ranges_overlap(
@@ -794,7 +793,10 @@ def retrieve_candidates(
                 moving_candidates: list[dict[str, Any]] = []
                 for candidate in round_pool[slot_id]:
                     kinetic_energy = float(candidate["kinetic_energy"])
-                    if kinetic_energy > _VISUALLY_STATIC_MAX_KINETIC_ENERGY:
+                    static_threshold = (
+                        retrieval_config.static_kinetic_energy_threshold
+                    )
+                    if kinetic_energy > static_threshold:
                         moving_candidates.append(candidate)
                         continue
                     log_event(
@@ -810,7 +812,7 @@ def retrieve_candidates(
                         timestamp=candidate["timestamp"],
                         reason="visually_static",
                         kinetic_energy=kinetic_energy,
-                        static_threshold=_VISUALLY_STATIC_MAX_KINETIC_ENERGY,
+                        static_threshold=static_threshold,
                     )
                     rejected.append(
                         {
@@ -823,9 +825,7 @@ def retrieve_candidates(
                                 "content_description"
                             ],
                             "kinetic_energy": kinetic_energy,
-                            "static_threshold": (
-                                _VISUALLY_STATIC_MAX_KINETIC_ENERGY
-                            ),
+                            "static_threshold": static_threshold,
                         }
                     )
                 round_pool[slot_id] = moving_candidates
@@ -873,7 +873,7 @@ def retrieve_candidates(
                 slot_id = slot["slot_id"]
                 requires_subject = bool(slot.get("required_visible_subjects"))
                 for candidate in round_pool[slot_id]:
-                    visibility = _normalize_likert_score(
+                    visibility_likert = int(
                         candidate["protagonist_visibility_likert"]
                     )
                     overlap = any(
@@ -885,8 +885,8 @@ def retrieve_candidates(
                     )
                     visibility_ok = (
                         not requires_subject
-                        or visibility
-                        >= retrieval_config.protagonist_visibility_threshold
+                        or visibility_likert
+                        >= retrieval_config.protagonist_visibility_likert_threshold
                     )
                     if overlap or not visibility_ok:
                         rejection_reason = (
@@ -912,9 +912,8 @@ def retrieve_candidates(
                             protagonist_visibility_likert=candidate[
                                 "protagonist_visibility_likert"
                             ],
-                            protagonist_visibility=visibility,
-                            visibility_threshold=(
-                                retrieval_config.protagonist_visibility_threshold
+                            protagonist_visibility_likert_threshold=(
+                                retrieval_config.protagonist_visibility_likert_threshold
                             ),
                             kinetic_energy=candidate["kinetic_energy"],
                             visual_evidence=candidate["visual_evidence"],
@@ -941,7 +940,6 @@ def retrieve_candidates(
                                 "protagonist_visibility_likert": candidate[
                                     "protagonist_visibility_likert"
                                 ],
-                                "protagonist_visibility": visibility,
                                 "kinetic_energy": candidate["kinetic_energy"],
                                 "visual_evidence": candidate["visual_evidence"],
                             }

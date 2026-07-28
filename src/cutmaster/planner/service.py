@@ -13,7 +13,6 @@ from cutmaster.planner.script_review import review_and_patch
 from cutmaster.planner.sequence_selection import (
     NoFeasiblePathError,
     path_to_script,
-    precompute_pairwise_scores,
     select_paths,
     validate_chronological_path,
 )
@@ -154,31 +153,23 @@ class Planner:
     ) -> None:
         validate_chronological_path(slots, candidate_pool)
 
-    def score_pairs(
-        self,
-        slots: list[dict[str, Any]],
-        candidate_pool: dict[str, list[dict[str, Any]]],
-    ) -> dict[str, dict[str, Any]]:
-        return precompute_pairwise_scores(
-            self.media,
-            slots,
-            candidate_pool,
-            self.config.vlm,
-            self.context,
-            sample_frames=self.config.candidate_retrieval.visual_sample_frames,
-        )
-
     def select(
         self,
         slots: list[dict[str, Any]],
         candidate_pool: dict[str, list[dict[str, Any]]],
-        pairwise_scores: dict[str, dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        dict[str, Any],
+        dict[str, dict[str, Any]],
+    ]:
         return select_paths(
+            self.media,
             slots,
             candidate_pool,
             self.config.beam_search.beam_width,
-            pairwise_scores,
+            self.config.vlm,
+            self.context,
+            sample_frames=self.config.candidate_retrieval.visual_sample_frames,
         )
 
     def build_script(
@@ -229,7 +220,6 @@ __all__ = [
     "align_slots_to_music",
     "path_to_script",
     "plan_edit_slots",
-    "precompute_pairwise_scores",
     "redesign_edit_slots",
     "retrieve_candidates",
     "review_and_patch",

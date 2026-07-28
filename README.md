@@ -298,9 +298,10 @@ OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解
 | `candidates_per_slot` | 每个 Slot 最终保留的原片候选数 | `3` |
 | `retrieval_max_rounds` | 指定 Segment 首次检索后的重试次数；相邻 Segment 再检索同样次数 | `3` |
 | `visual_sample_frames` | 每个候选用于视觉核验的均匀采样帧数 | `4` |
-| `protagonist_visibility_threshold` | 必须出镜主体的最低归一化视觉置信度 | `0.5` |
+| `protagonist_visibility_likert_threshold` | 必须出镜主体的最低 Likert 分数（1–5） | `3` |
 | `motion_sample_fps` | 候选运动强度的采样帧率 | `2.0` |
 | `motion_workers` | 候选运动特征解码 worker 数 | `4` |
+| `static_kinetic_energy_threshold` | 丢弃静止候选的最高平均运动强度 | `0.05` |
 
 ### Stage 5–7：选择、复核与源窗口优化
 
@@ -425,7 +426,8 @@ uv run cutmaster run \
 - `planner.py`：规划门面，统一暴露并组织四个解耦阶段。
 - `slot_planner.py`：根据用户目标、音乐画像和结构化素材规划抽象 Slot。
 - `candidate_retriever.py`：检索候选片段，并用真实画面完成主体与内容核验。
-- `sequence_selector.py`：预计算片段间评分，执行严格时序 Beam Search。
+- `planner/sequence_selection.py`：逐 Slot 并发计算 Unary 与存活路径末尾所需的
+  Pairwise 分数，再执行严格时序 Beam Search。
 - `script_reviewer.py`：在候选池内复核和修补已选脚本。
 - `script.py`：选定候选的时长适配、输出时间轴校验和帧网格量化。
 - `cuts.py`：感知重复帧的 PySceneDetect 分析，以及并行、仅向后、帧级 minimax 原片窗口优化。

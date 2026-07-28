@@ -358,9 +358,10 @@ importance, or direct relevance to the user's request.
 | `candidates_per_slot` | Requested source candidates per Slot | `3` |
 | `retrieval_max_rounds` | Retries after the first planned-Segment search; the same count is then used for adjacent-Segment searches | `3` |
 | `visual_sample_frames` | Candidate visual-validation frames | `4` |
-| `protagonist_visibility_threshold` | Minimum normalized subject visibility | `0.5` |
+| `protagonist_visibility_likert_threshold` | Minimum subject-visibility Likert score (1–5) | `3` |
 | `motion_sample_fps` | Candidate motion sampling rate | `2.0` |
 | `motion_workers` | Candidate motion decoding workers | `4` |
+| `static_kinetic_energy_threshold` | Maximum mean motion energy retained as static and rejected | `0.05` |
 
 ### Stages 5–7: selection, review, and source-window optimization
 
@@ -490,7 +491,8 @@ Each `script_adapted.json` item adds:
 - `slot_planner.py`: abstract Slot planning from the request, music profile, and
   structured source material.
 - `candidate_retriever.py`: candidate retrieval and visual subject/content grounding.
-- `sequence_selector.py`: pairwise-score precomputation and chronological Beam Search.
+- `planner/sequence_selection.py`: per-Slot concurrent Unary/Pairwise scoring and
+  chronological Beam Search over surviving path ends.
 - `script_reviewer.py`: candidate-constrained review and script patching.
 - `script.py`: selected-candidate duration adaptation, output-timeline
   validation, and frame-grid quantization.

@@ -116,16 +116,18 @@ fade_sec = 0.3
 # 随后在“指定 Segment＋前后各一个 Segment”范围内再检索该次数。
 # Targeted Slot 重规划发生在检索轮次之间，不占用或增加候选检索轮次。
 # visual_sample_frames: 每个候选片段送给 VLM 核验的均匀采样帧数。
-# protagonist_visibility_threshold: 必须出镜主体的最低归一化身份置信度。
+# protagonist_visibility_likert_threshold: 必须出镜主体的最低 Likert 分数（1–5）。
 # motion_sample_fps: 计算候选运动强度时的视频采样帧率。
 # motion_workers: 并行解码与计算候选运动特征的 worker 数。
+# static_kinetic_energy_threshold: 平均运动强度不高于该值时丢弃候选。
 [candidate_retrieval]
 candidates_per_slot = 3
 retrieval_max_rounds = 3
 visual_sample_frames = 4
-protagonist_visibility_threshold = 0.5
+protagonist_visibility_likert_threshold = 3
 motion_sample_fps = 2.0
 motion_workers = 4
+static_kinetic_energy_threshold = 0.05
 
 # Stage 5b: chronological sequence selection
 # beam_width: Beam Search 每一层保留的最高分路径数量；越大搜索更充分但占用更多计算。

@@ -171,7 +171,7 @@ def review_and_patch(
                     issue["reason"]
                     if issue
                     else (
-                        "degrades_precomputed_hard_cut_path_score"
+                        "degrades_or_requires_unscored_hard_cut_path"
                         if (
                             trial_score is not None
                             and trial_score + 1e-9 < baseline_score

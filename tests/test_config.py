@@ -59,9 +59,10 @@ separated_loudness_lufs = -18.0
 candidates_per_slot = 3
 retrieval_max_rounds = 2
 visual_sample_frames = 4
-protagonist_visibility_threshold = 0.6
+protagonist_visibility_likert_threshold = 4
 motion_sample_fps = 3.0
 motion_workers = 2
+static_kinetic_energy_threshold = 0.07
 
 [beam_search]
 beam_width = 6
@@ -97,7 +98,14 @@ threads = 2
     assert config.shot_annotation.shot_sample_frames == 5
     assert config.slot_planning.target_clip_duration_sec == 4.5
     assert config.slot_planning.replan_max_rounds == 2
-    assert config.candidate_retrieval.protagonist_visibility_threshold == 0.6
+    assert (
+        config.candidate_retrieval.protagonist_visibility_likert_threshold
+        == 4
+    )
+    assert (
+        config.candidate_retrieval.static_kinetic_energy_threshold
+        == 0.07
+    )
     assert config.dialogue_anchors.enable_vocal_separation is False
     assert config.dialogue_anchors.max_anchors == 3
     assert config.dialogue_anchors.min_anchor_duration_sec == 2.0
@@ -177,6 +185,32 @@ shot_sample_frames = 4
     )
 
     with pytest.raises(ValueError, match="shot_sample_frames must equal 5"):
+        load_config(path)
+
+
+def test_visibility_likert_threshold_requires_integer(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[asr]
+api_key = "secret"
+
+[candidate_retrieval]
+protagonist_visibility_likert_threshold = 3.5
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be an integer from 1 to 5"):
         load_config(path)
 
 

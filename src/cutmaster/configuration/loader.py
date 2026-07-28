@@ -79,9 +79,10 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "candidates_per_slot",
         "retrieval_max_rounds",
         "visual_sample_frames",
-        "protagonist_visibility_threshold",
+        "protagonist_visibility_likert_threshold",
         "motion_sample_fps",
         "motion_workers",
+        "static_kinetic_energy_threshold",
     },
     "beam_search": {"beam_width"},
     "script_review": {"review_rounds"},
@@ -236,6 +237,9 @@ def _validate_values(config: AppConfig) -> None:
         "candidate_retrieval.motion_workers": (
             config.candidate_retrieval.motion_workers
         ),
+        "candidate_retrieval.static_kinetic_energy_threshold": (
+            config.candidate_retrieval.static_kinetic_energy_threshold
+        ),
         "beam_search.beam_width": config.beam_search.beam_width,
         "source_window_optimization.max_workers": (
             config.source_window_optimization.max_workers
@@ -304,10 +308,20 @@ def _validate_values(config: AppConfig) -> None:
         )
     if config.shot_annotation.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must equal 5")
-    threshold = config.candidate_retrieval.protagonist_visibility_threshold
-    if not 0.0 <= threshold <= 1.0:
+    threshold = (
+        config.candidate_retrieval.protagonist_visibility_likert_threshold
+    )
+    if threshold not in {1, 2, 3, 4, 5}:
         raise ValueError(
-            "candidate_retrieval.protagonist_visibility_threshold "
+            "candidate_retrieval.protagonist_visibility_likert_threshold "
+            "must be an integer from 1 to 5"
+        )
+    static_threshold = (
+        config.candidate_retrieval.static_kinetic_energy_threshold
+    )
+    if not 0.0 <= static_threshold <= 1.0:
+        raise ValueError(
+            "candidate_retrieval.static_kinetic_energy_threshold "
             "must be between 0 and 1"
         )
     if config.render.original_volume != 0.0:
@@ -349,6 +363,18 @@ def load_config(path: Path) -> AppConfig:
     script_review = _section(data, "script_review")
     source_window_optimization = _section(data, "source_window_optimization")
     render = _section(data, "render")
+    visibility_likert_threshold = candidate_retrieval.get(
+        "protagonist_visibility_likert_threshold",
+        3,
+    )
+    if (
+        isinstance(visibility_likert_threshold, bool)
+        or not isinstance(visibility_likert_threshold, int)
+    ):
+        raise ValueError(
+            "candidate_retrieval.protagonist_visibility_likert_threshold "
+            "must be an integer from 1 to 5"
+        )
     config = AppConfig(
         llm=_llm_config(llm),
         vlm=_vlm_config(vlm),
@@ -437,15 +463,16 @@ def load_config(path: Path) -> AppConfig:
                 candidate_retrieval.get("motion_sample_fps", 2.0)
             ),
             motion_workers=int(candidate_retrieval.get("motion_workers", 4)),
+            static_kinetic_energy_threshold=float(
+                candidate_retrieval.get(
+                    "static_kinetic_energy_threshold",
+                    0.05,
+                )
+            ),
             visual_sample_frames=int(
                 candidate_retrieval.get("visual_sample_frames", 4)
             ),
-            protagonist_visibility_threshold=float(
-                candidate_retrieval.get(
-                    "protagonist_visibility_threshold",
-                    0.5,
-                )
-            ),
+            protagonist_visibility_likert_threshold=visibility_likert_threshold,
         ),
         beam_search=BeamSearchConfig(
             beam_width=int(beam_search.get("beam_width", 8)),

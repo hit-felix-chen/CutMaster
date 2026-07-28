@@ -23,7 +23,6 @@ from cutmaster.planner.sequence_selection import (
     _pair_key,
     _unary,
     path_to_script,
-    precompute_pairwise_scores,
     select_paths,
     validate_chronological_path,
 )
@@ -564,16 +563,29 @@ def test_beam_search_rejects_source_time_reversal() -> None:
         validate_chronological_path(slots, pool)
 
 
-def test_beam_search_uses_precomputed_vlm_pairwise_scores() -> None:
-    slots = _slots()
-    for slot in slots:
-        slot["planned_duration_sec"] = slot["desired_duration_sec"]
+def test_beam_search_scores_only_edges_from_surviving_ends(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slots = [
+        {
+            "slot_id": f"slot_{index:02d}",
+            "content_description": f"scene {index}",
+            "continuity_from_previous": "direct progression",
+            "target_emotional_intensity": 0.5,
+            "target_kinetic_energy": 0.5,
+            "planned_duration_sec": 3.0,
+        }
+        for index in range(1, 4)
+    ]
     shared = {
         "description": "focal subject",
-        "semantic_relevance": 1.0,
+        "semantic_relevance": 0.5,
         "visual_slot_relevance_likert": 5,
         "protagonist_visibility_likert": 5,
         "salience": 1.0,
+        "emotional_intensity": 0.5,
+        "kinetic_energy": 0.5,
     }
     pool = {
         "slot_01": [
@@ -581,17 +593,14 @@ def test_beam_search_uses_precomputed_vlm_pairwise_scores() -> None:
             | {
                 "candidate_id": "a",
                 "slot_id": "slot_01",
-                "timestamp": "00:00:01,000-00:00:06,000",
-                "emotional_intensity": 0.2,
-                "kinetic_energy": 0.2,
+                "timestamp": "00:00:01,000-00:00:04,000",
+                "semantic_relevance": 1.0,
             },
             shared
             | {
                 "candidate_id": "b",
                 "slot_id": "slot_01",
-                "timestamp": "00:00:07,000-00:00:12,000",
-                "emotional_intensity": 0.2,
-                "kinetic_energy": 0.2,
+                "timestamp": "00:00:05,000-00:00:08,000",
             },
         ],
         "slot_02": [
@@ -599,39 +608,87 @@ def test_beam_search_uses_precomputed_vlm_pairwise_scores() -> None:
             | {
                 "candidate_id": "c",
                 "slot_id": "slot_02",
-                "timestamp": "00:00:13,000-00:00:16,000",
-                "emotional_intensity": 0.9,
-                "kinetic_energy": 0.9,
+                "timestamp": "00:00:10,000-00:00:13,000",
+                "semantic_relevance": 1.0,
             },
             shared
             | {
                 "candidate_id": "d",
                 "slot_id": "slot_02",
-                "timestamp": "00:00:17,000-00:00:20,000",
-                "emotional_intensity": 0.9,
-                "kinetic_energy": 0.9,
+                "timestamp": "00:00:14,000-00:00:17,000",
             },
         ],
+        "slot_03": [
+            shared
+            | {
+                "candidate_id": "e",
+                "slot_id": "slot_03",
+                "timestamp": "00:00:20,000-00:00:23,000",
+            }
+        ],
     }
-    pairwise_scores = {
-        _pair_key("a", "c"): {"pairwise_score": 0.1},
-        _pair_key("a", "d"): {"pairwise_score": 0.2},
-        _pair_key("b", "c"): {"pairwise_score": 0.3},
-        _pair_key("b", "d"): {"pairwise_score": 0.9},
-    }
-    beam, diagnostics = select_paths(
+    scored_previous_ids: list[list[str]] = []
+
+    def score_layer(
+        media,
+        previous_slot,
+        current_slot,
+        previous_candidates,
+        current_candidates,
+        config,
+        context,
+        *,
+        sample_frames,
+    ):
+        scored_previous_ids.append(
+            [candidate["candidate_id"] for candidate in previous_candidates]
+        )
+        return {
+            _pair_key(previous["candidate_id"], current["candidate_id"]): {
+                "pairwise_score": (
+                    1.0 if current["candidate_id"] in {"c", "e"} else 0.0
+                )
+            }
+            for previous in previous_candidates
+            for current in current_candidates
+        }
+
+    monkeypatch.setattr(
+        "cutmaster.planner.sequence_selection._score_pairwise_layer",
+        score_layer,
+    )
+
+    class Context:
+        def __init__(self) -> None:
+            self.artifacts = {}
+
+        def set_artifact(self, key, value) -> None:
+            self.artifacts[key] = value
+
+    context = Context()
+    beam, diagnostics, pairwise_scores = select_paths(
+        tmp_path / "video.mp4",
         slots,
         pool,
-        beam_width=4,
-        pairwise_scores=pairwise_scores,
+        beam_width=1,
+        config=VLMConfig(model="test", base_url="", api_key="test"),
+        context=context,
+        sample_frames=2,
     )
-    assert [item["candidate_id"] for item in beam] == ["b", "d"]
-    assert diagnostics["pairwise_scoring"] == "precomputed_vlm_hard_cut"
-    assert diagnostics["pairwise_score_count"] == 4
-    assert diagnostics["beam_score"] == pytest.approx(1.56)
+    assert [item["candidate_id"] for item in beam] == ["a", "c", "e"]
+    assert scored_previous_ids == [["a"], ["c"]]
+    assert set(pairwise_scores) == {
+        _pair_key("a", "c"),
+        _pair_key("a", "d"),
+        _pair_key("c", "e"),
+    }
+    assert diagnostics["pairwise_scoring"] == (
+        "lazy_vlm_hard_cut_from_surviving_beam_ends"
+    )
+    assert context.artifacts["pairwise_scores"] == pairwise_scores
 
 
-def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
+def test_pairwise_vlm_scores_surviving_ends_in_parallel(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -642,20 +699,42 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
             "continuity_from_previous": "direct progression",
             "target_kinetic_energy": 0.5,
         }
-        for index in range(1, 4)
+        for index in range(1, 3)
     ]
     pool = {
-        slot["slot_id"]: [
+        "slot_01": [
             {
-                "candidate_id": f"{slot['slot_id']}_candidate_01",
-                "slot_id": slot["slot_id"],
-                "timestamp": f"00:00:{index * 10:02d},000-00:00:{index * 10 + 4:02d},000",
-                "description": f"visible scene {index}",
+                "candidate_id": f"previous_{index}",
+                "slot_id": "slot_01",
+                "timestamp": f"00:00:0{index},000-00:00:05,000",
+                "description": f"previous scene {index}",
+                "semantic_relevance": 1.0,
+                "visual_slot_relevance_likert": 5,
+                "protagonist_visibility_likert": 5,
+                "emotional_intensity": 0.5,
                 "kinetic_energy": 0.5,
+                "salience": 1.0,
             }
-        ]
-        for index, slot in enumerate(slots, 1)
+            for index in range(1, 3)
+        ],
+        "slot_02": [
+            {
+                "candidate_id": "current_1",
+                "slot_id": "slot_02",
+                "timestamp": "00:00:10,000-00:00:14,000",
+                "description": "current scene",
+                "semantic_relevance": 1.0,
+                "visual_slot_relevance_likert": 5,
+                "protagonist_visibility_likert": 5,
+                "emotional_intensity": 0.5,
+                "kinetic_energy": 0.5,
+                "salience": 1.0,
+            }
+        ],
     }
+    for slot in slots:
+        slot["target_emotional_intensity"] = 0.5
+        slot["planned_duration_sec"] = 4.0
     monkeypatch.setattr(
         "cutmaster.planner.sequence_selection._edge_contact_sheet_data_url",
         lambda *args, **kwargs: "data:image/jpeg;base64,stub",
@@ -693,23 +772,116 @@ def test_pairwise_vlm_precompute_runs_boundaries_in_parallel(
             self.artifacts[key] = value
 
     context = Context()
-    scores = precompute_pairwise_scores(
+    _, _, scores = select_paths(
         tmp_path / "video.mp4",
         slots,
         pool,
-        VLMConfig(
+        beam_width=2,
+        config=VLMConfig(
             model="test",
             base_url="",
             api_key="test",
             max_concurrency=2,
         ),
-        context,
+        context=context,
         sample_frames=2,
     )
     assert len(worker_ids) == 2
     assert len(scores) == 2
     assert all(item["pairwise_score"] == pytest.approx(0.765) for item in scores.values())
     assert context.artifacts["pairwise_scores"] == scores
+
+
+def test_current_slot_unary_and_pairwise_scoring_overlap(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    slots = [
+        {
+            "slot_id": f"slot_{index:02d}",
+            "target_emotional_intensity": 0.5,
+            "target_kinetic_energy": 0.5,
+            "planned_duration_sec": 3.0,
+        }
+        for index in range(1, 3)
+    ]
+    candidate = {
+        "description": "visible scene",
+        "semantic_relevance": 1.0,
+        "visual_slot_relevance_likert": 5,
+        "protagonist_visibility_likert": 5,
+        "emotional_intensity": 0.5,
+        "kinetic_energy": 0.5,
+        "salience": 1.0,
+    }
+    pool = {
+        "slot_01": [
+            candidate
+            | {
+                "candidate_id": "a",
+                "slot_id": "slot_01",
+                "timestamp": "00:00:01,000-00:00:04,000",
+            }
+        ],
+        "slot_02": [
+            candidate
+            | {
+                "candidate_id": "b",
+                "slot_id": "slot_02",
+                "timestamp": "00:00:05,000-00:00:08,000",
+            }
+        ],
+    }
+    barrier = threading.Barrier(2)
+    worker_ids: set[int] = set()
+    worker_lock = threading.Lock()
+
+    def score_unary(slot, candidates):
+        if slot["slot_id"] == "slot_02":
+            with worker_lock:
+                worker_ids.add(threading.get_ident())
+            barrier.wait(timeout=2)
+        return {item["candidate_id"]: 1.0 for item in candidates}
+
+    def score_pairwise(
+        media,
+        previous_slot,
+        current_slot,
+        previous_candidates,
+        current_candidates,
+        config,
+        context,
+        *,
+        sample_frames,
+    ):
+        with worker_lock:
+            worker_ids.add(threading.get_ident())
+        barrier.wait(timeout=2)
+        return {_pair_key("a", "b"): {"pairwise_score": 1.0}}
+
+    monkeypatch.setattr(
+        "cutmaster.planner.sequence_selection._score_unary_candidates",
+        score_unary,
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.sequence_selection._score_pairwise_layer",
+        score_pairwise,
+    )
+
+    class Context:
+        def set_artifact(self, key, value) -> None:
+            pass
+
+    select_paths(
+        tmp_path / "video.mp4",
+        slots,
+        pool,
+        beam_width=1,
+        config=VLMConfig(model="test", base_url="", api_key="test"),
+        context=Context(),
+        sample_frames=2,
+    )
+    assert len(worker_ids) == 2
 
 
 def test_candidate_validation_requires_exact_duration_and_nonoverlap() -> None:
@@ -1318,8 +1490,7 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
             "reason": "required_subject_not_visually_confirmed",
             "required_visible_subjects": ["focal subject"],
             "protagonist_visibility_likert": 1,
-            "protagonist_visibility": 0.0,
-            "visibility_threshold": 0.5,
+            "protagonist_visibility_likert_threshold": 3,
             "kinetic_energy": 0.5,
             "visual_evidence": "different identity",
         }
@@ -1442,7 +1613,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
         for slot_id, candidates in pool.items():
             for candidate in candidates:
                 candidate["kinetic_energy"] = (
-                    0.0
+                    0.04
                     if (
                         slot_id == "slot_01"
                         and "_round_01_" in candidate["candidate_id"]
@@ -2038,7 +2209,7 @@ def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> 
     assert context.data["script_versions"][-1]["rejected_patches"][0]["slot_id"] == "slot_01"
 
 
-def test_review_rejects_patch_that_degrades_precomputed_hard_cut(
+def test_review_rejects_patch_that_degrades_lazy_hard_cut(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -2109,5 +2280,5 @@ def test_review_rejects_patch_that_degrades_precomputed_hard_cut(
     assert patched[1]["candidate_id"] == "b"
     rejected = context.data["script_versions"][-1]["rejected_patches"]
     assert rejected[0]["rejection_reason"] == (
-        "degrades_precomputed_hard_cut_path_score"
+        "degrades_or_requires_unscored_hard_cut_path"
     )
