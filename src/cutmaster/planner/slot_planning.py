@@ -7,6 +7,7 @@ from cutmaster.contracts.workflow import RunRequest
 from cutmaster.music.analysis import compact_music_profile
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planner import SlotPlanningDetails
+from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.workflow_context import WorkflowContext
 
 MIN_SLOT_DURATION_SEC = 1.5
@@ -339,6 +340,69 @@ def _targeted_slot_constraints(
     return constraints
 
 
+def _expand_degenerate_target_slot_ids(
+    slots: list[dict[str, Any]],
+    target_slot_ids: set[str],
+    video_description: dict[str, Any],
+) -> set[str]:
+    constraints = _targeted_slot_constraints(
+        slots,
+        target_slot_ids,
+        video_description,
+    )
+    degenerate_slot_ids = {
+        slot_id
+        for slot_id, constraint in constraints.items()
+        if len(constraint["allowed_segment_ids"]) == 1
+    }
+    if not degenerate_slot_ids:
+        return set(target_slot_ids)
+
+    segment_order = {
+        str(segment["segment_id"]): index
+        for index, segment in enumerate(video_description["segments"])
+    }
+
+    def source_bounds(slot: dict[str, Any]) -> tuple[int, int]:
+        positions = [
+            segment_order[str(segment_id)]
+            for segment_id in slot["source_segment_ids"]
+        ]
+        return min(positions), max(positions)
+
+    expanded_slot_ids = set(target_slot_ids)
+    for index, slot in enumerate(slots):
+        slot_id = str(slot["slot_id"])
+        if slot_id not in degenerate_slot_ids:
+            continue
+        current_start, current_end = source_bounds(slot)
+        neighbors: list[tuple[dict[str, Any], bool]] = []
+        if index > 0:
+            previous_slot = slots[index - 1]
+            _, previous_end = source_bounds(previous_slot)
+            neighbors.append((previous_slot, previous_end + 1 == current_start))
+        if index + 1 < len(slots):
+            next_slot = slots[index + 1]
+            next_start, _ = source_bounds(next_slot)
+            neighbors.append((next_slot, current_end + 1 == next_start))
+        for neighbor, is_source_contiguous in neighbors:
+            if (
+                is_source_contiguous
+                and neighbor.get("fixed_candidate") is None
+                and neighbor.get("dialogue_anchor") is None
+            ):
+                expanded_slot_ids.add(str(neighbor["slot_id"]))
+
+    if expanded_slot_ids == target_slot_ids:
+        blocked_slot_ids = ", ".join(sorted(degenerate_slot_ids))
+        raise ValueError(
+            "Targeted Slot replanning has a one-Segment interval for "
+            f"{blocked_slot_ids}, but no movable source-contiguous neighbor; "
+            "full Slot replanning is required"
+        )
+    return expanded_slot_ids
+
+
 def _validate_targeted_slots(
     parsed: dict[str, Any],
     slots: list[dict[str, Any]],
@@ -450,20 +514,41 @@ def redesign_edit_slots(
     failures: list[dict[str, Any]],
     config: LLMConfig,
     context: WorkflowContext,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], set[str]]:
     target_slot_ids = {
         str(failure["slot_id"]) for failure in failures
     }
     if not target_slot_ids:
-        return slots
+        return slots, set()
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError("Video description must be available for targeted Slot replanning")
-    constraints = _targeted_slot_constraints(
+    expanded_slot_ids = _expand_degenerate_target_slot_ids(
         slots,
         target_slot_ids,
         video_description,
     )
+    constraints = _targeted_slot_constraints(
+        slots,
+        expanded_slot_ids,
+        video_description,
+    )
+    if expanded_slot_ids != target_slot_ids:
+        log_event(
+            "WARNING",
+            "planner.slot",
+            "fallback.apply",
+            "Expanded a one-Segment retry interval to source-contiguous Slots",
+            failed_slot_ids=sorted(target_slot_ids),
+            replanned_slot_ids=sorted(expanded_slot_ids),
+            allowed_segment_ids=sorted(
+                {
+                    segment_id
+                    for constraint in constraints.values()
+                    for segment_id in constraint["allowed_segment_ids"]
+                }
+            ),
+        )
     package = prompt_registry.build(
         PromptStage.PLANNER,
         PromptTask.SLOT_PLANNING,
@@ -494,7 +579,7 @@ def redesign_edit_slots(
         ),
     )
     context.set_artifact("edit_plan", redesigned)
-    return redesigned
+    return redesigned, expanded_slot_ids
 
 
 def align_slots_to_music(

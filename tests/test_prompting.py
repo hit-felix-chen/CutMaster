@@ -126,7 +126,7 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
             rejection_feedback=[
                 {
                     "slot_id": "slot_02",
-                    "reason": "no_vlm_approved_candidates",
+                    "reason": "no_candidate_passed_visual_diagnostics",
                 },
                 {
                     "slot_id": "slot_04",

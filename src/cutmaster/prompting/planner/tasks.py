@@ -174,7 +174,7 @@ def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
             "items": slot_schema(details.allowed_segment_ids),
         }
     contract = ResponseContract(
-        version="2.1",
+        version="2.0",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -199,9 +199,10 @@ increasing source order, with every Slot's maximum Segment index strictly lower 
 Slot's minimum Segment index. Never repeat a source_segment_ids assignment listed in
 forbidden_segment_assignments.
 
-The VLM reviewers rejected the earlier candidates or the deterministic capacity check proved
-that the assigned source range cannot contain the required number of distinct, non-overlapping
-windows. Use rejection_feedback to correct the actual cause. Redesign the Slot's visible event,
+The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
+static imagery, or the deterministic capacity check proved that the assigned source range cannot
+contain the required number of distinct, non-overlapping windows. Use rejection_feedback to
+correct the actual cause. Redesign the Slot's visible event,
 required_visible_subjects, and source_segment_ids so that one continuous
 planned_duration_sec-long passage is visually realizable. Do not merely paraphrase the failed
 description while retaining unsupported subjects or source evidence. Role, team, and object
@@ -569,7 +570,7 @@ def _candidate_visual_scoring(
         str(candidate["candidate_id"]) for candidate in details.candidates
     ]
     contract = ResponseContract(
-        version="2.0",
+        version="2.1",
         schema={
             "type": "object",
             "additionalProperties": False,

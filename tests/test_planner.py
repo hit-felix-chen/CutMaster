@@ -28,6 +28,7 @@ from cutmaster.planner.sequence_selection import (
     validate_chronological_path,
 )
 from cutmaster.planner.slot_planning import (
+    _expand_degenerate_target_slot_ids,
     _globally_align_boundaries,
     _source_story_context,
     _targeted_slot_constraints,
@@ -894,6 +895,63 @@ def test_targeted_slot_replan_is_bounded_by_neighboring_fixed_slots() -> None:
         )
 
 
+def test_one_segment_retry_expands_to_contiguous_neighboring_slots() -> None:
+    slots = [
+        {
+            "slot_id": f"slot_{index:02d}",
+            "content_description": f"event {index}",
+            "desired_duration_sec": 4.0,
+            "planned_duration_sec": 4.0,
+            "source_segment_ids": [f"segment_{index:04d}"],
+        }
+        for index in range(1, 4)
+    ]
+
+    expanded_slot_ids = _expand_degenerate_target_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        expanded_slot_ids,
+        _video_description(),
+    )
+
+    assert expanded_slot_ids == {"slot_01", "slot_02", "slot_03"}
+    assert all(
+        constraint["allowed_segment_ids"]
+        == ["segment_0001", "segment_0002", "segment_0003"]
+        for constraint in constraints.values()
+    )
+
+
+def test_one_segment_retry_does_not_redesign_dialogue_anchors() -> None:
+    slots = [
+        {
+            "slot_id": f"slot_{index:02d}",
+            "content_description": f"event {index}",
+            "desired_duration_sec": 4.0,
+            "planned_duration_sec": 4.0,
+            "source_segment_ids": [f"segment_{index:04d}"],
+            **(
+                {"fixed_candidate": {"candidate_id": f"anchor_{index}"}}
+                if index == 1
+                else {}
+            ),
+        }
+        for index in range(1, 4)
+    ]
+
+    expanded_slot_ids = _expand_degenerate_target_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+    )
+
+    assert expanded_slot_ids == {"slot_02", "slot_03"}
+
+
 def test_visual_grounding_requires_integer_likert_scores() -> None:
     candidates = [{"candidate_id": "candidate_01"}]
     response = {
@@ -1000,6 +1058,7 @@ def test_candidate_retrieval_expands_without_calling_infeasible_round(
         "cutmaster.planner.candidate_retrieval.add_visual_features",
         add_visual_features,
     )
+
     monkeypatch.setattr(
         "cutmaster.planner.candidate_retrieval.add_kinetic_features",
         lambda _video_path, pool, *_args: [
@@ -1063,7 +1122,10 @@ def test_candidate_retrieval_uses_four_planned_then_three_adjacent_rounds(
         record_scope,
     )
 
-    with pytest.raises(ValueError, match="No visually grounded candidate"):
+    with pytest.raises(
+        ValueError,
+        match="No usable candidate remains after visual diagnostics",
+    ):
         retrieve_candidates(
             [slot],
             tmp_path / "video.mp4",
@@ -1197,6 +1259,7 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
         "cutmaster.planner.candidate_retrieval.add_visual_features",
         add_visual_features,
     )
+
     monkeypatch.setattr(
         "cutmaster.planner.candidate_retrieval.add_kinetic_features",
         lambda _video_path, pool, *_args: [
@@ -1238,14 +1301,14 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
     rejection_logs = [
         event
         for event in log_events
-        if event["message"] == "Candidate rejected after VLM review"
+        if event["message"] == "Candidate rejected after visual diagnostics"
     ]
     assert rejection_logs == [
         {
             "level": "WARNING",
             "component": "planner.candidate",
             "event": "validation.reject",
-            "message": "Candidate rejected after VLM review",
+            "message": "Candidate rejected after visual diagnostics",
             "round": 1,
             "scope": "planned_segments",
             "scope_round": 1,
@@ -1257,6 +1320,7 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
             "protagonist_visibility_likert": 1,
             "protagonist_visibility": 0.0,
             "visibility_threshold": 0.5,
+            "kinetic_energy": 0.5,
             "visual_evidence": "different identity",
         }
     ]
@@ -1319,19 +1383,26 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
         slot_id = visual_slots[0]["slot_id"]
         for candidate in visual_pool[slot_id]:
             accepted = "_round_02_" in candidate["candidate_id"]
+            rejected_as_static = not accepted and slot_id == "slot_01"
             candidate.update(
                 {
                     "description": (
                         "the focal subject is visible"
-                        if accepted
+                        if accepted or rejected_as_static
                         else "a different person is visible"
                     ),
-                    "visible_subjects": ["focal subject"] if accepted else ["other"],
-                    "protagonist_visibility_likert": 5 if accepted else 1,
+                    "visible_subjects": (
+                        ["focal subject"]
+                        if accepted or rejected_as_static
+                        else ["other"]
+                    ),
+                    "protagonist_visibility_likert": (
+                        5 if accepted or rejected_as_static else 1
+                    ),
                     "visual_slot_relevance_likert": 5 if accepted else 2,
                     "visual_evidence": (
                         "clear matching identity"
-                        if accepted
+                        if accepted or rejected_as_static
                         else "clear different identity"
                     ),
                 }
@@ -1345,11 +1416,19 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
             "slot_02",
         }
         assert all(
-            failure["reason"] == "no_vlm_approved_candidates"
+            failure["reason"] == "no_candidate_passed_visual_diagnostics"
             for failure in failures
         )
-        assert all(failure["vlm_rejections"] for failure in failures)
-        return [
+        assert all(failure["candidate_rejections"] for failure in failures)
+        rejection_reasons = {
+            failure["slot_id"]: failure["candidate_rejections"][0]["reason"]
+            for failure in failures
+        }
+        assert rejection_reasons == {
+            "slot_01": "visually_static",
+            "slot_02": "required_subject_not_visually_confirmed",
+        }
+        redesigned = [
             {
                 **slot,
                 "content_description": f"supported {slot['slot_id']}",
@@ -1357,6 +1436,19 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
             }
             for index, slot in enumerate(current_slots)
         ]
+        return redesigned, {"slot_01", "slot_02"}
+
+    def add_kinetic_features(_video_path, pool, *_args):
+        for slot_id, candidates in pool.items():
+            for candidate in candidates:
+                candidate["kinetic_energy"] = (
+                    0.0
+                    if (
+                        slot_id == "slot_01"
+                        and "_round_01_" in candidate["candidate_id"]
+                    )
+                    else 0.5
+                )
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
@@ -1365,11 +1457,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
     )
     monkeypatch.setattr(
         "cutmaster.planner.candidate_retrieval.add_kinetic_features",
-        lambda _video_path, pool, *_args: [
-            candidate.update({"kinetic_energy": 0.5})
-            for candidates in pool.values()
-            for candidate in candidates
-        ],
+        add_kinetic_features,
     )
 
     pool = retrieve_candidates(
@@ -1431,12 +1519,13 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
                 "source_segment_ids": ["segment_0001"],
             }
         ]
-        return [
+        redesigned = [
             {
                 **current_slots[0],
                 "source_segment_ids": ["segment_0002", "segment_0003"],
             }
         ]
+        return redesigned, {"slot_01"}
 
     def call_prompt(**kwargs):
         model_operations.append(kwargs["package"].operation)

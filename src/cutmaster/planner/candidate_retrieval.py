@@ -23,6 +23,7 @@ from cutmaster.timecode import format_range, parse_range
 
 
 _TIMESTAMP_TOLERANCE_SEC = 0.0011
+_VISUALLY_STATIC_MAX_KINETIC_ENERGY = 0.01
 
 
 def _ranges_overlap(
@@ -551,7 +552,7 @@ def retrieve_candidates(
     *,
     replan_slots: Callable[
         [list[dict[str, Any]], list[dict[str, Any]]],
-        list[dict[str, Any]],
+        tuple[list[dict[str, Any]], set[str]],
     ]
     | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -782,6 +783,58 @@ def retrieve_candidates(
             slot for slot in pending if slot["slot_id"] in round_pool
         ]
         if successful_slots:
+            add_kinetic_features(
+                video_path,
+                round_pool,
+                retrieval_config.motion_sample_fps,
+                retrieval_config.motion_workers,
+            )
+            for slot in successful_slots:
+                slot_id = str(slot["slot_id"])
+                moving_candidates: list[dict[str, Any]] = []
+                for candidate in round_pool[slot_id]:
+                    kinetic_energy = float(candidate["kinetic_energy"])
+                    if kinetic_energy > _VISUALLY_STATIC_MAX_KINETIC_ENERGY:
+                        moving_candidates.append(candidate)
+                        continue
+                    log_event(
+                        "WARNING",
+                        "planner.candidate",
+                        "validation.reject",
+                        "Candidate rejected by local motion diagnostics",
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                        slot_id=slot_id,
+                        candidate_id=candidate["candidate_id"],
+                        timestamp=candidate["timestamp"],
+                        reason="visually_static",
+                        kinetic_energy=kinetic_energy,
+                        static_threshold=_VISUALLY_STATIC_MAX_KINETIC_ENERGY,
+                    )
+                    rejected.append(
+                        {
+                            "slot_id": slot_id,
+                            "timestamp": candidate["timestamp"],
+                            "candidate_id": candidate["candidate_id"],
+                            "reason": "visually_static",
+                            "diagnostic_source": "local_motion",
+                            "planned_content_description": slot[
+                                "content_description"
+                            ],
+                            "kinetic_energy": kinetic_energy,
+                            "static_threshold": (
+                                _VISUALLY_STATIC_MAX_KINETIC_ENERGY
+                            ),
+                        }
+                    )
+                round_pool[slot_id] = moving_candidates
+
+            visual_slots = [
+                slot
+                for slot in successful_slots
+                if round_pool[str(slot["slot_id"])]
+            ]
 
             def validate_slot_visuals(slot: dict[str, Any]) -> None:
                 slot_id = slot["slot_id"]
@@ -800,22 +853,23 @@ def retrieve_candidates(
 
             vlm_workers = max(
                 1,
-                min(vlm_config.max_concurrency, len(successful_slots)),
+                min(vlm_config.max_concurrency, len(visual_slots)),
             )
-            with ThreadPoolExecutor(
-                max_workers=vlm_workers,
-                thread_name_prefix="candidate-vlm",
-            ) as executor:
-                list(
-                    progress_iter(
-                        executor.map(validate_slot_visuals, successful_slots),
-                        total=len(successful_slots),
-                        description=f"Candidate VLM validation round {round_index}",
-                        unit="slot",
+            if visual_slots:
+                with ThreadPoolExecutor(
+                    max_workers=vlm_workers,
+                    thread_name_prefix="candidate-vlm",
+                ) as executor:
+                    list(
+                        progress_iter(
+                            executor.map(validate_slot_visuals, visual_slots),
+                            total=len(visual_slots),
+                            description=f"Candidate VLM validation round {round_index}",
+                            unit="slot",
+                        )
                     )
-                )
 
-            for slot in successful_slots:
+            for slot in visual_slots:
                 slot_id = slot["slot_id"]
                 requires_subject = bool(slot.get("required_visible_subjects"))
                 for candidate in round_pool[slot_id]:
@@ -844,7 +898,7 @@ def retrieve_candidates(
                             "WARNING",
                             "planner.candidate",
                             "validation.reject",
-                            "Candidate rejected after VLM review",
+                            "Candidate rejected after visual diagnostics",
                             round=round_index,
                             scope=scope,
                             scope_round=scope_round,
@@ -862,6 +916,7 @@ def retrieve_candidates(
                             visibility_threshold=(
                                 retrieval_config.protagonist_visibility_threshold
                             ),
+                            kinetic_energy=candidate["kinetic_energy"],
                             visual_evidence=candidate["visual_evidence"],
                         )
                         rejected.append(
@@ -887,6 +942,7 @@ def retrieve_candidates(
                                     "protagonist_visibility_likert"
                                 ],
                                 "protagonist_visibility": visibility,
+                                "kinetic_energy": candidate["kinetic_energy"],
                                 "visual_evidence": candidate["visual_evidence"],
                             }
                         )
@@ -906,7 +962,7 @@ def retrieve_candidates(
             targeted_failures.append(
                 {
                     "slot_id": slot_id,
-                    "reason": "no_vlm_approved_candidates",
+                    "reason": "no_candidate_passed_visual_diagnostics",
                     "round": round_index,
                     "scope": scope,
                     "scope_round": scope_round,
@@ -915,7 +971,7 @@ def retrieve_candidates(
                     "required_visible_subjects": list(
                         slot.get("required_visible_subjects") or []
                     ),
-                    "vlm_rejections": slot_rejections,
+                    "candidate_rejections": slot_rejections,
                 }
             )
 
@@ -935,25 +991,29 @@ def retrieve_candidates(
                     for failure in targeted_failures
                 },
             )
-            redesigned_slots = replan_slots(slots, targeted_failures)
+            redesigned_slots, replanned_slot_ids = replan_slots(
+                slots,
+                targeted_failures,
+            )
             slots[:] = redesigned_slots
-            for slot_id in target_slot_ids:
+            for slot_id in replanned_slot_ids:
                 pool[slot_id] = []
                 primary_scope_exhausted.discard(slot_id)
                 adjacent_scope_exhausted.discard(slot_id)
             rejected = [
                 item
                 for item in rejected
-                if item["slot_id"] not in target_slot_ids
+                if item["slot_id"] not in replanned_slot_ids
             ]
-            freshly_replanned.update(target_slot_ids)
+            freshly_replanned.update(replanned_slot_ids)
             log_event(
                 "INFO",
                 "planner.slot",
                 "stage.complete",
-                "Targeted Slot replanning completed; retrying only failed Slots",
+                "Targeted Slot replanning completed; retrying replanned Slots",
                 round=round_index,
-                slot_ids=sorted(target_slot_ids),
+                failed_slot_ids=sorted(target_slot_ids),
+                slot_ids=sorted(replanned_slot_ids),
             )
             continue
     shortages = {
@@ -978,7 +1038,7 @@ def retrieve_candidates(
         ]
         if empty_slots:
             raise ValueError(
-                "No visually grounded candidate remains for Slots: "
+                "No usable candidate remains after visual diagnostics for Slots: "
                 + json.dumps(empty_slots, ensure_ascii=False)
             )
         log_event(
@@ -997,7 +1057,10 @@ def retrieve_candidates(
                 candidate["candidate_id"] = f"{slot_id}_candidate_{index:02d}"
     add_kinetic_features(
         video_path,
-        pool,
+        {
+            slot_id: pool[slot_id]
+            for slot_id in fixed_slot_ids
+        },
         retrieval_config.motion_sample_fps,
         retrieval_config.motion_workers,
     )
