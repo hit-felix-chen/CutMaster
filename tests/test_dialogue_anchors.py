@@ -6,6 +6,7 @@ from cutmaster.planner.dialogue_anchors import (
     _eligible_source_segments,
     _fixed_candidate,
     _optimal_non_overlapping_anchors,
+    _valid_dialogue_ranges,
     _validate_selection,
 )
 from cutmaster.timecode import format_range
@@ -76,14 +77,11 @@ def _video_description() -> dict:
 def _anchor(
     *,
     slot_id: str = "slot_01",
-    start_dialogue_id: str = "7",
-    end_dialogue_id: str = "9",
+    dialogue_range_id: str = "slot_01_range_0001",
 ) -> dict:
     return {
         "slot_id": slot_id,
-        "source_segment_id": "segment_0001",
-        "start_dialogue_id": start_dialogue_id,
-        "end_dialogue_id": end_dialogue_id,
+        "dialogue_range_id": dialogue_range_id,
         "narrative_significance": "Mia confronts her fear of failure.",
         "request_relevance": "It directly expresses her struggle to keep pursuing acting.",
         "standalone_meaning": "The exchange is understandable without surrounding dialogue.",
@@ -120,6 +118,19 @@ def _next_slot() -> dict:
         "output_start_sec": 8.0,
         "output_end_sec": 12.0,
     }
+
+
+def _ranges(
+    slots: list[dict],
+    video_description: dict,
+    dialogues: dict[str, list[dict]],
+) -> dict[str, list[dict]]:
+    return _valid_dialogue_ranges(
+        slots,
+        video_description,
+        dialogues,
+        _config().min_anchor_duration_sec,
+    )
 
 
 def test_short_dialogue_items_remain_available_for_contiguous_selection() -> None:
@@ -163,6 +174,7 @@ def test_selection_expands_first_and_last_ids_to_every_intervening_line() -> Non
         [_slot()],
         video_description,
         dialogues,
+        _ranges([_slot()], video_description, dialogues),
         _config(),
     )
 
@@ -181,6 +193,7 @@ def test_fixed_candidate_stores_structured_dialogue_item_list() -> None:
         [_slot()],
         video_description,
         dialogues,
+        _ranges([_slot()], video_description, dialogues),
         _config(),
     )[0]
 
@@ -208,6 +221,7 @@ def test_dialogue_may_extend_across_slot_boundary_as_start_aligned_l_cut() -> No
         slots,
         video_description,
         dialogues,
+        _ranges(slots, video_description, dialogues),
         _config(),
     )[0]
     anchor, _ = _fixed_candidate(_slot(), selection)
@@ -219,47 +233,50 @@ def test_dialogue_may_extend_across_slot_boundary_as_start_aligned_l_cut() -> No
     assert anchor["audio_overlap_after_sec"] == 2.0
 
 
-def test_selection_rejects_reversed_dialogue_range() -> None:
+def test_selection_rejects_unknown_prevalidated_dialogue_range() -> None:
     video_description = _video_description()
     dialogues = _dialogues_by_segment(video_description)
     raw = {
         "anchors": [
             _anchor(
-                start_dialogue_id="9",
-                end_dialogue_id="7",
+                dialogue_range_id="slot_01_range_9999",
             )
         ]
     }
 
-    with pytest.raises(ValueError, match="source order"):
+    with pytest.raises(ValueError, match="Unknown prevalidated dialogue range"):
         _validate_selection(
             raw,
             [_slot()],
             video_description,
             dialogues,
+            _ranges([_slot()], video_description, dialogues),
             _config(),
         )
 
 
-def test_selection_rejects_fragment_shorter_than_configured_minimum() -> None:
+def test_prevalidated_ranges_exclude_fragments_shorter_than_minimum() -> None:
     video_description = _video_description()
     dialogues = _dialogues_by_segment(video_description)
+    ranges = _ranges([_slot()], video_description, dialogues)["slot_01"]
 
-    with pytest.raises(ValueError, match="must last at least"):
-        _validate_selection(
-            {
-                "anchors": [
-                    _anchor(
-                        start_dialogue_id="7",
-                        end_dialogue_id="7",
-                    )
-                ]
-            },
-            [_slot()],
-            video_description,
-            dialogues,
-            _config(),
-        )
+    assert len(ranges) == 1
+    assert ranges[0]["dialogue_ids"] == ["7", "8", "9"]
+    assert ranges[0]["duration_sec"] == 2.0
+
+
+def test_prevalidated_ranges_fit_remaining_output_timeline() -> None:
+    video_description = _video_description()
+    video_description["segments"][0]["shots"][0]["dialogue"][-1][
+        "time_range"
+    ]["end_sec"] = 19.0
+    dialogues = _dialogues_by_segment(video_description)
+    slots = [_slot(), _next_slot()]
+
+    ranges = _ranges(slots, video_description, dialogues)
+
+    assert ranges["slot_01"]
+    assert ranges["slot_02"] == []
 
 
 def _interval(

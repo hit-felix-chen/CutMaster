@@ -219,6 +219,20 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
                 }
             ],
             source_shots=[],
+            valid_ranges_by_slot={
+                "slot_01": [
+                    {
+                        "range_id": "slot_01_range_0001",
+                        "source_segment_id": "segment_0001",
+                        "start_dialogue_id": "7",
+                        "end_dialogue_id": "8",
+                        "dialogue_ids": ["7", "8"],
+                        "duration_sec": 1.4,
+                        "output_audio_start_sec": 0.0,
+                        "output_audio_end_sec": 1.4,
+                    }
+                ]
+            },
             max_anchors=3,
             min_anchor_duration_sec=1.0,
         ),
@@ -226,26 +240,25 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     schema = package.response_contract.schema
     anchor = schema["properties"]["anchors"]["items"]["oneOf"][0]
 
-    assert package.response_contract.version == "2.0"
+    assert package.response_contract.version == "3.0"
     assert anchor["required"] == [
         "slot_id",
-        "source_segment_id",
-        "start_dialogue_id",
-        "end_dialogue_id",
+        "dialogue_range_id",
         "narrative_significance",
         "request_relevance",
         "standalone_meaning",
         "importance_likert",
         "coherence_likert",
     ]
-    assert anchor["properties"]["start_dialogue_id"]["enum"] == ["7", "8"]
-    assert anchor["properties"]["end_dialogue_id"]["enum"] == ["7", "8"]
-    assert "coherent range of consecutive\ndialogue_items" in package.user_prompt
-    assert "every item" in package.user_prompt
-    assert "between them is included" in package.user_prompt
+    assert anchor["properties"]["dialogue_range_id"]["enum"] == [
+        "slot_01_range_0001"
+    ]
+    assert "prevalidated sequence of consecutive" in package.user_prompt
+    assert "Never construct a new" in package.user_prompt
     assert "same L-cut layout" in package.user_prompt
     assert "audio_cut_style" not in anchor["properties"]
     assert "<video_summary>" in package.user_prompt
+    assert "<valid_dialogue_ranges_by_slot>" in package.user_prompt
     assert "Mia presses Sebastian for the truth." in package.user_prompt
     assert "<full_dialogue_context>" not in package.user_prompt
     assert "music_profile" not in package.context_keys

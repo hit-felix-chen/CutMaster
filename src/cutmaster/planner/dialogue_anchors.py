@@ -162,6 +162,66 @@ def _eligible_source_segments(
     ]
 
 
+def _valid_dialogue_ranges(
+    slots: list[dict[str, Any]],
+    video_description: dict[str, Any],
+    dialogues: dict[str, list[dict[str, Any]]],
+    min_anchor_duration_sec: float,
+) -> dict[str, list[dict[str, Any]]]:
+    output_end = max(float(slot["output_end_sec"]) for slot in slots)
+    segments = {
+        str(segment["segment_id"]): segment
+        for segment in video_description["segments"]
+    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    for slot in slots:
+        slot_id = str(slot["slot_id"])
+        output_start = float(slot["output_start_sec"])
+        maximum_audio_duration = output_end - output_start
+        slot_duration = float(slot["planned_duration_sec"])
+        valid_ranges: list[dict[str, Any]] = []
+        for segment_id_value in slot["source_segment_ids"]:
+            segment_id = str(segment_id_value)
+            segment = segments[segment_id]
+            segment_end = float(segment["time_range"]["end_sec"])
+            sequence = dialogues.get(segment_id) or []
+            for start_index, first in enumerate(sequence):
+                speech_start = float(first["start_sec"])
+                if speech_start + slot_duration > segment_end + _TOLERANCE_SEC:
+                    continue
+                for end_index in range(start_index, len(sequence)):
+                    last = sequence[end_index]
+                    speech_end = float(last["end_sec"])
+                    speech_duration = speech_end - speech_start
+                    if speech_duration > maximum_audio_duration + _TOLERANCE_SEC:
+                        break
+                    if speech_duration < min_anchor_duration_sec - _TOLERANCE_SEC:
+                        continue
+                    dialogue_ids = [
+                        str(item["dialogue_id"])
+                        for item in sequence[start_index : end_index + 1]
+                    ]
+                    valid_ranges.append(
+                        {
+                            "range_id": (
+                                f"{slot_id}_range_{len(valid_ranges) + 1:04d}"
+                            ),
+                            "source_segment_id": segment_id,
+                            "start_dialogue_id": str(first["dialogue_id"]),
+                            "end_dialogue_id": str(last["dialogue_id"]),
+                            "dialogue_ids": dialogue_ids,
+                            "duration_sec": round(speech_duration, 6),
+                            "output_audio_start_sec": round(output_start, 6),
+                            "output_audio_end_sec": round(
+                                output_start + speech_duration,
+                                6,
+                            ),
+                        }
+                    )
+        result[slot_id] = valid_ranges
+    return result
+
+
 def _source_shot_contexts(
     video_description: dict[str, Any],
     source_segments: list[dict[str, Any]],
@@ -206,6 +266,7 @@ def _validate_selection(
     slots: list[dict[str, Any]],
     video_description: dict[str, Any],
     dialogues: dict[str, list[dict[str, Any]]],
+    valid_ranges_by_slot: dict[str, list[dict[str, Any]]],
     anchor_config: DialogueAnchorConfig,
 ) -> list[dict[str, Any]]:
     slots_by_id = {
@@ -230,18 +291,23 @@ def _validate_selection(
         )
     for raw in raw_anchors:
         slot_id = str(raw.get("slot_id") or "")
-        segment_id = str(raw.get("source_segment_id") or "")
-        start_dialogue_id = str(raw.get("start_dialogue_id") or "")
-        end_dialogue_id = str(raw.get("end_dialogue_id") or "")
         if slot_id not in slots_by_id:
             raise ValueError(f"Unknown dialogue-anchor Slot: {slot_id}")
         slot = slots_by_id[slot_id]
-        if segment_id not in {
-            str(value) for value in slot["source_segment_ids"]
-        }:
+        dialogue_range_id = str(raw.get("dialogue_range_id") or "")
+        valid_ranges = {
+            str(item["range_id"]): item
+            for item in valid_ranges_by_slot.get(slot_id) or []
+        }
+        if dialogue_range_id not in valid_ranges:
             raise ValueError(
-                f"Segment {segment_id} is not assigned to {slot_id}"
+                f"Unknown prevalidated dialogue range for {slot_id}: "
+                f"{dialogue_range_id}"
             )
+        selected_range = valid_ranges[dialogue_range_id]
+        segment_id = str(selected_range["source_segment_id"])
+        start_dialogue_id = str(selected_range["start_dialogue_id"])
+        end_dialogue_id = str(selected_range["end_dialogue_id"])
         sequence = dialogues.get(segment_id) or []
         dialogue_positions = {
             dialogue["dialogue_id"]: index
@@ -457,6 +523,25 @@ def select_dialogue_anchors(
     if not source_segments:
         context.set_artifact("dialogue_anchors", [])
         return [dict(slot) for slot in slots]
+    valid_ranges_by_slot = _valid_dialogue_ranges(
+        slots,
+        video_description,
+        dialogues,
+        anchor_config.min_anchor_duration_sec,
+    )
+    if not any(valid_ranges_by_slot.values()):
+        context.set_artifact("dialogue_anchors", [])
+        return [dict(slot) for slot in slots]
+    valid_segment_ids = {
+        str(item["source_segment_id"])
+        for ranges in valid_ranges_by_slot.values()
+        for item in ranges
+    }
+    source_segments = [
+        segment
+        for segment in source_segments
+        if str(segment["segment_id"]) in valid_segment_ids
+    ]
     video_summary = context.get_artifact("video_summary")
     if video_summary is None:
         raise RuntimeError(
@@ -473,6 +558,7 @@ def select_dialogue_anchors(
                 video_description,
                 source_segments,
             ),
+            valid_ranges_by_slot=valid_ranges_by_slot,
             max_anchors=anchor_config.max_anchors,
             min_anchor_duration_sec=(
                 anchor_config.min_anchor_duration_sec
@@ -487,6 +573,7 @@ def select_dialogue_anchors(
             slots,
             video_description,
             dialogues,
+            valid_ranges_by_slot,
             anchor_config,
         ),
     )
