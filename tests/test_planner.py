@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from cutmaster.planner.candidate_retrieval import (
     retrieve_candidates,
 )
 from cutmaster.planner.script_review import review_and_patch
+from cutmaster.planner.service import Planner
 from cutmaster.planner.sequence_selection import (
     NoFeasiblePathError,
     _pair_key,
@@ -1122,6 +1124,96 @@ def test_one_segment_retry_does_not_redesign_dialogue_anchors() -> None:
     )
 
     assert expanded_slot_ids == {"slot_02", "slot_03"}
+
+
+def test_one_segment_retry_uses_anchor_neighbor_when_it_is_the_only_option() -> None:
+    slots = [
+        {
+            "slot_id": "slot_01",
+            "content_description": "anchored ending setup",
+            "desired_duration_sec": 4.0,
+            "planned_duration_sec": 4.0,
+            "source_segment_ids": ["segment_0002"],
+            "dialogue_anchor": {"source_segment_id": "segment_0002"},
+            "fixed_candidate": {"candidate_id": "slot_01_dialogue_anchor"},
+        },
+        {
+            "slot_id": "slot_02",
+            "content_description": "failed ending",
+            "desired_duration_sec": 4.0,
+            "planned_duration_sec": 4.0,
+            "source_segment_ids": ["segment_0003"],
+        },
+    ]
+
+    expanded_slot_ids = _expand_degenerate_target_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+    )
+
+    assert expanded_slot_ids == {"slot_01", "slot_02"}
+
+
+def test_replanned_anchor_segment_triggers_global_anchor_refresh(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    original_slots = [
+        {
+            "slot_id": "slot_01",
+            "source_segment_ids": ["segment_0001"],
+            "dialogue_anchor": {"source_segment_id": "segment_0001"},
+            "fixed_candidate": {"candidate_id": "old_anchor"},
+        },
+        {
+            "slot_id": "slot_02",
+            "source_segment_ids": ["segment_0003"],
+        },
+    ]
+    redesigned_slots = [
+        {
+            **original_slots[0],
+            "source_segment_ids": ["segment_0002"],
+        },
+        original_slots[1],
+    ]
+    refreshed_slots = [
+        {
+            **redesigned_slots[0],
+            "dialogue_anchor": {"source_segment_id": "segment_0002"},
+            "fixed_candidate": {"candidate_id": "new_anchor_1"},
+        },
+        {
+            **redesigned_slots[1],
+            "dialogue_anchor": {"source_segment_id": "segment_0003"},
+            "fixed_candidate": {"candidate_id": "new_anchor_2"},
+        },
+    ]
+    monkeypatch.setattr(
+        "cutmaster.planner.service.redesign_edit_slots",
+        lambda *_args, **_kwargs: (redesigned_slots, {"slot_01"}),
+    )
+    planner = Planner.__new__(Planner)
+    planner.config = SimpleNamespace(
+        llm=LLMConfig(model="test", base_url="", api_key="test")
+    )
+    planner.context = WorkflowContext(tmp_path / "history.json")
+    refresh_calls: list[list[dict]] = []
+
+    def refresh(slots):
+        refresh_calls.append(slots)
+        return refreshed_slots
+
+    planner.anchor_dialogue = refresh
+    result, reset_slot_ids = planner._redesign_slots_and_refresh_anchors(
+        original_slots,
+        [{"slot_id": "slot_01", "reason": "visually_static"}],
+    )
+
+    assert refresh_calls == [redesigned_slots]
+    assert result == refreshed_slots
+    assert reset_slot_ids == {"slot_01", "slot_02"}
 
 
 def test_visual_grounding_requires_integer_likert_scores() -> None:

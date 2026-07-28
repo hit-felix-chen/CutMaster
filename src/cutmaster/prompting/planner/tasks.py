@@ -209,7 +209,16 @@ description while retaining unsupported subjects or source evidence. Role, team,
 subjects do not require a named-person face match; use precise required subjects that the source
 descriptions can visibly establish.
 
-Do not change output timing, add or remove Slots, or redesign dialogue anchors. Do not use title
+Source quality and relevance to the maintained request always take priority. Among comparably
+strong assignments inside the allowed chronological intervals, distribute source_segment_ids as
+evenly as practical instead of clustering replacement Slots in consecutive or nearby Segments.
+Preserve enough source-timeline room for every later Slot; do not push a replacement toward an
+interval boundary when an equally strong, more evenly spaced Segment is available.
+
+Do not change output timing or add or remove Slots. Dialogue anchors are not part of this response:
+when a replanned Slot moves away from an anchored source Segment, the application invalidates the
+old anchor and runs dialogue-anchor selection again after this repair. Do not preserve a poor
+Segment assignment merely because existing_slot_plan shows an anchor there. Do not use title
 cards, opening or end credits, production logos, legal cards, or blank frames unless explicitly
 required by the maintained request.
 
@@ -249,6 +258,12 @@ gestures, settings, identities, or actions absent from the description. Keep sou
 in strictly increasing source order across Slots: every Slot's maximum Segment index must be
 strictly lower than the next Slot's minimum Segment index. Never reuse one Segment in two Slots.
 
+Source quality, request relevance, and narrative value always take priority over spacing. Among
+comparably strong Segment assignments, distribute source_segment_ids as evenly as practical
+across the usable source timeline instead of clustering Slots in consecutive or nearby Segments.
+Plan this distribution globally: reserve sufficient chronological Segment space for all remaining
+Slots, especially near the end of the timeline.
+
 The narrative_role values are reusable labels, not a mandatory five-act template. Every role may
 appear multiple times or not appear at all; do not create one Slot per enum value. For a
 character-focused request, list the focal character in required_visible_subjects whenever that
@@ -260,7 +275,7 @@ requires them.
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.SLOT_PLANNING,
-        prompt_version="3.1",
+        prompt_version="3.3",
         operation=(
             "Targeted edit slot replanning"
             if targeted

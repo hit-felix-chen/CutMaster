@@ -371,6 +371,7 @@ def _expand_degenerate_target_slot_ids(
         return min(positions), max(positions)
 
     expanded_slot_ids = set(target_slot_ids)
+    blocked_slot_ids: list[str] = []
     for index, slot in enumerate(slots):
         slot_id = str(slot["slot_id"])
         if slot_id not in degenerate_slot_ids:
@@ -385,19 +386,32 @@ def _expand_degenerate_target_slot_ids(
             next_slot = slots[index + 1]
             next_start, _ = source_bounds(next_slot)
             neighbors.append((next_slot, current_end + 1 == next_start))
-        for neighbor, is_source_contiguous in neighbors:
-            if (
-                is_source_contiguous
-                and neighbor.get("fixed_candidate") is None
-                and neighbor.get("dialogue_anchor") is None
-            ):
-                expanded_slot_ids.add(str(neighbor["slot_id"]))
+        movable_neighbors = [
+            neighbor
+            for neighbor, is_source_contiguous in neighbors
+            if is_source_contiguous
+            and neighbor.get("fixed_candidate") is None
+            and neighbor.get("dialogue_anchor") is None
+        ]
+        anchor_neighbors = [
+            neighbor
+            for neighbor, is_source_contiguous in neighbors
+            if is_source_contiguous
+            and neighbor.get("dialogue_anchor") is not None
+        ]
+        selected_neighbors = movable_neighbors or anchor_neighbors
+        if not selected_neighbors:
+            blocked_slot_ids.append(slot_id)
+            continue
+        expanded_slot_ids.update(
+            str(neighbor["slot_id"]) for neighbor in selected_neighbors
+        )
 
-    if expanded_slot_ids == target_slot_ids:
-        blocked_slot_ids = ", ".join(sorted(degenerate_slot_ids))
+    if blocked_slot_ids:
         raise ValueError(
             "Targeted Slot replanning has a one-Segment interval for "
-            f"{blocked_slot_ids}, but no movable source-contiguous neighbor; "
+            f"{', '.join(sorted(blocked_slot_ids))}, but no source-contiguous "
+            "neighbor can participate in the repair; "
             "full Slot replanning is required"
         )
     return expanded_slot_ids

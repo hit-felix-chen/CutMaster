@@ -8,6 +8,7 @@ from cutmaster.planner.dialogue_anchors import select_dialogue_anchors
 from cutmaster.planner.media import SegmentMediaReader
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import RunRequest
+from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planner.script_review import review_and_patch
 from cutmaster.planner.sequence_selection import (
@@ -127,13 +128,76 @@ class Planner:
             self.config.vlm,
             self.config.candidate_retrieval,
             self.context,
-            replan_slots=lambda current_slots, failures: redesign_edit_slots(
-                current_slots,
-                failures,
-                self.config.llm,
-                self.context,
-            ),
+            replan_slots=self._redesign_slots_and_refresh_anchors,
         )
+
+    def _redesign_slots_and_refresh_anchors(
+        self,
+        slots: list[dict[str, Any]],
+        failures: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        redesigned_slots, replanned_slot_ids = redesign_edit_slots(
+            slots,
+            failures,
+            self.config.llm,
+            self.context,
+        )
+        previous_by_id = {
+            str(slot["slot_id"]): slot
+            for slot in slots
+        }
+        redesigned_by_id = {
+            str(slot["slot_id"]): slot
+            for slot in redesigned_slots
+        }
+        moved_anchor_slot_ids = {
+            slot_id
+            for slot_id in replanned_slot_ids
+            if previous_by_id[slot_id].get("dialogue_anchor") is not None
+            if str(
+                previous_by_id[slot_id]["dialogue_anchor"][
+                    "source_segment_id"
+                ]
+            )
+            not in {
+                str(segment_id)
+                for segment_id in redesigned_by_id[slot_id][
+                    "source_segment_ids"
+                ]
+            }
+        }
+        if not moved_anchor_slot_ids:
+            return redesigned_slots, replanned_slot_ids
+
+        previous_fixed_candidates = {
+            slot_id: slot.get("fixed_candidate")
+            for slot_id, slot in previous_by_id.items()
+        }
+        refreshed_slots = self.anchor_dialogue(redesigned_slots)
+        refreshed_by_id = {
+            str(slot["slot_id"]): slot
+            for slot in refreshed_slots
+        }
+        changed_anchor_slot_ids = {
+            slot_id
+            for slot_id in previous_by_id
+            if previous_fixed_candidates[slot_id]
+            != refreshed_by_id[slot_id].get("fixed_candidate")
+        }
+        reset_slot_ids = {
+            *replanned_slot_ids,
+            *changed_anchor_slot_ids,
+        }
+        log_event(
+            "WARNING",
+            "planner.anchor",
+            "fallback.apply",
+            "Re-ran dialogue-anchor selection after anchored Segments moved",
+            moved_anchor_slot_ids=sorted(moved_anchor_slot_ids),
+            changed_anchor_slot_ids=sorted(changed_anchor_slot_ids),
+            reset_slot_ids=sorted(reset_slot_ids),
+        )
+        return refreshed_slots, reset_slot_ids
 
     def anchor_dialogue(
         self,

@@ -994,10 +994,27 @@ def retrieve_candidates(
                 targeted_failures,
             )
             slots[:] = redesigned_slots
+            redesigned_by_id = {
+                str(slot["slot_id"]): slot
+                for slot in redesigned_slots
+            }
             for slot_id in replanned_slot_ids:
-                pool[slot_id] = []
+                fixed_candidate = redesigned_by_id[slot_id].get(
+                    "fixed_candidate"
+                )
+                pool[slot_id] = (
+                    [dict(fixed_candidate)]
+                    if fixed_candidate is not None
+                    else []
+                )
                 primary_scope_exhausted.discard(slot_id)
                 adjacent_scope_exhausted.discard(slot_id)
+            fixed_slot_ids.clear()
+            fixed_slot_ids.update(
+                str(slot["slot_id"])
+                for slot in redesigned_slots
+                if slot.get("fixed_candidate") is not None
+            )
             rejected = [
                 item
                 for item in rejected

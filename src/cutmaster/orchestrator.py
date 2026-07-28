@@ -236,6 +236,11 @@ def run_orchestrator(
                 json.dumps(slots, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+            anchors = planning_context.get_artifact("dialogue_anchors", [])
+            dialogue_anchors_path.write_text(
+                json.dumps(anchors, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
             elapsed = time.monotonic() - stage_started
             retrieval_seconds += elapsed
             log_event(

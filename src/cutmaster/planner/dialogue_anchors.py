@@ -509,6 +509,14 @@ def select_dialogue_anchors(
     anchor_config: DialogueAnchorConfig,
     context: WorkflowContext,
 ) -> list[dict[str, Any]]:
+    slots = [
+        {
+            key: value
+            for key, value in slot.items()
+            if key not in {"dialogue_anchor", "fixed_candidate"}
+        }
+        for slot in slots
+    ]
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError(

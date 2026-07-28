@@ -91,6 +91,12 @@ def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
     assert "duration within 0.5 seconds" in package.user_prompt
     assert "opening or end" in package.user_prompt
     assert "credits, production logos" in package.user_prompt
+    assert "Source quality, request relevance, and narrative value always take priority" in (
+        package.user_prompt
+    )
+    assert "distribute source_segment_ids as evenly as practical" in package.user_prompt
+    assert "reserve sufficient chronological Segment space" in package.user_prompt
+    assert package.prompt_version == "3.3"
     assert package.context_keys == (
         "request",
         "music_profile",
@@ -157,6 +163,12 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
     )
     assert "single response" in package.user_prompt
     assert "authoritative visual clip duration" in package.user_prompt
+    assert "Source quality and relevance to the maintained request always take priority" in (
+        package.user_prompt
+    )
+    assert "distribute source_segment_ids as\nevenly as practical" in package.user_prompt
+    assert "do not push a replacement toward an\ninterval boundary" in package.user_prompt
+    assert package.prompt_version == "3.3"
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
 

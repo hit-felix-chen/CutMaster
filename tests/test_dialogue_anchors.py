@@ -1,6 +1,6 @@
 import pytest
 
-from cutmaster.configuration.schema import DialogueAnchorConfig
+from cutmaster.configuration.schema import DialogueAnchorConfig, LLMConfig
 from cutmaster.planner.dialogue_anchors import (
     _dialogues_by_segment,
     _eligible_source_segments,
@@ -8,7 +8,9 @@ from cutmaster.planner.dialogue_anchors import (
     _optimal_non_overlapping_anchors,
     _valid_dialogue_ranges,
     _validate_selection,
+    select_dialogue_anchors,
 )
+from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.timecode import format_range
 
 
@@ -131,6 +133,45 @@ def _ranges(
         dialogues,
         _config().min_anchor_duration_sec,
     )
+
+
+def test_anchor_rerun_removes_stale_binding_when_new_segment_has_no_dialogue(
+    tmp_path,
+) -> None:
+    video_description = _video_description()
+    silent_segment = {
+        **video_description["segments"][0],
+        "segment_id": "segment_0002",
+        "has_dialogue": False,
+        "speech_mode": "none",
+        "dialogue_context": None,
+        "shots": [
+            {
+                **video_description["segments"][0]["shots"][0],
+                "shot_id": "shot_00002",
+                "dialogue": [],
+            }
+        ],
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("video_description", {"segments": [silent_segment]})
+    stale_slot = {
+        **_slot(),
+        "source_segment_ids": ["segment_0002"],
+        "dialogue_anchor": {"source_segment_id": "segment_0001"},
+        "fixed_candidate": {"candidate_id": "slot_01_dialogue_anchor"},
+    }
+
+    refreshed = select_dialogue_anchors(
+        [stale_slot],
+        LLMConfig(model="test", base_url="", api_key="test"),
+        _config(),
+        context,
+    )
+
+    assert "dialogue_anchor" not in refreshed[0]
+    assert "fixed_candidate" not in refreshed[0]
+    assert context.get_artifact("dialogue_anchors") == []
 
 
 def test_short_dialogue_items_remain_available_for_contiguous_selection() -> None:
