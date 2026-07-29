@@ -264,7 +264,6 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
                     ],
                 }
             ],
-            source_shots=[],
             dialogue_constraints_by_slot={
                 "slot_01": {
                     "allowed_segment_ids": ["segment_0001"],
@@ -298,6 +297,7 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     ]
     assert anchor["properties"]["first_dialogue_id"]["enum"] == ["7", "8"]
     assert anchor["properties"]["last_dialogue_id"]["enum"] == ["7", "8"]
+    assert "<source_shots>" not in package.user_prompt
     assert "inclusive endpoints" in package.user_prompt
     assert "validates continuity" in package.user_prompt
     assert "same L-cut layout" in package.user_prompt

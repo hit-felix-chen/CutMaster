@@ -213,37 +213,6 @@ def _dialogue_constraints_by_slot(
     return result
 
 
-def _source_shot_contexts(
-    video_description: dict[str, Any],
-    source_segments: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    required_ids = {
-        shot_id
-        for segment in source_segments
-        for dialogue in segment["dialogue_items"]
-        for shot_id in dialogue["source_shot_ids"]
-    }
-    return [
-        {
-            "shot_id": str(shot["shot_id"]),
-            "time_range": shot["time_range"],
-            "visual_description": shot["visual_description"],
-            "dominant_action": shot["dominant_action"],
-            "characters": shot.get("characters") or [],
-            "visual_annotation_status": shot.get(
-                "visual_annotation_status",
-                "complete",
-            ),
-            "visual_annotation_failure": shot.get(
-                "visual_annotation_failure"
-            ),
-        }
-        for segment in video_description["segments"]
-        for shot in segment["shots"]
-        if str(shot["shot_id"]) in required_ids
-    ]
-
-
 def _dialogue_item(
     dialogue: dict[str, Any],
 ) -> dict[str, Any]:
@@ -573,10 +542,6 @@ def select_dialogue_anchors(
             slots=slots,
             video_summary=video_summary,
             source_segments=source_segments,
-            source_shots=_source_shot_contexts(
-                video_description,
-                source_segments,
-            ),
             dialogue_constraints_by_slot=dialogue_constraints_by_slot,
             max_anchors=anchor_config.max_anchors,
             min_anchor_duration_sec=(

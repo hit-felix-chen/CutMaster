@@ -39,7 +39,6 @@ class DialogueAnchorSelectionDetails:
     slots: list[dict[str, Any]]
     video_summary: dict[str, Any]
     source_segments: list[dict[str, Any]]
-    source_shots: list[dict[str, Any]]
     dialogue_constraints_by_slot: dict[str, dict[str, Any]]
     max_anchors: int
     min_anchor_duration_sec: float
@@ -474,9 +473,8 @@ standalone_meaning. Give importance_likert and coherence_likert only as 4 or 5; 
 entirely if either quality would be lower.
 
 Use each Slot's selected_source_segments for the Segment's plot position, description, emotional
-meaning, characters, and exact selectable dialogue. Use source_shots to ensure the selected
-original-picture window depicts the relevant speaking scene. Avoid voice-over, off-screen speech,
-credits, title cards, and speech over unrelated imagery.
+meaning, characters, and exact selectable dialogue. Avoid voice-over, off-screen speech, credits,
+title cards, and speech over unrelated imagery.
 
 <slots>
 {json.dumps(details.slots, ensure_ascii=False)}
@@ -485,10 +483,6 @@ credits, title cards, and speech over unrelated imagery.
 <video_summary>
 {json.dumps(details.video_summary, ensure_ascii=False)}
 </video_summary>
-
-<source_shots>
-{json.dumps(details.source_shots, ensure_ascii=False)}
-</source_shots>
 
 <selected_source_segments>
 {json.dumps(details.source_segments, ensure_ascii=False)}
@@ -500,7 +494,7 @@ credits, title cards, and speech over unrelated imagery.
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
-        prompt_version="4.0",
+        prompt_version="4.1",
         operation="Original dialogue anchor selection",
         system_prompt=(
             "You select a few meaningful, coherent original-speech passages that directly serve "
