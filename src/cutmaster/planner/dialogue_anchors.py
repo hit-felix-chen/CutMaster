@@ -239,6 +239,13 @@ def _source_shot_contexts(
             "visual_description": shot["visual_description"],
             "dominant_action": shot["dominant_action"],
             "characters": shot.get("characters") or [],
+            "visual_annotation_status": shot.get(
+                "visual_annotation_status",
+                "complete",
+            ),
+            "visual_annotation_failure": shot.get(
+                "visual_annotation_failure"
+            ),
         }
         for segment in video_description["segments"]
         for shot in segment["shots"]

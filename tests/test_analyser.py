@@ -1,4 +1,5 @@
 import threading
+import json
 
 import numpy as np
 import pytest
@@ -537,6 +538,75 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     )
     assert len(cached_descriptions) == 2
     assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
+
+
+def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    shot = _shots(1)[0]
+    shot["dialogue"] = []
+    segment = {
+        "segment_id": "segment_0001",
+        "time_range": {"start_sec": 0.0, "end_sec": 1.0},
+        "clip_path": str(tmp_path / "segment.mp4"),
+        "has_dialogue": False,
+        "speech_mode": "none",
+        "timeline_role": "opening",
+        "dialogue_context": None,
+        "shots": [shot],
+    }
+    monkeypatch.setattr(
+        "cutmaster.analyser.service._sample_shot_frames",
+        lambda *_args: (
+            ["data:image/jpeg;base64,stub"] * 5,
+            [0.1, 0.3, 0.5, 0.7, 0.9],
+        ),
+    )
+
+    class RejectedContext:
+        calls = 0
+
+        def call_prompt(self, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("data_inspection_failed")
+
+    annotation_directory = tmp_path / "shot_annotations"
+    rejected_context = RejectedContext()
+    descriptions = _annotate_segments(
+        [segment],
+        rejected_context,
+        VLMConfig(model="test", base_url="", api_key="test"),
+        5,
+        annotation_directory,
+    )
+
+    assert rejected_context.calls == 1
+    rejected_shot = descriptions[0].shots[0]
+    assert rejected_shot.visual_annotation_status == "provider_rejected"
+    assert rejected_shot.visual_annotation_failure == "data_inspection_failed"
+    checkpoint = json.loads(
+        (annotation_directory / "shot_00001.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint["visual_annotation_status"] == "provider_rejected"
+    assert checkpoint["visual_annotation_failure"] == "data_inspection_failed"
+    assert "annotation" not in checkpoint
+
+    class UnexpectedCallContext:
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("Rejected Shot checkpoint should be reused")
+
+    cached_descriptions = _annotate_segments(
+        [segment],
+        UnexpectedCallContext(),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        5,
+        annotation_directory,
+    )
+    assert (
+        cached_descriptions[0].shots[0].visual_annotation_status
+        == "provider_rejected"
+    )
 
 
 def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(

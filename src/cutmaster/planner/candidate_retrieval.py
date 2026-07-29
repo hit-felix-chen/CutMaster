@@ -308,6 +308,8 @@ def _candidate_segment_video_descriptions(
                     "camera_movement",
                     "composition",
                     "visual_evidence",
+                    "visual_annotation_status",
+                    "visual_annotation_failure",
                 )
                 if key in shot
             }

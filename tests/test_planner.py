@@ -83,6 +83,44 @@ def _video_description():
     }
 
 
+def test_planner_warns_when_visual_shot_annotations_are_missing(
+    monkeypatch,
+) -> None:
+    events: list[dict] = []
+    video_description = _video_description()
+    video_description["segments"][0]["shots"][0].update(
+        {
+            "visual_annotation_status": "provider_rejected",
+            "visual_annotation_failure": "data_inspection_failed",
+        }
+    )
+    planner = Planner.__new__(Planner)
+    planner.context = SimpleNamespace(
+        get_artifact=lambda name: (
+            video_description if name == "video_description" else None
+        )
+    )
+    monkeypatch.setattr(
+        "cutmaster.planner.service.log_event",
+        lambda _level, _component, _event, _message, **fields: events.append(
+            fields
+        ),
+    )
+
+    planner._warn_about_missing_shot_annotations()
+
+    assert events == [
+        {
+            "missing_shots": 1,
+            "total_shots": 3,
+            "affected_segments": 1,
+            "missing_shot_ids_preview": ["shot_00001"],
+            "omitted_shot_ids": 0,
+            "reason": "data_inspection_failed",
+        }
+    ]
+
+
 def test_slot_planning_story_context_excludes_shot_descriptions() -> None:
     video_description = {
         "source": {"title": "Example"},

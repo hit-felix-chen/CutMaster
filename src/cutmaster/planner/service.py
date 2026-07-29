@@ -98,11 +98,41 @@ class Planner:
             )
         self.media = SegmentMediaReader(video_path, video_description)
 
+    def _warn_about_missing_shot_annotations(self) -> None:
+        video_description = self.context.get_artifact("video_description") or {}
+        missing = [
+            (str(segment["segment_id"]), str(shot["shot_id"]))
+            for segment in video_description.get("segments", [])
+            for shot in segment.get("shots", [])
+            if shot.get("visual_annotation_status", "complete") != "complete"
+        ]
+        if not missing:
+            return
+        preview_limit = 20
+        log_event(
+            "WARNING",
+            "planner.slot",
+            "fallback.apply",
+            "Planning is continuing with Shots that lack visual annotations",
+            missing_shots=len(missing),
+            total_shots=sum(
+                len(segment.get("shots", []))
+                for segment in video_description.get("segments", [])
+            ),
+            affected_segments=len({segment_id for segment_id, _ in missing}),
+            missing_shot_ids_preview=[
+                shot_id for _, shot_id in missing[:preview_limit]
+            ],
+            omitted_shot_ids=max(0, len(missing) - preview_limit),
+            reason="data_inspection_failed",
+        )
+
     def plan_slots(
         self,
         request: RunRequest,
         music_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        self._warn_about_missing_shot_annotations()
         slots = plan_edit_slots(
             request,
             music_profile,

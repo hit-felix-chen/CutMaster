@@ -62,6 +62,7 @@ from cutmaster.contracts.video import (
     TimelineRole,
     TimeRange,
     VideoDescription,
+    VisualAnnotationStatus,
 )
 
 def _detect_full_video_shots(
@@ -660,6 +661,29 @@ def _annotate_segments(
         unit="shot",
     )
 
+    def unavailable_annotation(
+        shot_id: str,
+        _has_dialogue: bool,
+    ) -> dict[str, Any]:
+        return {
+            "shot_id": shot_id,
+            "visual_description": None,
+            "dominant_action": None,
+            "content_type": None,
+            "narrative_function": None,
+            "emotional_tone": None,
+            "emotional_intensity": None,
+            "scene": None,
+            "characters": [],
+            "shot_scale": None,
+            "camera_angle": None,
+            "camera_movement": None,
+            "composition": None,
+            "visual_evidence": None,
+            "visual_annotation_status": VisualAnnotationStatus.PROVIDER_REJECTED,
+            "visual_annotation_failure": "data_inspection_failed",
+        }
+
     def annotate_segment(segment: dict[str, Any]) -> SegmentDescription:
         clip_path = Path(segment["clip_path"])
         segment_start = float(segment["time_range"]["start_sec"])
@@ -697,11 +721,14 @@ def _annotate_segments(
             checkpoint_path = annotation_directory / f"{shot['shot_id']}.json"
             checkpoint = _read_json_checkpoint(checkpoint_path)
             annotation = None
-            if (
+            checkpoint_matches = (
                 isinstance(checkpoint, dict)
                 and checkpoint.get("prompt_fingerprint") == package.fingerprint
                 and checkpoint.get("contract_fingerprint")
                 == package.response_contract.fingerprint
+            )
+            if (
+                checkpoint_matches
                 and isinstance(checkpoint.get("annotation"), dict)
             ):
                 try:
@@ -711,6 +738,17 @@ def _annotate_segments(
                     annotation = validate_annotation(structured)
                 except ValueError:
                     annotation = None
+            elif (
+                checkpoint_matches
+                and checkpoint.get("visual_annotation_status")
+                == VisualAnnotationStatus.PROVIDER_REJECTED
+                and checkpoint.get("visual_annotation_failure")
+                == "data_inspection_failed"
+            ):
+                annotation = unavailable_annotation(
+                    str(shot["shot_id"]),
+                    bool(shot["dialogue"]),
+                )
             if annotation is None:
                 images, sampled_times = _sample_shot_frames(
                     clip_path,
@@ -719,30 +757,70 @@ def _annotate_segments(
                     global_start,
                     sample_frames,
                 )
-                annotation = context.call_prompt(
-                    package=package,
-                    config=config,
-                    validate_business=validate_annotation,
-                    image_data_urls=images,
-                    image_labels=[
-                        f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
-                        for index, time_sec in enumerate(sampled_times, 1)
-                    ],
-                )
-                _write_json_checkpoint(
-                    checkpoint_path,
-                    {
-                        "schema_version": "1.0",
-                        "shot_id": shot["shot_id"],
-                        "prompt_id": package.prompt_id,
-                        "prompt_version": package.prompt_version,
-                        "prompt_fingerprint": package.fingerprint,
-                        "contract_fingerprint": (
-                            package.response_contract.fingerprint
+                try:
+                    annotation = context.call_prompt(
+                        package=package,
+                        config=config,
+                        validate_business=validate_annotation,
+                        image_data_urls=images,
+                        image_labels=[
+                            f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
+                            for index, time_sec in enumerate(sampled_times, 1)
+                        ],
+                    )
+                except Exception as exc:
+                    if "data_inspection_failed" not in str(exc).lower():
+                        raise
+                    annotation = unavailable_annotation(
+                        str(shot["shot_id"]),
+                        bool(shot["dialogue"]),
+                    )
+                    _write_json_checkpoint(
+                        checkpoint_path,
+                        {
+                            "schema_version": "1.0",
+                            "shot_id": shot["shot_id"],
+                            "prompt_id": package.prompt_id,
+                            "prompt_version": package.prompt_version,
+                            "prompt_fingerprint": package.fingerprint,
+                            "contract_fingerprint": (
+                                package.response_contract.fingerprint
+                            ),
+                            "visual_annotation_status": (
+                                VisualAnnotationStatus.PROVIDER_REJECTED
+                            ),
+                            "visual_annotation_failure": (
+                                "data_inspection_failed"
+                            ),
+                        },
+                    )
+                    log_event(
+                        "WARNING",
+                        "analyser",
+                        "fallback.apply",
+                        "Shot visual annotation was skipped after provider content inspection",
+                        shot_id=shot["shot_id"],
+                        segment_id=segment["segment_id"],
+                        visual_annotation_status=(
+                            VisualAnnotationStatus.PROVIDER_REJECTED
                         ),
-                        "annotation": annotation,
-                    },
-                )
+                        reason="data_inspection_failed",
+                    )
+                else:
+                    _write_json_checkpoint(
+                        checkpoint_path,
+                        {
+                            "schema_version": "1.0",
+                            "shot_id": shot["shot_id"],
+                            "prompt_id": package.prompt_id,
+                            "prompt_version": package.prompt_version,
+                            "prompt_fingerprint": package.fingerprint,
+                            "contract_fingerprint": (
+                                package.response_contract.fingerprint
+                            ),
+                            "annotation": annotation,
+                        },
+                    )
             dialogue_occurrences = [
                 DialogueOccurrence(
                     dialogue_id=int(item["dialogue_id"]),
@@ -766,7 +844,11 @@ def _annotate_segments(
                     end_boundary=BoundarySource(str(shot["end_boundary"])),
                     dialogue=dialogue_occurrences,
                     sampled_frame_times_sec=sampled_times,
-                    scene=SceneDescription(**annotation["scene"]),
+                    scene=(
+                        SceneDescription(**annotation["scene"])
+                        if annotation["scene"] is not None
+                        else None
+                    ),
                     characters=[
                         CharacterAppearance(**value)
                         for value in annotation["characters"]
@@ -785,7 +867,14 @@ def _annotate_segments(
             )
             annotation_progress.update()
 
-        total_duration = sum(shot.time_range.duration_sec for shot in annotated_shots)
+        visually_annotated_shots = [
+            shot
+            for shot in annotated_shots
+            if shot.visual_annotation_status == VisualAnnotationStatus.COMPLETE
+        ]
+        total_duration = sum(
+            shot.time_range.duration_sec for shot in visually_annotated_shots
+        )
         if segment["has_dialogue"]:
             content_type = SegmentContentType.NARRATIVE
         else:
@@ -794,17 +883,25 @@ def _annotate_segments(
                 SegmentContentType.EMOTIONAL: 0.0,
                 SegmentContentType.PANTOMIME: 0.0,
             }
-            for shot in annotated_shots:
+            for shot in visually_annotated_shots:
                 durations[shot.content_type] += shot.time_range.duration_sec
-            content_type = max(durations, key=durations.get)
-        representative = max(
-            annotated_shots,
-            key=lambda shot: shot.time_range.duration_sec,
+            content_type = (
+                max(durations, key=durations.get)
+                if visually_annotated_shots
+                else None
+            )
+        representative = (
+            max(
+                visually_annotated_shots,
+                key=lambda shot: shot.time_range.duration_sec,
+            )
+            if visually_annotated_shots
+            else None
         )
         appearing_characters = list(
             dict.fromkeys(
                 character.name
-                for shot in annotated_shots
+                for shot in visually_annotated_shots
                 for character in shot.characters
             )
         )
@@ -831,22 +928,42 @@ def _annotate_segments(
             timeline_role=TimelineRole(segment["timeline_role"]),
             shots=annotated_shots,
             dialogue_context=dialogue_context,
-            segment_summary=" ".join(
-                shot.visual_description for shot in annotated_shots
+            segment_summary=(
+                " ".join(
+                    shot.visual_description
+                    for shot in visually_annotated_shots
+                    if shot.visual_description is not None
+                )
+                or None
             ),
             narrative_function=(
                 dialogue_context.summary
                 if dialogue_context is not None
-                else " ".join(
-                    dict.fromkeys(shot.narrative_function for shot in annotated_shots)
+                else (
+                    " ".join(
+                        dict.fromkeys(
+                            shot.narrative_function
+                            for shot in visually_annotated_shots
+                            if shot.narrative_function is not None
+                        )
+                    )
+                    or None
                 )
             ),
-            emotional_tone=representative.emotional_tone,
-            emotional_intensity=sum(
-                shot.emotional_intensity * shot.time_range.duration_sec
-                for shot in annotated_shots
-            )
-            / total_duration,
+            emotional_tone=(
+                representative.emotional_tone
+                if representative is not None
+                else None
+            ),
+            emotional_intensity=(
+                sum(
+                    shot.emotional_intensity * shot.time_range.duration_sec
+                    for shot in visually_annotated_shots
+                )
+                / total_duration
+                if total_duration > 0
+                else None
+            ),
             appearing_characters=appearing_characters,
         )
         description.validate()

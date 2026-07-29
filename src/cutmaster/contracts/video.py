@@ -68,6 +68,11 @@ class CameraMovement(StrEnum):
     CRANE = "crane"
 
 
+class VisualAnnotationStatus(StrEnum):
+    COMPLETE = "complete"
+    PROVIDER_REJECTED = "provider_rejected"
+
+
 @dataclass(frozen=True)
 class TimeRange:
     start_sec: float
@@ -147,23 +152,53 @@ class ShotDescription:
     segment_time_range: TimeRange
     start_boundary: BoundarySource
     end_boundary: BoundarySource
-    visual_description: str
-    dominant_action: str
-    content_type: SegmentContentType
-    narrative_function: str
-    emotional_tone: str
-    emotional_intensity: float
-    scene: SceneDescription
+    visual_description: str | None
+    dominant_action: str | None
+    content_type: SegmentContentType | None
+    narrative_function: str | None
+    emotional_tone: str | None
+    emotional_intensity: float | None
+    scene: SceneDescription | None
     characters: list[CharacterAppearance]
     dialogue: list[DialogueOccurrence]
-    shot_scale: ShotScale
-    camera_angle: CameraAngle
-    camera_movement: CameraMovement
-    composition: str
+    shot_scale: ShotScale | None
+    camera_angle: CameraAngle | None
+    camera_movement: CameraMovement | None
+    composition: str | None
     sampled_frame_times_sec: list[float]
-    visual_evidence: str
+    visual_evidence: str | None
+    visual_annotation_status: VisualAnnotationStatus = VisualAnnotationStatus.COMPLETE
+    visual_annotation_failure: str | None = None
 
     def validate(self) -> None:
+        if self.visual_annotation_status == VisualAnnotationStatus.PROVIDER_REJECTED:
+            if self.visual_annotation_failure != "data_inspection_failed":
+                raise ValueError(
+                    "Provider-rejected Shot must record data_inspection_failed"
+                )
+            unavailable_fields = (
+                self.visual_description,
+                self.dominant_action,
+                self.content_type,
+                self.narrative_function,
+                self.emotional_tone,
+                self.emotional_intensity,
+                self.scene,
+                self.shot_scale,
+                self.camera_angle,
+                self.camera_movement,
+                self.composition,
+                self.visual_evidence,
+            )
+            if any(value is not None for value in unavailable_fields):
+                raise ValueError(
+                    "Provider-rejected Shot cannot contain visual annotation values"
+                )
+            return
+        if self.visual_annotation_failure is not None:
+            raise ValueError(
+                "A completely annotated Shot cannot record an annotation failure"
+            )
         if (
             not self.shot_id
             or not self.visual_description
@@ -171,10 +206,14 @@ class ShotDescription:
             or not self.narrative_function
         ):
             raise ValueError("Shot description fields must not be empty")
+        if self.emotional_intensity is None:
+            raise ValueError("Annotated Shot must define emotional_intensity")
         if not 0.0 <= self.emotional_intensity <= 1.0:
             raise ValueError("Shot emotional_intensity must be between 0 and 1")
         if len(self.sampled_frame_times_sec) != 5:
             raise ValueError("Every Shot must be described from exactly five frames")
+        if self.scene is None:
+            raise ValueError("Annotated Shot must define a scene")
         self.scene.validate()
         for character in self.characters:
             character.validate()
@@ -198,14 +237,14 @@ class SegmentDescription:
     clip_path: str
     has_dialogue: bool
     speech_mode: SpeechMode
-    content_type: SegmentContentType
+    content_type: SegmentContentType | None
     timeline_role: TimelineRole
     shots: list[ShotDescription]
     dialogue_context: DialogueContext | None
-    segment_summary: str
-    narrative_function: str
-    emotional_tone: str
-    emotional_intensity: float
+    segment_summary: str | None
+    narrative_function: str | None
+    emotional_tone: str | None
+    emotional_intensity: float | None
     appearing_characters: list[str]
 
     def validate(self) -> None:
@@ -236,7 +275,32 @@ class SegmentDescription:
                 raise ValueError("A silent Segment cannot be narrative")
             if self.dialogue_context is not None:
                 raise ValueError("A silent Segment cannot have dialogue_context")
-        if not 0.0 <= self.emotional_intensity <= 1.0:
+        completed_shots = [
+            shot
+            for shot in self.shots
+            if shot.visual_annotation_status == VisualAnnotationStatus.COMPLETE
+        ]
+        if not completed_shots:
+            if self.has_dialogue and self.content_type != SegmentContentType.NARRATIVE:
+                raise ValueError("Spoken Segment must remain narrative")
+            if not self.has_dialogue and self.content_type is not None:
+                raise ValueError(
+                    "Silent Segment without visual annotations has no content_type"
+                )
+            if (
+                self.segment_summary is not None
+                or self.emotional_tone is not None
+                or self.emotional_intensity is not None
+            ):
+                raise ValueError(
+                    "Segment without visual annotations cannot contain visual aggregates"
+                )
+        elif self.content_type is None:
+            raise ValueError("Visually annotated Segment must define content_type")
+        if (
+            self.emotional_intensity is not None
+            and not 0.0 <= self.emotional_intensity <= 1.0
+        ):
             raise ValueError("Segment emotional_intensity must be between 0 and 1")
         for shot in self.shots:
             shot.validate()
