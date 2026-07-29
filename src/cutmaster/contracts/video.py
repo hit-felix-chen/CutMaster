@@ -288,7 +288,7 @@ class SegmentDescription:
                     "Silent Segment without visual annotations has no content_type"
                 )
             if (
-                self.segment_summary is not None
+                (not self.has_dialogue and self.segment_summary is not None)
                 or self.emotional_tone is not None
                 or self.emotional_intensity is not None
             ):

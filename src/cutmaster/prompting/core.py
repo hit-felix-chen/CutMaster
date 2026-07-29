@@ -20,6 +20,7 @@ class PromptTask(StrEnum):
     DIALOGUE_RECONSTRUCTION = "dialogue_reconstruction"
     DIALOGUE_SEGMENTATION = "dialogue_segmentation"
     SHOT_ANNOTATION = "shot_annotation"
+    SEGMENT_SUMMARY = "segment_summary"
     VIDEO_SUMMARY = "video_summary"
     SLOT_PLANNING = "slot_planning"
     DIALOGUE_ANCHOR_SELECTION = "dialogue_anchor_selection"

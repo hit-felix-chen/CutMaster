@@ -48,6 +48,11 @@ class ShotAnnotationDetails:
 
 
 @dataclass(frozen=True)
+class SegmentSummaryDetails:
+    segment: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class VideoSummaryDetails:
     segment_ids: list[str]
 
@@ -402,6 +407,58 @@ medium_close_up is not an allowed value. Describe locations concretely from visi
     )
 
 
+def _segment_summary(details: SegmentSummaryDetails) -> PromptPackage:
+    segment_id = str(details.segment["segment_id"])
+    contract = ResponseContract(
+        version="1.0",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["segment_id", "segment_summary"],
+            "properties": {
+                "segment_id": {
+                    "type": "string",
+                    "const": segment_id,
+                },
+                "segment_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 600,
+                },
+            },
+        },
+    )
+    instructions = f"""Summarize exactly one source-video Segment as a concise reusable event
+description for later editing decisions.
+
+Integrate the supplied dialogue context, exact dialogue occurrences, and Shot annotations into
+one to three sentences. State who does what, the meaningful interaction or change, and the
+immediate narrative significance when supported. Preserve source chronology.
+
+Do not enumerate Shots or dialogue lines. Do not mention camera metadata, annotation failures,
+ASR, prompts, or editing. Do not infer events from dialogue when the visual annotations contradict
+them. Shots marked provider_rejected have no visual evidence and must not be described as if they
+were visually annotated.
+
+<segment>
+{json.dumps(details.segment, ensure_ascii=False)}
+</segment>"""
+    return PromptPackage(
+        stage=PromptStage.ANALYSER,
+        task=PromptTask.SEGMENT_SUMMARY,
+        prompt_version="1.0",
+        operation=f"Segment summary {segment_id}",
+        system_prompt=(
+            "You create a concise, factual Segment-level summary from structured dialogue and "
+            "Shot annotations. Return strict JSON only."
+        ),
+        user_prompt=assemble_user_prompt(instructions, contract),
+        response_contract=contract,
+        context_keys=(),
+        modality=PromptModality.TEXT,
+    )
+
+
 def _video_summary(details: VideoSummaryDetails) -> PromptPackage:
     contract = ResponseContract(
         version="1.0",
@@ -538,6 +595,11 @@ prompt_registry.register(
     PromptStage.ANALYSER,
     PromptTask.SHOT_ANNOTATION,
     _shot_annotation,
+)
+prompt_registry.register(
+    PromptStage.ANALYSER,
+    PromptTask.SEGMENT_SUMMARY,
+    _segment_summary,
 )
 prompt_registry.register(
     PromptStage.ANALYSER,

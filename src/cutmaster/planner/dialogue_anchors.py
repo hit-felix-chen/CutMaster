@@ -162,29 +162,30 @@ def _eligible_source_segments(
     ]
 
 
-def _valid_dialogue_ranges(
+def _dialogue_constraints_by_slot(
     slots: list[dict[str, Any]],
     video_description: dict[str, Any],
     dialogues: dict[str, list[dict[str, Any]]],
     min_anchor_duration_sec: float,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, dict[str, Any]]:
     output_end = max(float(slot["output_end_sec"]) for slot in slots)
     segments = {
         str(segment["segment_id"]): segment
         for segment in video_description["segments"]
     }
-    result: dict[str, list[dict[str, Any]]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for slot in slots:
         slot_id = str(slot["slot_id"])
         output_start = float(slot["output_start_sec"])
         maximum_audio_duration = output_end - output_start
         slot_duration = float(slot["planned_duration_sec"])
-        valid_ranges: list[dict[str, Any]] = []
+        allowed_segment_ids: list[str] = []
         for segment_id_value in slot["source_segment_ids"]:
             segment_id = str(segment_id_value)
             segment = segments[segment_id]
             segment_end = float(segment["time_range"]["end_sec"])
             sequence = dialogues.get(segment_id) or []
+            feasible = False
             for start_index, first in enumerate(sequence):
                 speech_start = float(first["start_sec"])
                 if speech_start + slot_duration > segment_end + _TOLERANCE_SEC:
@@ -195,30 +196,20 @@ def _valid_dialogue_ranges(
                     speech_duration = speech_end - speech_start
                     if speech_duration > maximum_audio_duration + _TOLERANCE_SEC:
                         break
-                    if speech_duration < min_anchor_duration_sec - _TOLERANCE_SEC:
-                        continue
-                    dialogue_ids = [
-                        str(item["dialogue_id"])
-                        for item in sequence[start_index : end_index + 1]
-                    ]
-                    valid_ranges.append(
-                        {
-                            "range_id": (
-                                f"{slot_id}_range_{len(valid_ranges) + 1:04d}"
-                            ),
-                            "source_segment_id": segment_id,
-                            "start_dialogue_id": str(first["dialogue_id"]),
-                            "end_dialogue_id": str(last["dialogue_id"]),
-                            "dialogue_ids": dialogue_ids,
-                            "duration_sec": round(speech_duration, 6),
-                            "output_audio_start_sec": round(output_start, 6),
-                            "output_audio_end_sec": round(
-                                output_start + speech_duration,
-                                6,
-                            ),
-                        }
-                    )
-        result[slot_id] = valid_ranges
+                    if speech_duration >= min_anchor_duration_sec - _TOLERANCE_SEC:
+                        feasible = True
+                        break
+                if feasible:
+                    break
+            if feasible:
+                allowed_segment_ids.append(segment_id)
+        result[slot_id] = {
+            "allowed_segment_ids": allowed_segment_ids,
+            "min_audio_duration_sec": round(min_anchor_duration_sec, 6),
+            "max_audio_duration_sec": round(maximum_audio_duration, 6),
+            "planned_picture_duration_sec": round(slot_duration, 6),
+            "output_audio_start_sec": round(output_start, 6),
+        }
     return result
 
 
@@ -273,7 +264,7 @@ def _validate_selection(
     slots: list[dict[str, Any]],
     video_description: dict[str, Any],
     dialogues: dict[str, list[dict[str, Any]]],
-    valid_ranges_by_slot: dict[str, list[dict[str, Any]]],
+    dialogue_constraints_by_slot: dict[str, dict[str, Any]],
     anchor_config: DialogueAnchorConfig,
 ) -> list[dict[str, Any]]:
     slots_by_id = {
@@ -301,20 +292,19 @@ def _validate_selection(
         if slot_id not in slots_by_id:
             raise ValueError(f"Unknown dialogue-anchor Slot: {slot_id}")
         slot = slots_by_id[slot_id]
-        dialogue_range_id = str(raw.get("dialogue_range_id") or "")
-        valid_ranges = {
-            str(item["range_id"]): item
-            for item in valid_ranges_by_slot.get(slot_id) or []
+        constraint = dialogue_constraints_by_slot.get(slot_id) or {}
+        segment_id = str(raw.get("source_segment_id") or "")
+        allowed_segment_ids = {
+            str(value)
+            for value in constraint.get("allowed_segment_ids") or []
         }
-        if dialogue_range_id not in valid_ranges:
+        if segment_id not in allowed_segment_ids:
             raise ValueError(
-                f"Unknown prevalidated dialogue range for {slot_id}: "
-                f"{dialogue_range_id}"
+                f"Dialogue anchor for {slot_id} uses disallowed Segment: "
+                f"{segment_id}"
             )
-        selected_range = valid_ranges[dialogue_range_id]
-        segment_id = str(selected_range["source_segment_id"])
-        start_dialogue_id = str(selected_range["start_dialogue_id"])
-        end_dialogue_id = str(selected_range["end_dialogue_id"])
+        start_dialogue_id = str(raw.get("first_dialogue_id") or "")
+        end_dialogue_id = str(raw.get("last_dialogue_id") or "")
         sequence = dialogues.get(segment_id) or []
         dialogue_positions = {
             dialogue["dialogue_id"]: index
@@ -338,10 +328,21 @@ def _validate_selection(
         speech_end = float(selected_dialogues[-1]["end_sec"])
         speech_duration = speech_end - speech_start
         slot_duration = float(slot["planned_duration_sec"])
-        if speech_duration < anchor_config.min_anchor_duration_sec:
+        minimum_audio_duration = float(
+            constraint["min_audio_duration_sec"]
+        )
+        maximum_audio_duration = float(
+            constraint["max_audio_duration_sec"]
+        )
+        if speech_duration < minimum_audio_duration - _TOLERANCE_SEC:
             raise ValueError(
                 f"Dialogue range for {slot_id} must last at least "
-                f"{anchor_config.min_anchor_duration_sec:.3f} seconds"
+                f"{minimum_audio_duration:.3f} seconds"
+            )
+        if speech_duration > maximum_audio_duration + _TOLERANCE_SEC:
+            raise ValueError(
+                f"Dialogue range for {slot_id} exceeds its "
+                f"{maximum_audio_duration:.3f}-second audio limit"
             )
         dialogue_output_start = float(slot["output_start_sec"])
         dialogue_output_end = dialogue_output_start + speech_duration
@@ -538,19 +539,22 @@ def select_dialogue_anchors(
     if not source_segments:
         context.set_artifact("dialogue_anchors", [])
         return [dict(slot) for slot in slots]
-    valid_ranges_by_slot = _valid_dialogue_ranges(
+    dialogue_constraints_by_slot = _dialogue_constraints_by_slot(
         slots,
         video_description,
         dialogues,
         anchor_config.min_anchor_duration_sec,
     )
-    if not any(valid_ranges_by_slot.values()):
+    if not any(
+        constraint["allowed_segment_ids"]
+        for constraint in dialogue_constraints_by_slot.values()
+    ):
         context.set_artifact("dialogue_anchors", [])
         return [dict(slot) for slot in slots]
     valid_segment_ids = {
-        str(item["source_segment_id"])
-        for ranges in valid_ranges_by_slot.values()
-        for item in ranges
+        str(segment_id)
+        for constraint in dialogue_constraints_by_slot.values()
+        for segment_id in constraint["allowed_segment_ids"]
     }
     source_segments = [
         segment
@@ -573,7 +577,7 @@ def select_dialogue_anchors(
                 video_description,
                 source_segments,
             ),
-            valid_ranges_by_slot=valid_ranges_by_slot,
+            dialogue_constraints_by_slot=dialogue_constraints_by_slot,
             max_anchors=anchor_config.max_anchors,
             min_anchor_duration_sec=(
                 anchor_config.min_anchor_duration_sec
@@ -588,7 +592,7 @@ def select_dialogue_anchors(
             slots,
             video_description,
             dialogues,
-            valid_ranges_by_slot,
+            dialogue_constraints_by_slot,
             anchor_config,
         ),
     )

@@ -40,7 +40,7 @@ class DialogueAnchorSelectionDetails:
     video_summary: dict[str, Any]
     source_segments: list[dict[str, Any]]
     source_shots: list[dict[str, Any]]
-    valid_ranges_by_slot: dict[str, list[dict[str, Any]]]
+    dialogue_constraints_by_slot: dict[str, dict[str, Any]]
     max_anchors: int
     min_anchor_duration_sec: float
 
@@ -332,19 +332,40 @@ def _candidate_item_schema() -> dict[str, Any]:
 def _dialogue_anchor_selection(
     details: DialogueAnchorSelectionDetails,
 ) -> PromptPackage:
+    dialogue_ids_by_segment = {
+        str(segment["segment_id"]): [
+            str(item["dialogue_id"])
+            for item in segment["dialogue_items"]
+        ]
+        for segment in details.source_segments
+    }
     anchor_schemas: list[dict[str, Any]] = []
     for slot in details.slots:
         slot_id = str(slot["slot_id"])
-        valid_ranges = details.valid_ranges_by_slot.get(slot_id) or []
-        if not valid_ranges:
+        constraint = details.dialogue_constraints_by_slot.get(slot_id) or {}
+        allowed_segment_ids = [
+            str(value)
+            for value in constraint.get("allowed_segment_ids") or []
+            if dialogue_ids_by_segment.get(str(value))
+        ]
+        if not allowed_segment_ids:
             continue
+        allowed_dialogue_ids = list(
+            dict.fromkeys(
+                dialogue_id
+                for segment_id in allowed_segment_ids
+                for dialogue_id in dialogue_ids_by_segment[segment_id]
+            )
+        )
         anchor_schemas.append(
             {
                 "type": "object",
                 "additionalProperties": False,
                 "required": [
                     "slot_id",
-                    "dialogue_range_id",
+                    "source_segment_id",
+                    "first_dialogue_id",
+                    "last_dialogue_id",
                     "narrative_significance",
                     "request_relevance",
                     "standalone_meaning",
@@ -356,12 +377,17 @@ def _dialogue_anchor_selection(
                         "type": "string",
                         "const": slot_id,
                     },
-                    "dialogue_range_id": {
+                    "source_segment_id": {
                         "type": "string",
-                        "enum": [
-                            str(item["range_id"])
-                            for item in valid_ranges
-                        ],
+                        "enum": allowed_segment_ids,
+                    },
+                    "first_dialogue_id": {
+                        "type": "string",
+                        "enum": allowed_dialogue_ids,
+                    },
+                    "last_dialogue_id": {
+                        "type": "string",
+                        "enum": allowed_dialogue_ids,
                     },
                     "narrative_significance": {
                         "type": "string",
@@ -388,7 +414,7 @@ def _dialogue_anchor_selection(
         )
     minimum = 1 if anchor_schemas else 0
     contract = ResponseContract(
-        version="3.0",
+        version="4.0",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -420,14 +446,16 @@ theme. Select at most {details.max_anchors} anchors. Every selected spoken range
 {details.min_anchor_duration_sec:.1f} seconds and must remain meaningful when heard in the final
 short edit without unexplained surrounding dialogue.
 
-For each anchor, choose exactly one dialogue_range_id from that Slot's
-valid_dialogue_ranges_by_slot. Every listed range is a prevalidated sequence of consecutive
-dialogue_items from one assigned source Segment: it meets the minimum duration, preserves source
-order, keeps the corresponding original-picture window inside its Segment, and fits completely
-inside the remaining output timeline when started at the Slot boundary. Never construct a new
-range or combine IDs. Do not select greetings, acknowledgements, exclamations, sentence
-fragments, generic reactions, or isolated replies such as “yes”, “no”, “good”, or “oh”. Do not
-choose a range padded with unrelated neighboring speech merely to satisfy duration.
+For each anchor, choose one source_segment_id allowed by that Slot, followed by an inclusive
+first_dialogue_id and last_dialogue_id from that same Segment. The application expands the
+inclusive endpoints to every intervening dialogue item and validates continuity, source order,
+minimum and maximum duration, source-picture bounds, output-timeline fit, and overlap. Never skip
+an intervening dialogue item, cross a Segment boundary, or combine nonconsecutive passages.
+
+Use dialogue_constraints_by_slot for each Slot's allowed Segments and exact duration limits.
+Do not select greetings, acknowledgements, exclamations, sentence fragments, generic reactions,
+or isolated replies such as “yes”, “no”, “good”, or “oh”. Do not pad a range with unrelated
+neighboring speech merely to satisfy duration.
 
 Every selected anchor uses the same L-cut layout. Its original speech starts exactly at the
 selected Slot's output start. The selected Slot starts with the corresponding original picture
@@ -466,13 +494,13 @@ credits, title cards, and speech over unrelated imagery.
 {json.dumps(details.source_segments, ensure_ascii=False)}
 </selected_source_segments>
 
-<valid_dialogue_ranges_by_slot>
-{json.dumps(details.valid_ranges_by_slot, ensure_ascii=False)}
-</valid_dialogue_ranges_by_slot>"""
+<dialogue_constraints_by_slot>
+{json.dumps(details.dialogue_constraints_by_slot, ensure_ascii=False)}
+</dialogue_constraints_by_slot>"""
     return PromptPackage(
         stage=PromptStage.PLANNER,
         task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
-        prompt_version="3.0",
+        prompt_version="4.0",
         operation="Original dialogue anchor selection",
         system_prompt=(
             "You select a few meaningful, coherent original-speech passages that directly serve "

@@ -5,7 +5,11 @@ import json
 import pytest
 
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.analyser import ShotAnnotationDetails, VideoSummaryDetails
+from cutmaster.prompting.analyser import (
+    SegmentSummaryDetails,
+    ShotAnnotationDetails,
+    VideoSummaryDetails,
+)
 from cutmaster.prompting.core import response_template_from_schema
 from cutmaster.prompting.planner import (
     DialogueAnchorSelectionDetails,
@@ -39,6 +43,7 @@ def test_registry_exposes_every_model_task() -> None:
         (PromptStage.ANALYSER, PromptTask.DIALOGUE_RECONSTRUCTION),
         (PromptStage.ANALYSER, PromptTask.DIALOGUE_SEGMENTATION),
         (PromptStage.ANALYSER, PromptTask.SHOT_ANNOTATION),
+        (PromptStage.ANALYSER, PromptTask.SEGMENT_SUMMARY),
         (PromptStage.ANALYSER, PromptTask.VIDEO_SUMMARY),
         (PromptStage.PLANNER, PromptTask.SLOT_PLANNING),
         (PromptStage.PLANNER, PromptTask.DIALOGUE_ANCHOR_SELECTION),
@@ -58,6 +63,35 @@ def test_prompt_embeds_contract_and_template_derived_from_same_schema() -> None:
     assert json.dumps(template, ensure_ascii=False, indent=2) in package.user_prompt
     assert len(package.response_contract.fingerprint) == 16
     assert len(package.fingerprint) == 16
+
+
+def test_segment_summary_prompt_requires_one_concise_summary() -> None:
+    package = prompt_registry.build(
+        PromptStage.ANALYSER,
+        PromptTask.SEGMENT_SUMMARY,
+        SegmentSummaryDetails(
+            segment={
+                "segment_id": "segment_0001",
+                "time_range": {"start_sec": 0.0, "end_sec": 4.0},
+                "dialogue_context": None,
+                "dialogue_items": [],
+                "shots": [
+                    {
+                        "shot_id": "shot_00001",
+                        "visual_description": "A person enters the room.",
+                    }
+                ],
+            }
+        ),
+    )
+    summary_schema = package.response_contract.schema["properties"][
+        "segment_summary"
+    ]
+
+    assert package.response_contract.version == "1.0"
+    assert summary_schema["maxLength"] == 600
+    assert "one to three sentences" in package.user_prompt
+    assert package.context_keys == ()
 
 
 def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
@@ -231,19 +265,14 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
                 }
             ],
             source_shots=[],
-            valid_ranges_by_slot={
-                "slot_01": [
-                    {
-                        "range_id": "slot_01_range_0001",
-                        "source_segment_id": "segment_0001",
-                        "start_dialogue_id": "7",
-                        "end_dialogue_id": "8",
-                        "dialogue_ids": ["7", "8"],
-                        "duration_sec": 1.4,
-                        "output_audio_start_sec": 0.0,
-                        "output_audio_end_sec": 1.4,
-                    }
-                ]
+            dialogue_constraints_by_slot={
+                "slot_01": {
+                    "allowed_segment_ids": ["segment_0001"],
+                    "min_audio_duration_sec": 1.0,
+                    "max_audio_duration_sec": 60.0,
+                    "planned_picture_duration_sec": 4.0,
+                    "output_audio_start_sec": 0.0,
+                }
             },
             max_anchors=3,
             min_anchor_duration_sec=1.0,
@@ -252,25 +281,30 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     schema = package.response_contract.schema
     anchor = schema["properties"]["anchors"]["items"]["oneOf"][0]
 
-    assert package.response_contract.version == "3.0"
+    assert package.response_contract.version == "4.0"
     assert anchor["required"] == [
         "slot_id",
-        "dialogue_range_id",
+        "source_segment_id",
+        "first_dialogue_id",
+        "last_dialogue_id",
         "narrative_significance",
         "request_relevance",
         "standalone_meaning",
         "importance_likert",
         "coherence_likert",
     ]
-    assert anchor["properties"]["dialogue_range_id"]["enum"] == [
-        "slot_01_range_0001"
+    assert anchor["properties"]["source_segment_id"]["enum"] == [
+        "segment_0001"
     ]
-    assert "prevalidated sequence of consecutive" in package.user_prompt
-    assert "Never construct a new" in package.user_prompt
+    assert anchor["properties"]["first_dialogue_id"]["enum"] == ["7", "8"]
+    assert anchor["properties"]["last_dialogue_id"]["enum"] == ["7", "8"]
+    assert "inclusive endpoints" in package.user_prompt
+    assert "validates continuity" in package.user_prompt
     assert "same L-cut layout" in package.user_prompt
     assert "audio_cut_style" not in anchor["properties"]
     assert "<video_summary>" in package.user_prompt
-    assert "<valid_dialogue_ranges_by_slot>" in package.user_prompt
+    assert "<dialogue_constraints_by_slot>" in package.user_prompt
+    assert "<valid_dialogue_ranges_by_slot>" not in package.user_prompt
     assert "Mia presses Sebastian for the truth." in package.user_prompt
     assert "<full_dialogue_context>" not in package.user_prompt
     assert "music_profile" not in package.context_keys

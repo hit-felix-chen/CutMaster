@@ -18,6 +18,7 @@ from cutmaster.analyser.service import (
     _group_dialogue,
     _raw_segments,
     _sample_shot_frames,
+    _summarize_segments,
     _video_summary_context,
     _validate_dialogue_segments,
     _validate_shot_annotation,
@@ -523,6 +524,46 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
     )
     assert len(descriptions) == 2
     assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
+
+    class SummaryContext:
+        calls: list[str] = []
+
+        def call_prompt(self, **kwargs):
+            segment_id = kwargs["package"].operation.split()[-1]
+            self.calls.append(segment_id)
+            return {
+                "segment_id": segment_id,
+                "segment_summary": f"Concise summary for {segment_id}.",
+            }
+
+    summary_context = SummaryContext()
+    summary_directory = tmp_path / "segment_summaries"
+    summarized = _summarize_segments(
+        descriptions,
+        summary_context,
+        LLMConfig(model="test", base_url="", api_key="test"),
+        summary_directory,
+    )
+    assert [segment.segment_summary for segment in summarized] == [
+        "Concise summary for segment_0.",
+        "Concise summary for segment_1.",
+    ]
+    assert set(summary_context.calls) == {"segment_0", "segment_1"}
+
+    class UnexpectedSummaryContext:
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("Segment summary checkpoint should be reused")
+
+    cached_summaries = _summarize_segments(
+        descriptions,
+        UnexpectedSummaryContext(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        summary_directory,
+    )
+    assert [segment.segment_summary for segment in cached_summaries] == [
+        "Concise summary for segment_0.",
+        "Concise summary for segment_1.",
+    ]
 
     cached_descriptions = _annotate_segments(
         segments,

@@ -5,6 +5,7 @@ import json
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from cutmaster.runtime.observability import log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import (
     DialogueSegmentationDetails,
+    SegmentSummaryDetails,
     ShotAnnotationDetails,
     VideoSummaryDetails,
 )
@@ -928,14 +930,7 @@ def _annotate_segments(
             timeline_role=TimelineRole(segment["timeline_role"]),
             shots=annotated_shots,
             dialogue_context=dialogue_context,
-            segment_summary=(
-                " ".join(
-                    shot.visual_description
-                    for shot in visually_annotated_shots
-                    if shot.visual_description is not None
-                )
-                or None
-            ),
+            segment_summary=None,
             narrative_function=(
                 dialogue_context.summary
                 if dialogue_context is not None
@@ -989,6 +984,155 @@ def _annotate_segments(
         annotation_progress.close()
 
 
+def _segment_summary_input(
+    segment: SegmentDescription,
+) -> dict[str, Any]:
+    dialogues: dict[int, dict[str, Any]] = {}
+    shots: list[dict[str, Any]] = []
+    for shot in segment.shots:
+        for dialogue in shot.dialogue:
+            dialogues.setdefault(
+                dialogue.dialogue_id,
+                {
+                    "dialogue_id": dialogue.dialogue_id,
+                    "time_range": asdict(dialogue.time_range),
+                    "speaker": dialogue.speaker,
+                    "text": dialogue.text,
+                    "speech_mode": dialogue.speech_mode,
+                },
+            )
+        shots.append(
+            {
+                "shot_id": shot.shot_id,
+                "time_range": asdict(shot.time_range),
+                "visual_annotation_status": shot.visual_annotation_status,
+                "visual_description": shot.visual_description,
+                "dominant_action": shot.dominant_action,
+                "narrative_function": shot.narrative_function,
+                "emotional_tone": shot.emotional_tone,
+                "characters": [
+                    {
+                        "name": character.name,
+                        "description": character.description,
+                        "identity_likert": character.identity_likert,
+                    }
+                    for character in shot.characters
+                ],
+            }
+        )
+    return {
+        "segment_id": segment.segment_id,
+        "time_range": asdict(segment.time_range),
+        "has_dialogue": segment.has_dialogue,
+        "speech_mode": segment.speech_mode,
+        "dialogue_context": (
+            asdict(segment.dialogue_context)
+            if segment.dialogue_context is not None
+            else None
+        ),
+        "dialogue_items": sorted(
+            dialogues.values(),
+            key=lambda item: (
+                float(item["time_range"]["start_sec"]),
+                int(item["dialogue_id"]),
+            ),
+        ),
+        "shots": shots,
+    }
+
+
+def _summarize_segments(
+    segments: list[SegmentDescription],
+    context: WorkflowContext,
+    config: LLMConfig,
+    summary_directory: Path,
+) -> list[SegmentDescription]:
+    summary_directory.mkdir(parents=True, exist_ok=True)
+    summary_progress = progress_bar(
+        total=len(segments),
+        description="Segment LLM summarization",
+        unit="segment",
+    )
+
+    def summarize(segment: SegmentDescription) -> SegmentDescription:
+        if (
+            not segment.has_dialogue
+            and not any(
+                shot.visual_annotation_status
+                == VisualAnnotationStatus.COMPLETE
+                for shot in segment.shots
+            )
+        ):
+            summary_progress.update()
+            return segment
+        package = prompt_registry.build(
+            PromptStage.ANALYSER,
+            PromptTask.SEGMENT_SUMMARY,
+            SegmentSummaryDetails(
+                segment=_segment_summary_input(segment),
+            ),
+        )
+        checkpoint_path = summary_directory / f"{segment.segment_id}.json"
+        checkpoint = _read_json_checkpoint(checkpoint_path)
+        summary: str | None = None
+        if (
+            isinstance(checkpoint, dict)
+            and checkpoint.get("prompt_fingerprint") == package.fingerprint
+            and checkpoint.get("contract_fingerprint")
+            == package.response_contract.fingerprint
+            and isinstance(checkpoint.get("summary"), dict)
+        ):
+            try:
+                structured = package.response_contract.validate_structure(
+                    checkpoint["summary"]
+                )
+                summary = str(structured["segment_summary"]).strip()
+            except ValueError:
+                summary = None
+        if summary is None:
+            result = context.call_prompt(
+                package=package,
+                config=config,
+            )
+            summary = str(result["segment_summary"]).strip()
+            _write_json_checkpoint(
+                checkpoint_path,
+                {
+                    "schema_version": "1.0",
+                    "segment_id": segment.segment_id,
+                    "prompt_id": package.prompt_id,
+                    "prompt_version": package.prompt_version,
+                    "prompt_fingerprint": package.fingerprint,
+                    "contract_fingerprint": (
+                        package.response_contract.fingerprint
+                    ),
+                    "summary": result,
+                },
+            )
+        summarized = replace(segment, segment_summary=summary)
+        summarized.validate()
+        summary_progress.update()
+        return summarized
+
+    worker_count = max(1, min(config.max_concurrency, len(segments)))
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.progress",
+        "Segment summarization concurrency configured",
+        segments=len(segments),
+        workers=worker_count,
+    )
+    try:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="segment-llm",
+        ) as executor:
+            return list(executor.map(summarize, segments))
+    finally:
+        summary_progress.close()
+
+
 def _valid_video_summary(
     value: Any,
     segment_ids: list[str],
@@ -1027,8 +1171,10 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     manifest_path = material_directory / "analysis_manifest.json"
     description_path = material_directory / "video_description.json"
     summary_path = material_directory / "video_summary.json"
+    manifest = _read_json_checkpoint(manifest_path)
     if (
-        not manifest_path.is_file()
+        not isinstance(manifest, dict)
+        or manifest.get("segment_summary_prompt_version") != "1.0"
         or not description_path.is_file()
         or not summary_path.is_file()
     ):
@@ -1134,7 +1280,7 @@ def analyse_video_material(
             "Full-video Shot detection started",
             stage="shot_detection",
             stage_index=1,
-            stage_count=6,
+            stage_count=7,
         )
         shots, fps = _detect_full_video_shots(
             video_path,
@@ -1149,7 +1295,7 @@ def analyse_video_material(
             "Full-video Shot detection completed",
             stage="shot_detection",
             stage_index=1,
-            stage_count=6,
+            stage_count=7,
             shots=len(shots),
             elapsed_sec=time.monotonic() - stage_started,
         )
@@ -1161,7 +1307,7 @@ def analyse_video_material(
             "Shot-boundary checkpoint resumed",
             stage="shot_detection",
             stage_index=1,
-            stage_count=6,
+            stage_count=7,
             shots=len(shots),
         )
     context.set_artifact("shot_boundaries", shots)
@@ -1184,7 +1330,7 @@ def analyse_video_material(
         "Subtitle and dialogue preparation started",
         stage="dialogue_preparation",
         stage_index=2,
-        stage_count=6,
+        stage_count=7,
     )
     source_srt = prepare_subtitles(
         video_path,
@@ -1207,7 +1353,7 @@ def analyse_video_material(
             "Subtitle and dialogue preparation completed",
             stage="dialogue_preparation",
             stage_index=2,
-            stage_count=6,
+            stage_count=7,
             elapsed_sec=time.monotonic() - stage_started,
         )
     else:
@@ -1219,7 +1365,7 @@ def analyse_video_material(
             "Dialogue checkpoint resumed",
             stage="dialogue_preparation",
             stage_index=2,
-            stage_count=6,
+            stage_count=7,
         )
     dialogue_document = json.loads(dialogues_json.read_text(encoding="utf-8"))
     dialogue = _dialogue_with_shot_membership(
@@ -1243,7 +1389,7 @@ def analyse_video_material(
             "Dialogue grouping and Segment construction started",
             stage="segment_construction",
             stage_index=3,
-            stage_count=6,
+            stage_count=7,
         )
         dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
         segments = _raw_segments(shots, dialogue, dialogue_groups)
@@ -1256,7 +1402,7 @@ def analyse_video_material(
             "Dialogue grouping and Segment construction completed",
             stage="segment_construction",
             stage_index=3,
-            stage_count=6,
+            stage_count=7,
             segments=len(segments),
             elapsed_sec=time.monotonic() - stage_started,
         )
@@ -1268,7 +1414,7 @@ def analyse_video_material(
             "Segment-boundary checkpoint resumed",
             stage="segment_construction",
             stage_index=3,
-            stage_count=6,
+            stage_count=7,
             segments=len(segments),
         )
         if not segment_boundaries_path.is_file():
@@ -1283,7 +1429,7 @@ def analyse_video_material(
         "Reusable Segment clip preparation started",
         stage="segment_clip_preparation",
         stage_index=4,
-        stage_count=6,
+        stage_count=7,
         segments=len(segments),
     )
     _split_segment_clips(video_path, segments, material_directory)
@@ -1294,7 +1440,7 @@ def analyse_video_material(
         "Reusable Segment clip preparation completed",
         stage="segment_clip_preparation",
         stage_index=4,
-        stage_count=6,
+        stage_count=7,
         segments=len(segments),
         elapsed_sec=time.monotonic() - stage_started,
     )
@@ -1307,7 +1453,7 @@ def analyse_video_material(
         "Shot annotation started",
         stage="shot_annotation",
         stage_index=5,
-        stage_count=6,
+        stage_count=7,
         segments=len(segments),
     )
     annotated_segments = _annotate_segments(
@@ -1324,7 +1470,35 @@ def analyse_video_material(
         "Shot annotation completed",
         stage="shot_annotation",
         stage_index=5,
-        stage_count=6,
+        stage_count=7,
+        segments=len(annotated_segments),
+        elapsed_sec=time.monotonic() - stage_started,
+    )
+    stage_started = time.monotonic()
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.start",
+        "Segment summarization started",
+        stage="segment_summarization",
+        stage_index=6,
+        stage_count=7,
+        segments=len(annotated_segments),
+    )
+    annotated_segments = _summarize_segments(
+        annotated_segments,
+        context,
+        llm_config,
+        material_directory / "segment_summaries",
+    )
+    log_event(
+        "INFO",
+        "analyser",
+        "stage.complete",
+        "Segment summarization completed",
+        stage="segment_summarization",
+        stage_index=6,
+        stage_count=7,
         segments=len(annotated_segments),
         elapsed_sec=time.monotonic() - stage_started,
     )
@@ -1368,8 +1542,8 @@ def analyse_video_material(
             "stage.start",
             "Full-video story summarization started",
             stage="video_summary",
-            stage_index=6,
-            stage_count=6,
+            stage_index=7,
+            stage_count=7,
             segments=len(annotated_segments),
         )
         package = prompt_registry.build(
@@ -1393,8 +1567,8 @@ def analyse_video_material(
             "stage.complete",
             "Full-video story summarization completed",
             stage="video_summary",
-            stage_index=6,
-            stage_count=6,
+            stage_index=7,
+            stage_count=7,
             story_beats=len(
                 video_summary["chronological_story_beats"]
             ),
@@ -1408,13 +1582,14 @@ def analyse_video_material(
             "checkpoint.resume",
             "Full-video story-summary checkpoint resumed",
             stage="video_summary",
-            stage_index=6,
-            stage_count=6,
+            stage_index=7,
+            stage_count=7,
         )
     _write_json_checkpoint(
         material_directory / "analysis_manifest.json",
         {
             **analysis_signature,
+            "segment_summary_prompt_version": "1.0",
             "material_directory": str(material_directory.resolve()),
             "video_description": str(description_path.resolve()),
             "video_summary": str(summary_path.resolve()),
