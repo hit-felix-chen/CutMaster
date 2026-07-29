@@ -12,6 +12,12 @@ CutMaster is a multi-agent automatic editing framework for long-form video. It a
 
 > CutMaster employs a MASTER team of specialized agents that progressively transforms long-form footage into a narrative-aligned, emotionally paced, and visually coherent montage.
 
+<p align="center">
+  <img src="assets/master_editing_team.png" alt="CutMaster MASTER multi-agent editing architecture" width="100%">
+</p>
+
+<p align="center"><em>Starting from long-form footage and user intent, the MASTER team collaborates on material understanding, edit planning, sequence optimization, and final rendering.</em></p>
+
 ## The MASTER Editing Team
 
 The complete CutMaster workflow is organized as a **MASTER** team:
