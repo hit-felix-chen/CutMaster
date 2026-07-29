@@ -8,16 +8,21 @@ from typing import Any
 
 import cv2
 
-from cutmaster.configuration.schema import CandidateRetrievalConfig, LLMConfig, VLMConfig
+from cutmaster.configuration.schema import (
+    AppConfig,
+    CandidateRetrievalConfig,
+    LLMConfig,
+    VLMConfig,
+)
 from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planner import (
+from cutmaster.prompting.planners import (
     CandidateRetrievalDetails,
     CandidateVisualScoringDetails,
 )
 from cutmaster.runtime.workflow_context import WorkflowContext
-from cutmaster.planner.scoring import _contact_sheet_data_url
-from cutmaster.planner.media import SegmentMediaReader
+from cutmaster.planners.tools.visual_scoring import _contact_sheet_data_url
+from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.runtime.progress import progress_bar, progress_iter
 from cutmaster.timecode import format_range, parse_range
 
@@ -441,7 +446,7 @@ def add_visual_features(
                 midpoint = len(subset) // 2
                 log_event(
                     "WARNING",
-                    "planner.candidate",
+                    "aster.timeline",
                     "fallback.apply",
                     "Image-inspection batch was rejected; splitting candidates",
                     operation=subset_operation,
@@ -466,7 +471,7 @@ def add_visual_features(
                 candidate = subset[0]
                 log_event(
                     "WARNING",
-                    "planner.candidate",
+                    "aster.timeline",
                     "fallback.apply",
                     "Image-inspection candidate was rejected; resampling one frame",
                     operation=subset_operation,
@@ -667,7 +672,7 @@ def retrieve_candidates(
                 }
                 log_event(
                     "WARNING",
-                    "planner.candidate",
+                    "aster.timeline",
                     "fallback.apply",
                     (
                         "Candidate scope lacks enough non-overlapping fixed-duration "
@@ -723,7 +728,7 @@ def retrieve_candidates(
             except Exception as exc:
                 log_event(
                     "WARNING",
-                    "planner.candidate",
+                    "aster.timeline",
                     "validation.reject",
                     "Slot candidate retrieval failed; expanding in the next round",
                     round=round_index,
@@ -743,7 +748,7 @@ def retrieve_candidates(
         llm_workers = max(1, min(config.max_concurrency, len(pending)))
         log_event(
             "INFO",
-            "planner.candidate",
+            "aster.timeline",
             "stage.progress",
             "Per-Slot candidate retrieval concurrency configured",
             round=round_index,
@@ -803,7 +808,7 @@ def retrieve_candidates(
                         continue
                     log_event(
                         "WARNING",
-                        "planner.candidate",
+                        "aster.timeline",
                         "validation.reject",
                         "Candidate rejected by local motion diagnostics",
                         round=round_index,
@@ -898,7 +903,7 @@ def retrieve_candidates(
                         )
                         log_event(
                             "WARNING",
-                            "planner.candidate",
+                            "aster.timeline",
                             "validation.reject",
                             "Candidate rejected after visual diagnostics",
                             round=round_index,
@@ -981,7 +986,7 @@ def retrieve_candidates(
             }
             log_event(
                 "WARNING",
-                "planner.slot",
+                "aster.arrangement",
                 "fallback.apply",
                 "Redesigning failed Slots in one targeted planning call",
                 round=round_index,
@@ -1025,7 +1030,7 @@ def retrieve_candidates(
             freshly_replanned.update(replanned_slot_ids)
             log_event(
                 "INFO",
-                "planner.slot",
+                "aster.arrangement",
                 "stage.complete",
                 "Targeted Slot replanning completed; retrying replanned Slots",
                 round=round_index,
@@ -1060,7 +1065,7 @@ def retrieve_candidates(
             )
         log_event(
             "ERROR",
-            "planner.candidate",
+            "aster.timeline",
             "validation.reject",
             "Candidate retrieval exhausted; continuing with smaller candidate pools",
             shortages=shortages,
@@ -1138,3 +1143,40 @@ def add_kinetic_features(
             list(executor.map(process, candidates))
     finally:
         progress.close()
+
+
+class TimelineScoutAgent:
+    """T agent: scout and validate candidate windows on the source timeline."""
+
+    def __init__(
+        self,
+        media: SegmentMediaReader,
+        config: AppConfig,
+        context: WorkflowContext,
+        *,
+        repair_slots: Callable[
+            [list[dict[str, Any]], list[dict[str, Any]]],
+            tuple[list[dict[str, Any]], set[str]],
+        ],
+    ) -> None:
+        self.media = media
+        self.config = config
+        self.context = context
+        self.repair_slots = repair_slots
+
+    def scout(
+        self,
+        slots: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        return retrieve_candidates(
+            slots,
+            self.media,
+            self.config.llm,
+            self.config.vlm,
+            self.config.candidate_retrieval,
+            self.context,
+            replan_slots=self.repair_slots,
+        )
+
+
+__all__ = ["TimelineScoutAgent"]

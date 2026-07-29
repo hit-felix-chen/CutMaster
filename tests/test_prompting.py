@@ -11,7 +11,7 @@ from cutmaster.prompting.analyser import (
     VideoSummaryDetails,
 )
 from cutmaster.prompting.core import response_template_from_schema
-from cutmaster.prompting.planner import (
+from cutmaster.prompting.planners import (
     DialogueAnchorSelectionDetails,
     SlotPlanningDetails,
 )
@@ -177,7 +177,7 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
     )
     slots_schema = package.response_contract.schema["properties"]["slots"]
 
-    assert package.operation == "Targeted edit slot replanning"
+    assert package.operation == "Arrangement Architect targeted repair"
     assert slots_schema["minItems"] == 2
     assert slots_schema["maxItems"] == 2
     assert {

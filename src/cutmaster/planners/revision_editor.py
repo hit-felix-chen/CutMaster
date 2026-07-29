@@ -4,11 +4,11 @@ import itertools
 from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import LLMConfig
+from cutmaster.configuration.schema import AppConfig, LLMConfig
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planner import ScriptReviewDetails
+from cutmaster.prompting.planners import ScriptReviewDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
-from cutmaster.planner.sequence_selection import _score_candidate_path, path_to_script
+from cutmaster.planners.edit_composer import _score_candidate_path, path_to_script
 from cutmaster.timecode import parse_range
 
 def _validate_patches(
@@ -196,3 +196,30 @@ def review_and_patch(
         rejected_patches=rejected_patches,
     )
     return patched, accepted
+
+
+class RevisionEditorAgent:
+    """R agent: review and revise a composition within its candidate space."""
+
+    def __init__(self, config: AppConfig, context: WorkflowContext) -> None:
+        self.config = config
+        self.context = context
+
+    def revise(
+        self,
+        slots: list[dict[str, Any]],
+        candidate_space: dict[str, list[dict[str, Any]]],
+        script: list[dict[str, Any]],
+        pairwise_scores: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return review_and_patch(
+            slots,
+            candidate_space,
+            script,
+            self.config.llm,
+            self.context,
+            pairwise_scores,
+        )
+
+
+__all__ = ["RevisionEditorAgent"]

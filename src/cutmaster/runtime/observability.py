@@ -30,17 +30,17 @@ VALID_LEVELS = frozenset(
 )
 VALID_COMPONENTS = frozenset(
     {
-        "orchestrator",
+        "cutmaster",
         "analyser",
         "dialogue",
         "dialogue_audio",
         "music",
-        "planner.slot",
-        "planner.anchor",
-        "planner.candidate",
-        "planner.media",
-        "planner.sequence",
-        "planner.review",
+        "aster.arrangement",
+        "aster.story",
+        "aster.timeline",
+        "aster.media",
+        "aster.composition",
+        "aster.revision",
         "script",
         "source_window",
         "renderer",
@@ -73,23 +73,31 @@ VALID_EVENTS = frozenset(
 
 _COMPONENT_BY_MODULE = {
     "analyser": "analyser",
+    "arrangement_architect": "aster.arrangement",
     "asr": "asr",
+    "aster_team": "cutmaster",
     "beats": "music",
-    "candidate_retriever": "planner.candidate",
-    "cli": "orchestrator",
+    "candidate_retriever": "aster.timeline",
+    "cli": "cutmaster",
+    "cutmaster": "cutmaster",
     "cuts": "source_window",
     "dialogue": "dialogue",
     "dialogue_audio": "dialogue_audio",
-    "dialogue_anchors": "planner.anchor",
+    "dialogue_anchors": "aster.story",
+    "edit_composer": "aster.composition",
     "llm": "model",
+    "material_analyst": "analyser",
     "music": "music",
-    "orchestrator": "orchestrator",
-    "media": "planner.media",
+    "media": "aster.media",
     "renderer": "renderer",
+    "revision_editor": "aster.revision",
     "script": "script",
-    "script_reviewer": "planner.review",
-    "sequence_selector": "planner.sequence",
-    "slot_planner": "planner.slot",
+    "script_reviewer": "aster.revision",
+    "segment_media": "aster.media",
+    "sequence_selector": "aster.composition",
+    "slot_planner": "aster.arrangement",
+    "story_editor": "aster.story",
+    "timeline_scout": "aster.timeline",
     "workflow_context": "model",
 }
 _INTERNAL_FIELDS = {"component", "event", "fields_suffix", "log_timestamp"}
@@ -104,7 +112,7 @@ _SECRET_PATTERNS = (
 
 def _infer_component(module_name: str) -> str:
     leaf = module_name.rsplit(".", 1)[-1]
-    return _COMPONENT_BY_MODULE.get(leaf, "orchestrator")
+    return _COMPONENT_BY_MODULE.get(leaf, "cutmaster")
 
 
 def _redact_text(value: str) -> str:

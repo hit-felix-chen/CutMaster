@@ -5,13 +5,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import VLMConfig
+from cutmaster.configuration.schema import AppConfig, VLMConfig
 from cutmaster.runtime.observability import log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planner import PairwiseScoringDetails
+from cutmaster.prompting.planners import PairwiseScoringDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
-from cutmaster.planner.scoring import _edge_contact_sheet_data_url, _normalize_likert_score
-from cutmaster.planner.media import SegmentMediaReader
+from cutmaster.planners.tools.visual_scoring import _edge_contact_sheet_data_url, _normalize_likert_score
+from cutmaster.planners.tools.segment_media import SegmentMediaReader
+from cutmaster.planners.tools.errors import NoFeasiblePathError
 from cutmaster.timecode import parse_range
 
 def _pair_key(previous_candidate_id: str, current_candidate_id: str) -> str:
@@ -143,7 +144,7 @@ def _score_pairwise_layer(
     worker_count = max(1, min(config.max_concurrency, len(jobs)))
     log_event(
         "INFO",
-        "planner.sequence",
+        "aster.composition",
         "stage.progress",
         "Lazy hard-cut scoring configured for current Beam layer",
         slot_id=current_slot["slot_id"],
@@ -299,12 +300,6 @@ def _pairwise(
     return float(pairwise_scores[key]["pairwise_score"])
 
 
-class NoFeasiblePathError(ValueError):
-    def __init__(self, slot_id: str, diagnostics: dict[str, Any]) -> None:
-        super().__init__(f"No chronological non-overlapping path remains at {slot_id}")
-        self.diagnostics = diagnostics
-
-
 def validate_chronological_path(
     slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
@@ -443,7 +438,7 @@ def select_paths(
         )
         log_event(
             "INFO",
-            "planner.sequence",
+            "aster.composition",
             "stage.progress",
             "Beam layer scored and pruned",
             **layer_diagnostics[-1],
@@ -527,3 +522,55 @@ def path_to_script(
             item["dialogue_anchor"] = dict(candidate["dialogue_anchor"])
         script.append(item)
     return script
+
+
+class EditComposerAgent:
+    """E agent: compose the globally coherent candidate sequence."""
+
+    def __init__(
+        self,
+        media: SegmentMediaReader,
+        video_path: Path,
+        config: AppConfig,
+        context: WorkflowContext,
+    ) -> None:
+        self.media = media
+        self.video_path = video_path
+        self.config = config
+        self.context = context
+
+    def validate(
+        self,
+        slots: list[dict[str, Any]],
+        candidate_space: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        validate_chronological_path(slots, candidate_space)
+
+    def compose(
+        self,
+        slots: list[dict[str, Any]],
+        candidate_space: dict[str, list[dict[str, Any]]],
+    ) -> tuple[
+        list[dict[str, Any]],
+        dict[str, Any],
+        dict[str, dict[str, Any]],
+    ]:
+        return select_paths(
+            self.media,
+            slots,
+            candidate_space,
+            self.config.beam_search.beam_width,
+            self.config.vlm,
+            self.context,
+            sample_frames=self.config.candidate_retrieval.visual_sample_frames,
+        )
+
+    def build_script(
+        self,
+        slots: list[dict[str, Any]],
+        selected_path: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return path_to_script(slots, selected_path, self.video_path)
+
+
+__all__ = ["EditComposerAgent", "NoFeasiblePathError"]

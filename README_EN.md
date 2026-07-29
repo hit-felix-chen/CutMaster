@@ -10,10 +10,11 @@
   <img src="assets/cutmaster_pipeline.png" alt="CutMaster method overview" width="100%">
 </p>
 
-<p align="center"><em>CutMaster: An agentic workflow for beat-aware long-video montage generation</em></p>
+<p align="center"><em>CutMaster: A MASTER multi-agent framework for narrative-, emotion-, and visual-aware video editing</em></p>
 
-CutMaster is a backend-only agentic workflow for turning one long source video, one BGM
-track, and a natural-language instruction into a frame-accurate music montage.
+CutMaster is a backend-only framework that organizes a **MASTER Editing Team**
+to turn one long source video, one BGM track, and a natural-language instruction
+into a frame-accurate music montage.
 It extracts and extends the production flow used by the Mashup-Benchmark
 NarratoAI adapter as an independent Python project.
 
@@ -24,6 +25,22 @@ multi-candidate retrieval, temporally dependent Beam Search, versioned script
 patching, source-window refinement against visual cuts, and deterministic
 FFmpeg rendering. Ordinary clips remain muted; only selected dialogue anchors
 contribute source audio.
+
+```text
+M     = Material Analyst
+ASTER = Arrangement Architect
+        Story Editor
+        Timeline Scout
+        Edit Composer
+        Revision Editor
+```
+
+M builds edit-independent Material Memory. The five-agent ASTER team then
+arranges pacing, anchors the story, scouts the source timeline, composes the
+sequence, and performs candidate-constrained revision. Semantic agents own
+editorial decisions; deterministic beat alignment, capacity checks,
+chronological constraints, and Beam Search keep decisions executable and
+auditable.
 
 ## Workflow
 
@@ -40,13 +57,13 @@ source video + BGM + instruction
   -> write a reusable video_description.json
   -> summarize the fully annotated video into a reusable video_summary.json
   -> analyze BGM beats, accents, energy curves, and sections into a structured profile
-  -> plan abstract edit slots from the request, music profile, story summary, and visual structure
-  -> globally adjust slot durations so every output boundary lands on a music accent
-  -> select a few original-dialogue anchors from the summary and each Slot's selected Segments
-  -> select several fixed-duration source windows from real Segment and Shot descriptions
+  -> let Arrangement Architect design Slots, pacing, and emotional progression
+  -> deterministically align Slot boundaries to music accents
+  -> let Story Editor select a few original-dialogue Story Anchors
+  -> let Timeline Scout build a validated Candidate Space for unanchored Slots
   -> measure candidate motion directly from the source video
-  -> compute both an independently best path and a temporally dependent Beam Search path
-  -> let the LLM review and patch the script only within the existing candidate pool
+  -> let Edit Composer lazily score transitions for surviving Beams and compose the path
+  -> let Revision Editor patch the script only within the established Candidate Space
   -> detect internal source cuts in every candidate window in parallel
        - discard near-duplicate frames before adaptive scene detection
        - preserve original source timestamps for every retained frame
@@ -470,38 +487,30 @@ Each `script_adapted.json` item adds:
 
 ## Package layout
 
-- `asr.py`: audio extraction, DashScope upload, asynchronous Fun-ASR polling,
-  diarized subtitle conversion, and ASR reuse.
-- `dialogue.py`: candidate passage construction, parallel LLM boundary
-  selection, sentence reconstruction, and cue-anchor preservation.
-- `llm.py`: OpenAI-compatible client and full JSON transaction retries.
-- `beats.py`: librosa onset-envelope and dynamic-programming beat tracking.
-- `music.py`: music energy, beats, accents, sections, and dynamic clip-duration
-  analysis.
-- `video_description.py`: strict Segment, Shot, scene, character, and dialogue
-  data contracts.
-- `prompting/`: the analyser/planner Prompt registry and executable JSON
-  response contracts used to generate response templates, validate structure,
-  and version model-call caches.
-- `analyser.py`: full-video Shot detection, dialogue Segment assembly,
-  source splitting, parallel single-Shot VLM annotation, and material caching.
-- `runtime/workflow_context.py`: lightweight shared analyser/planner artifacts
-  and script-version persistence without model-call history.
-- `planner.py`: planning facade that exposes and coordinates four decoupled stages.
-- `slot_planner.py`: abstract Slot planning from the request, music profile, and
-  structured source material.
-- `candidate_retriever.py`: candidate retrieval and visual subject/content grounding.
-- `planner/sequence_selection.py`: per-Slot concurrent Unary/Pairwise scoring and
-  chronological Beam Search over surviving path ends.
-- `script_reviewer.py`: candidate-constrained review and script patching.
-- `script.py`: selected-candidate duration adaptation, output-timeline
-  validation, and frame-grid quantization.
-- `cuts.py`: duplicate-frame-aware PySceneDetect analysis and parallel,
-  forward-only frame-level minimax source-window refinement.
-- `renderer.py`: encoder selection, frame-exact clip rendering, concatenation,
-  and final AAC BGM mixing.
-- `orchestrator.py`: end-to-end agentic orchestration, validation, timing, and result output.
-- `cli.py`: command-line entry point.
+- `cutmaster.py`: the only complete MASTER Editing Team entry point, including
+  input validation, stage timing, and result assembly.
+- `analyser/material_analyst.py`: the Material Analyst Agent that builds
+  reusable Material Memory.
+- `analyser/tools/`: ASR, dialogue reconstruction, caching, and other
+  non-agent material-analysis capabilities.
+- `planners/aster_team.py`: ASTER agent coordination and planning feedback loops.
+- `planners/arrangement_architect.py`: Slot, pacing, emotional, and narrative
+  arrangement.
+- `planners/story_editor.py`: original-dialogue Story Anchor selection.
+- `planners/timeline_scout.py`: candidate scouting, visual grounding, and
+  motion validation.
+- `planners/edit_composer.py`: chronology preflight, lazy VLM transition
+  scoring, and Beam Search composition.
+- `planners/revision_editor.py`: candidate-constrained final review and patching.
+- `planners/tools/`: internal media, scoring, error, and feedback tools used by
+  the ASTER agents.
+- `prompting/`: the Material Analyst/ASTER Prompt registry and executable JSON
+  response contracts.
+- `editing/`: source-window refinement, frame-exact rendering, concatenation,
+  and audio assembly.
+- `music/`: librosa music energy, beat, accent, and section analysis.
+- `runtime/`: model access, planning state, observability, progress, media
+  probing, and shared detection infrastructure.
 
 ## Scope and limitations
 

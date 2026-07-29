@@ -10,11 +10,22 @@
   <img src="assets/cutmaster_pipeline.png" alt="CutMaster 方法总览" width="100%">
 </p>
 
-<p align="center"><em>CutMaster：面向长视频混剪的 Agentic Workflow</em></p>
+<p align="center"><em>CutMaster：面向叙事、情绪与视觉质量协同优化的 MASTER 多智能体剪辑框架</em></p>
 
-CutMaster 是一个纯后端长视频混剪 Agentic Workflow。它接收一部长视频、一条背景音乐和一条自然语言指令，生成时间轴精确到帧的音乐混剪。项目从 Mashup-Benchmark 的 NarratoAI adapter 所使用的生产流程中提取并扩展而来，现已成为独立的 Python 项目。
+CutMaster 是一个纯后端长视频混剪框架。它组织一支 **MASTER Editing Team**，接收一部长视频、一条背景音乐和一条自然语言指令，生成时间轴精确到帧的音乐混剪。项目从 Mashup-Benchmark 的 NarratoAI adapter 所使用的生产流程中提取并扩展而来，现已成为独立的 Python 项目。
 
 CutMaster 当前支持可复用的全片 Shot/Segment 视觉分析、LLM 辅助台词重组、结构化音乐分析、抽象剪辑 Slot 规划、原声台词锚点、基于结构化视频描述的多候选检索、带时序依赖的 Beam Search、版本化脚本补丁、结合视觉切点的原片窗口优化，以及确定性的 FFmpeg 渲染。最终视频默认静音普通原片片段，只在模型选中的台词锚点混入对应原声。
+
+```text
+M     = Material Analyst
+ASTER = Arrangement Architect
+        Story Editor
+        Timeline Scout
+        Edit Composer
+        Revision Editor
+```
+
+M 建立与剪辑任务无关的素材记忆；ASTER 五智能体团队依次完成节奏编排、故事锚定、时间线选材、序列组接和最终修订。语义智能体负责编辑判断，节拍对齐、容量校验、时序约束和 Beam Search 等确定性工具保证结果可执行、可审计。
 
 ## 工作流
 
@@ -31,16 +42,16 @@ CutMaster 当前支持可复用的全片 Shot/Segment 视觉分析、LLM 辅助�
   -> 生成可跨剪辑任务复用的 video_description.json
   -> 在全部 Shot/Segment 标注完成后生成并缓存 video_summary.json
   -> 使用 librosa 生成节拍、重音、能量曲线和音乐段落的结构化画像
-  -> LLM 根据指令、音乐画像、剧情总结和无台词视觉描述规划可落地的剪辑 Slot
-  -> 全局调整 Slot 时长，将所有输出边界对齐到音乐重音
-  -> LLM 根据指令、剧情总结、所选 Segment 描述和真实台词选择少量原声锚点
-  -> LLM 只为未绑定锚点的 Slot 选择若干固定时长时间窗口
+  -> Arrangement Architect 根据指令、音乐画像和素材记忆编排剪辑 Slot
+  -> 确定性对齐 Slot 边界与音乐重音
+  -> Story Editor 选择少量原声 Story Anchor
+  -> Timeline Scout 为未绑定 Anchor 的 Slot 建立候选空间
   -> 从真实候选画面生成接触图，由多模态模型验证可见内容与主体出镜
-  -> 候选不足时定向补检；多轮后仍不足则带失败诊断重新规划
+  -> 候选不足时将诊断反馈给 Arrangement Architect，并在必要时刷新 Story Anchor
   -> 从真实视频计算候选片段运动强度
-  -> 并行评估每对相邻 Slot 的 3×3 候选首尾画面，缓存原片硬切连续性分数
-  -> 同时计算逐 Slot 独立最优路径和带时序/VLM 连续性依赖的 Beam Search 路径
-  -> LLM 在既有候选池内复核并以补丁方式修改脚本
+  -> Edit Composer 只为存活 Beam 延迟计算候选首尾画面连续性
+  -> 在严格原片时序约束下用 Beam Search 组接全局路径
+  -> Revision Editor 在既有候选空间内复核并以补丁方式修订脚本
   -> 并行检测每个候选窗口内的原片切点
        - 在自适应场景检测前过滤近重复帧
        - 所有保留帧继续使用原片时间戳
@@ -414,26 +425,20 @@ uv run cutmaster run \
 
 ## 包结构
 
-- `asr.py`：音频提取、DashScope 上传、异步 Fun-ASR 轮询、说话人字幕转换和 ASR 复用。
-- `dialogue.py`：候选段落构建、并行 LLM 边界选择、完整句子重组和字幕锚点保留。
-- `llm.py`：OpenAI-compatible 客户端和完整 JSON 事务重试。
-- `beats.py`：librosa onset envelope 和动态规划节拍跟踪。
-- `music.py`：音乐能量、节拍、重音、段落结构和动态片段时长分析。
-- `video_description.py`：Segment、Shot、场景、人物和对白的严格数据契约。
-- `prompting/`：统一注册 analyser/planner Prompt，由同一 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
-- `analyser.py`：全片 Shot 检测、对白 Segment 构造、素材切片、并行单-Shot VLM 标注和素材缓存。
-- `runtime/workflow_context.py`：analyser 与 planner 共用的轻量结构化产物和脚本版本持久化，不保存模型调用历史。
-- `planner.py`：规划门面，统一暴露并组织四个解耦阶段。
-- `slot_planner.py`：根据用户目标、音乐画像和结构化素材规划抽象 Slot。
-- `candidate_retriever.py`：检索候选片段，并用真实画面完成主体与内容核验。
-- `planner/sequence_selection.py`：逐 Slot 并发计算 Unary 与存活路径末尾所需的
-  Pairwise 分数，再执行严格时序 Beam Search。
-- `script_reviewer.py`：在候选池内复核和修补已选脚本。
-- `script.py`：选定候选的时长适配、输出时间轴校验和帧网格量化。
-- `cuts.py`：感知重复帧的 PySceneDetect 分析，以及并行、仅向后、帧级 minimax 原片窗口优化。
-- `renderer.py`：编码器选择、帧精确片段渲染、视频拼接和最终 AAC 背景音乐混合。
-- `orchestrator.py`：端到端 Agentic Workflow 编排、输入校验、阶段计时和结果输出。
-- `cli.py`：命令行入口。
+- `cutmaster.py`：完整 MASTER Editing Team 的唯一入口、输入校验、阶段计时和结果输出。
+- `analyser/material_analyst.py`：Material Analyst Agent，建立可复用的素材记忆。
+- `analyser/tools/`：ASR、台词重组、缓存等素材分析工具。
+- `planners/aster_team.py`：五个 ASTER Agent 的团队编排器和反馈闭环。
+- `planners/arrangement_architect.py`：Slot、节奏、情绪曲线和叙事结构编排。
+- `planners/story_editor.py`：关键原声 Story Anchor 选择。
+- `planners/timeline_scout.py`：候选窗口检索、视觉核验和运动分析。
+- `planners/edit_composer.py`：时序预检、延迟 VLM 转场评分和 Beam Search 组接。
+- `planners/revision_editor.py`：候选空间内的最终审片和脚本 Patch。
+- `planners/tools/`：规划智能体使用的媒体、评分、错误和反馈工具。
+- `prompting/`：统一注册 Material Analyst/ASTER Prompt，由 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
+- `editing/`：选定脚本的源窗口优化、帧精确渲染、视频拼接和音频混合。
+- `music/`：librosa 音乐能量、节拍、重音和段落分析。
+- `runtime/`：模型访问、规划状态、日志、进度、媒体探测和共享检测能力。
 
 ## 当前范围与限制
 

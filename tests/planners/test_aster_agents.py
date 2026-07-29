@@ -10,7 +10,7 @@ from cutmaster.configuration.schema import (
     LLMConfig,
     VLMConfig,
 )
-from cutmaster.planner.candidate_retrieval import (
+from cutmaster.planners.timeline_scout import (
     _candidate_segment_video_descriptions,
     _retrieval_segment_context,
     _validate_candidates,
@@ -18,9 +18,9 @@ from cutmaster.planner.candidate_retrieval import (
     _window_capacity,
     retrieve_candidates,
 )
-from cutmaster.planner.script_review import review_and_patch
-from cutmaster.planner.service import Planner
-from cutmaster.planner.sequence_selection import (
+from cutmaster.planners.revision_editor import review_and_patch
+from cutmaster.planners.aster_team import ASTERTeam
+from cutmaster.planners.edit_composer import (
     NoFeasiblePathError,
     _pair_key,
     _unary,
@@ -28,7 +28,7 @@ from cutmaster.planner.sequence_selection import (
     select_paths,
     validate_chronological_path,
 )
-from cutmaster.planner.slot_planning import (
+from cutmaster.planners.arrangement_architect import (
     _expand_degenerate_target_slot_ids,
     _globally_align_boundaries,
     _source_story_context,
@@ -94,14 +94,14 @@ def test_planner_warns_when_visual_shot_annotations_are_missing(
             "visual_annotation_failure": "data_inspection_failed",
         }
     )
-    planner = Planner.__new__(Planner)
+    planner = ASTERTeam.__new__(ASTERTeam)
     planner.context = SimpleNamespace(
         get_artifact=lambda name: (
             video_description if name == "video_description" else None
         )
     )
     monkeypatch.setattr(
-        "cutmaster.planner.service.log_event",
+        "cutmaster.planners.aster_team.log_event",
         lambda _level, _component, _event, _message, **fields: events.append(
             fields
         ),
@@ -520,7 +520,7 @@ def test_candidate_retrieval_does_not_request_replacements_for_fixed_anchor(
     context = WorkflowContext(tmp_path / "planning_history.json")
     context.set_artifact("video_description", _video_description())
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda *args, **kwargs: None,
     )
 
@@ -694,7 +694,7 @@ def test_beam_search_scores_only_edges_from_surviving_ends(
         }
 
     monkeypatch.setattr(
-        "cutmaster.planner.sequence_selection._score_pairwise_layer",
+        "cutmaster.planners.edit_composer._score_pairwise_layer",
         score_layer,
     )
 
@@ -776,7 +776,7 @@ def test_pairwise_vlm_scores_surviving_ends_in_parallel(
         slot["target_emotional_intensity"] = 0.5
         slot["planned_duration_sec"] = 4.0
     monkeypatch.setattr(
-        "cutmaster.planner.sequence_selection._edge_contact_sheet_data_url",
+        "cutmaster.planners.edit_composer._edge_contact_sheet_data_url",
         lambda *args, **kwargs: "data:image/jpeg;base64,stub",
     )
     barrier = threading.Barrier(2)
@@ -900,11 +900,11 @@ def test_current_slot_unary_and_pairwise_scoring_overlap(
         return {_pair_key("a", "b"): {"pairwise_score": 1.0}}
 
     monkeypatch.setattr(
-        "cutmaster.planner.sequence_selection._score_unary_candidates",
+        "cutmaster.planners.edit_composer._score_unary_candidates",
         score_unary,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.sequence_selection._score_pairwise_layer",
+        "cutmaster.planners.edit_composer._score_pairwise_layer",
         score_pairwise,
     )
 
@@ -1228,11 +1228,7 @@ def test_replanned_anchor_segment_triggers_global_anchor_refresh(
             "fixed_candidate": {"candidate_id": "new_anchor_2"},
         },
     ]
-    monkeypatch.setattr(
-        "cutmaster.planner.service.redesign_edit_slots",
-        lambda *_args, **_kwargs: (redesigned_slots, {"slot_01"}),
-    )
-    planner = Planner.__new__(Planner)
+    planner = ASTERTeam.__new__(ASTERTeam)
     planner.config = SimpleNamespace(
         llm=LLMConfig(model="test", base_url="", api_key="test")
     )
@@ -1243,7 +1239,10 @@ def test_replanned_anchor_segment_triggers_global_anchor_refresh(
         refresh_calls.append(slots)
         return refreshed_slots
 
-    planner.anchor_dialogue = refresh
+    planner.arrangement_architect = SimpleNamespace(
+        repair=lambda *_args: (redesigned_slots, {"slot_01"})
+    )
+    planner.story_editor = SimpleNamespace(anchor=refresh)
     result, reset_slot_ids = planner._redesign_slots_and_refresh_anchors(
         original_slots,
         [{"slot_id": "slot_01", "reason": "visually_static"}],
@@ -1357,12 +1356,12 @@ def test_candidate_retrieval_expands_without_calling_infeasible_round(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
 
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()
@@ -1420,7 +1419,7 @@ def test_candidate_retrieval_uses_four_planned_then_three_adjacent_rounds(
 
     monkeypatch.setattr(context, "call_prompt", fail_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval._retrieval_segment_context",
+        "cutmaster.planners.timeline_scout._retrieval_segment_context",
         record_scope,
     )
 
@@ -1546,7 +1545,7 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.log_event",
+        "cutmaster.planners.timeline_scout.log_event",
         lambda level, component, event, message, **fields: log_events.append(
             {
                 "level": level,
@@ -1558,12 +1557,12 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
         ),
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
 
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()
@@ -1608,7 +1607,7 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
     assert rejection_logs == [
         {
             "level": "WARNING",
-            "component": "planner.candidate",
+            "component": "aster.timeline",
             "event": "validation.reject",
             "message": "Candidate rejected after visual diagnostics",
             "round": 1,
@@ -1753,11 +1752,11 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         add_kinetic_features,
     )
 
@@ -1867,11 +1866,11 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()
@@ -1967,11 +1966,11 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()
@@ -2054,11 +2053,11 @@ def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()
@@ -2168,11 +2167,11 @@ def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_visual_features",
+        "cutmaster.planners.timeline_scout.add_visual_features",
         add_visual_features,
     )
     monkeypatch.setattr(
-        "cutmaster.planner.candidate_retrieval.add_kinetic_features",
+        "cutmaster.planners.timeline_scout.add_kinetic_features",
         lambda _video_path, pool, *_args: [
             candidate.update({"kinetic_energy": 0.5})
             for candidates in pool.values()

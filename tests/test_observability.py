@@ -17,11 +17,11 @@ from cutmaster.runtime.observability import (
 
 
 def test_dialogue_anchor_stage_is_part_of_log_taxonomy() -> None:
-    assert "planner.anchor" in VALID_COMPONENTS
+    assert "aster.story" in VALID_COMPONENTS
     assert "dialogue_audio" in VALID_COMPONENTS
     log_event(
         "INFO",
-        "planner.anchor",
+        "aster.story",
         "stage.start",
         "Dialogue anchor selection started",
     )
@@ -102,7 +102,7 @@ def test_console_colors_log_levels_but_file_stays_plain(
     monkeypatch.setattr(sys, "stderr", console)
     try:
         configure_logging(log_path, console_level="DEBUG")
-        log_event(level, "orchestrator", "stage.progress", "Colored event")
+        log_event(level, "cutmaster", "stage.progress", "Colored event")
         console_line = console.getvalue()
         file_line = log_path.read_text(encoding="utf-8")
     finally:
@@ -127,7 +127,7 @@ def test_non_tty_console_disables_colors(
     monkeypatch.setattr(sys, "stderr", console)
     try:
         configure_logging(log_path)
-        log_event("WARNING", "orchestrator", "stage.progress", "Plain event")
+        log_event("WARNING", "cutmaster", "stage.progress", "Plain event")
         console_line = console.getvalue()
     finally:
         logger.remove()
@@ -146,7 +146,7 @@ def test_explicit_console_color_survives_a_forwarding_pipe(
     monkeypatch.setattr(sys, "stderr", console)
     try:
         configure_logging(log_path, console_color=True)
-        log_event("INFO", "orchestrator", "stage.progress", "Forwarded event")
+        log_event("INFO", "cutmaster", "stage.progress", "Forwarded event")
         console_line = console.getvalue()
         file_line = log_path.read_text(encoding="utf-8")
     finally:

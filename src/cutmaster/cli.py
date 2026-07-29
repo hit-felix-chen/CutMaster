@@ -6,10 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from cutmaster import CutMaster
 from cutmaster.configuration.loader import load_config
 from cutmaster.contracts.workflow import RunRequest
 from cutmaster.runtime.observability import configure_logging, error_summary, log_event
-from cutmaster.orchestrator import run_orchestrator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,11 +63,11 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.overwrite,
     )
     try:
-        result = run_orchestrator(request, config)
+        result = CutMaster(config).run(request)
     except Exception as exc:
         log_event(
             "ERROR",
-            "orchestrator",
+            "cutmaster",
             "workflow.fail",
             "CutMaster workflow failed",
             error_type=type(exc).__name__,

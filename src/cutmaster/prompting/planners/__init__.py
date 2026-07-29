@@ -1,6 +1,6 @@
-"""Planner prompt task definitions."""
+"""Prompt contracts used by the ASTER planning agents."""
 
-from cutmaster.prompting.planner.tasks import (
+from cutmaster.prompting.planners.tasks import (
     CandidateRetrievalDetails,
     CandidateVisualScoringDetails,
     DialogueAnchorSelectionDetails,

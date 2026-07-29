@@ -6,7 +6,7 @@ from typing import Any
 
 import cv2
 
-from cutmaster.planner.media import SegmentMediaReader
+from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.timecode import parse_range
 
 def _sampled_contact_sheet_data_url(

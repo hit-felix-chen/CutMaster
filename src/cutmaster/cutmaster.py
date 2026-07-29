@@ -14,12 +14,12 @@ from cutmaster.music.analysis import (
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
 from cutmaster.runtime.observability import error_summary, log_event
-from cutmaster.planner import NoFeasiblePathError, Planner
+from cutmaster.planners import ASTERTeam, NoFeasiblePathError
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.editing.renderer import render_montage
 from cutmaster.runtime.media_probe import media_duration
 from cutmaster.editing.script import adapt_script, script_duration, write_script
-from cutmaster.analyser import analyse_video_material
+from cutmaster.analyser import MaterialAnalystAgent
 
 
 def _validate_request(request: RunRequest) -> None:
@@ -37,7 +37,7 @@ def _validate_request(request: RunRequest) -> None:
         raise ValueError("Maximum clip duration must be positive")
 
 
-def run_orchestrator(
+def _run_cutmaster(
     request: RunRequest,
     config: AppConfig,
 ) -> OrchestrationResult:
@@ -66,7 +66,7 @@ def run_orchestrator(
     started = time.monotonic()
     log_event(
         "INFO",
-        "orchestrator",
+        "cutmaster",
         "workflow.start",
         "CutMaster workflow started",
         source_video=request.video_path.name,
@@ -84,16 +84,10 @@ def run_orchestrator(
         "Video material analysis started",
         stage="video_material_analysis",
     )
-    material = analyse_video_material(
+    material = MaterialAnalystAgent(config).analyse(
         request.video_path,
         request.video_title or request.video_path.stem,
         request.subtitle_path,
-        config.material_analysis,
-        config.shot_detection,
-        config.asr,
-        config.shot_annotation,
-        config.llm,
-        config.vlm,
     )
     timings["video_material_analysis"] = time.monotonic() - stage_started
     log_event(
@@ -142,7 +136,7 @@ def run_orchestrator(
     )
     planning_context.set_artifact("video_description", material.video_description)
     planning_context.set_artifact("video_summary", material.video_summary)
-    planner = Planner(request.video_path, config, planning_context)
+    aster_team = ASTERTeam(request.video_path, config, planning_context)
 
     planning_seconds = 0.0
     dialogue_anchor_seconds = 0.0
@@ -160,13 +154,13 @@ def run_orchestrator(
         stage_started = time.monotonic()
         log_event(
             "INFO",
-            "planner.slot",
+            "aster.arrangement",
             "stage.start",
             "Slot planning started",
             stage="slot_planning",
             attempt=planning_attempt,
         )
-        slots = planner.plan_slots(request, music_profile)
+        slots = aster_team.arrange(request, music_profile)
         planning_context.set_artifact("edit_plan", slots)
         edit_plan_path.write_text(
             json.dumps(slots, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -175,7 +169,7 @@ def run_orchestrator(
         planning_seconds += elapsed
         log_event(
             "INFO",
-            "planner.slot",
+            "aster.arrangement",
             "stage.complete",
             "Slot planning completed",
             stage="slot_planning",
@@ -189,13 +183,13 @@ def run_orchestrator(
             stage_started = time.monotonic()
             log_event(
                 "INFO",
-                "planner.anchor",
+                "aster.story",
                 "stage.start",
                 "Original-dialogue anchor selection started",
                 stage=attempt_stage,
                 attempt=planning_attempt,
             )
-            slots = planner.anchor_dialogue(slots)
+            slots = aster_team.anchor_story(slots)
             planning_context.set_artifact("edit_plan", slots)
             edit_plan_path.write_text(
                 json.dumps(slots, ensure_ascii=False, indent=2) + "\n",
@@ -210,7 +204,7 @@ def run_orchestrator(
             dialogue_anchor_seconds += elapsed
             log_event(
                 "INFO",
-                "planner.anchor",
+                "aster.story",
                 "stage.complete",
                 "Original-dialogue anchor selection completed",
                 stage=attempt_stage,
@@ -223,14 +217,14 @@ def run_orchestrator(
             stage_started = time.monotonic()
             log_event(
                 "INFO",
-                "planner.candidate",
+                "aster.timeline",
                 "stage.start",
                 "Candidate retrieval started",
                 stage=attempt_stage,
                 attempt=planning_attempt,
                 slots=len(slots),
             )
-            candidate_pool = planner.retrieve(slots)
+            candidate_pool = aster_team.scout(slots)
             planning_context.set_artifact("edit_plan", slots)
             edit_plan_path.write_text(
                 json.dumps(slots, ensure_ascii=False, indent=2) + "\n",
@@ -245,7 +239,7 @@ def run_orchestrator(
             retrieval_seconds += elapsed
             log_event(
                 "INFO",
-                "planner.candidate",
+                "aster.timeline",
                 "stage.complete",
                 "Candidate retrieval completed",
                 stage=attempt_stage,
@@ -258,18 +252,18 @@ def run_orchestrator(
             stage_started = time.monotonic()
             log_event(
                 "INFO",
-                "planner.sequence",
+                "aster.composition",
                 "stage.start",
                 "Chronology preflight started",
                 stage=attempt_stage,
                 attempt=planning_attempt,
             )
-            planner.validate_sequence(slots, candidate_pool)
+            aster_team.validate_composition(slots, candidate_pool)
             elapsed = time.monotonic() - stage_started
             selection_seconds += elapsed
             log_event(
                 "INFO",
-                "planner.sequence",
+                "aster.composition",
                 "stage.complete",
                 "Chronology preflight completed",
                 stage=attempt_stage,
@@ -281,13 +275,13 @@ def run_orchestrator(
             stage_started = time.monotonic()
             log_event(
                 "INFO",
-                "planner.sequence",
+                "aster.composition",
                 "stage.start",
                 "Beam selection started",
                 stage=attempt_stage,
                 attempt=planning_attempt,
             )
-            beam_path, selection, pairwise_scores = planner.select(
+            beam_path, selection, pairwise_scores = aster_team.compose(
                 slots,
                 candidate_pool,
             )
@@ -295,7 +289,7 @@ def run_orchestrator(
             selection_seconds += elapsed
             log_event(
                 "INFO",
-                "planner.sequence",
+                "aster.composition",
                 "stage.complete",
                 "Beam selection completed",
                 stage=attempt_stage,
@@ -336,7 +330,7 @@ def run_orchestrator(
                 for slot in slots
                 if slot["slot_id"] in failed_slot_ids
             ]
-            planner.record_failure(
+            aster_team.record_failure(
                 attempt=planning_attempt,
                 error=str(exc),
                 diagnostics=diagnostics,
@@ -347,7 +341,7 @@ def run_orchestrator(
                 raise
             log_event(
                 "WARNING",
-                "planner.sequence",
+                "aster.composition",
                 "validation.reject",
                 "Planning attempt was infeasible; replanning with diagnostics",
                 stage=attempt_stage,
@@ -369,17 +363,17 @@ def run_orchestrator(
     stage_started = time.monotonic()
     log_event(
         "INFO",
-        "planner.review",
+        "aster.revision",
         "stage.start",
         "Script construction and review started",
         stage="sequence_selection_and_review",
         review_rounds=config.script_review.review_rounds,
     )
-    raw_script = planner.build_script(slots, beam_path)
+    raw_script = aster_team.build_script(slots, beam_path)
     planning_context.set_artifact("selection_diagnostics", selection)
     planning_context.record_script_version(raw_script, source="beam_search")
     for _ in range(config.script_review.review_rounds):
-        raw_script, _ = planner.review(
+        raw_script, _ = aster_team.revise(
             slots,
             candidate_pool,
             raw_script,
@@ -395,7 +389,7 @@ def run_orchestrator(
     )
     log_event(
         "INFO",
-        "planner.review",
+        "aster.revision",
         "stage.complete",
         "Script construction and review completed",
         stage="sequence_selection_and_review",
@@ -552,7 +546,7 @@ def run_orchestrator(
     result_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log_event(
         "SUCCESS",
-        "orchestrator",
+        "cutmaster",
         "workflow.complete",
         "CutMaster workflow completed",
         output_path=output_path,
@@ -561,3 +555,16 @@ def run_orchestrator(
         clips=result.num_adapted_clips,
     )
     return result
+
+
+class CutMaster:
+    """Public entry point for the complete MASTER editing team."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def run(self, request: RunRequest) -> OrchestrationResult:
+        return _run_cutmaster(request, self.config)
+
+
+__all__ = ["CutMaster"]

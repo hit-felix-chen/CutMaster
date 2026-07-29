@@ -2,7 +2,7 @@ import json
 import threading
 import time
 
-from cutmaster.analyser.dialogue import candidate_passages, parse_srt, postprocess_dialogues
+from cutmaster.analyser.tools.dialogue import candidate_passages, parse_srt, postprocess_dialogues
 from cutmaster.configuration.schema import LLMConfig
 
 SRT = """58
@@ -110,7 +110,7 @@ def test_dialogue_batches_run_in_parallel_and_preserve_cue_order(tmp_path, monke
             active -= 1
         return json.dumps({"merge_candidate_ids": ["candidate_001"]})
 
-    monkeypatch.setattr("cutmaster.analyser.dialogue._chunk_passages", two_chunks)
+    monkeypatch.setattr("cutmaster.analyser.tools.dialogue._chunk_passages", two_chunks)
     _, dialogue_json = postprocess_dialogues(
         source,
         tmp_path,

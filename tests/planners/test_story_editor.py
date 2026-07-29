@@ -1,7 +1,7 @@
 import pytest
 
 from cutmaster.configuration.schema import DialogueAnchorConfig, LLMConfig
-from cutmaster.planner.dialogue_anchors import (
+from cutmaster.planners.story_editor import (
     _dialogue_constraints_by_slot,
     _dialogues_by_segment,
     _eligible_source_segments,

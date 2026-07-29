@@ -1,14 +1,22 @@
 # CutMaster source architecture
 
-`src/cutmaster` is organized around workflow components and explicit shared
+`src/cutmaster` is organized around the MASTER Editing Team and explicit shared
 boundaries.
 
 ```text
 cutmaster/
-├── cli.py
-├── orchestrator.py
+├── cutmaster.py
 ├── analyser/
-├── planner/
+│   ├── material_analyst.py
+│   └── tools/
+├── planners/
+│   ├── aster_team.py
+│   ├── arrangement_architect.py
+│   ├── story_editor.py
+│   ├── timeline_scout.py
+│   ├── edit_composer.py
+│   ├── revision_editor.py
+│   └── tools/
 ├── editing/
 ├── music/
 ├── prompting/
@@ -18,19 +26,47 @@ cutmaster/
 └── timecode.py
 ```
 
+## MASTER Editing Team
+
+`CutMaster` is the only complete-workflow entry point. It coordinates:
+
+1. **M — Material Analyst**, which builds reusable Material Memory;
+2. **ASTER**, the five-agent planning team;
+3. deterministic source-window adaptation, audio preparation, and rendering.
+
+`ASTERTeam` is the only component that coordinates planning agents. The agents
+do not call each other directly:
+
+```text
+Arrangement Architect
+  -> Story Editor
+  -> Timeline Scout
+  -> Edit Composer
+  -> Revision Editor
+```
+
+Candidate shortages can send targeted diagnostics from Timeline Scout back to
+Arrangement Architect. If repaired Slots invalidate Story Anchors, ASTERTeam
+runs Story Editor again. An infeasible composition starts a new explicit
+planning revision.
+
 ## Responsibilities
 
-- `orchestrator.py` sequences the workflow. It does not implement analysis,
-  planning, or rendering algorithms.
-- `analyser/` turns a source video into reusable subtitle, dialogue, Shot,
-  Segment, and structured-description artifacts.
-- `planner/` owns slot planning, candidate retrieval, pairwise scoring,
-  sequence selection, and script review.
-- `editing/` owns edit-script adaptation, source-window optimization, FFmpeg
-  rendering, and audio assembly.
-- `music/` owns beat and music-profile analysis.
+- `cutmaster.py` owns complete-workflow coordination, validation, timing, and
+  final result assembly.
+- `analyser/material_analyst.py` is the M agent and the only public material
+  analysis entry point.
+- `analyser/tools/` contains ASR, dialogue reconstruction, caching, and other
+  non-agent material-analysis capabilities.
+- `planners/aster_team.py` coordinates the ASTER agents and their feedback
+  loops.
+- `planners/*.py`, excluding `aster_team.py`, each define one ASTER agent.
+- `planners/tools/` contains deterministic media access, scoring, validation,
+  search, and planning-feedback capabilities.
+- `editing/` owns post-planning script adaptation, source-window optimization,
+  FFmpeg rendering, and audio assembly.
+- `music/` owns reusable beat and music-profile analysis.
 - `prompting/` is the only prompt-definition and response-contract registry.
-  Prompt definitions are grouped by the workflow stage that requests them.
 - `configuration/` defines and loads application configuration.
 - `contracts/` contains data passed across workflow stages.
 - `runtime/` contains model access, workflow context, observability, progress,
@@ -39,22 +75,36 @@ cutmaster/
 ## Dependency direction
 
 ```text
-CLI -> Orchestrator -> Analyser / Planner / Editing / Music
+CLI -> CutMaster -> Material Analyst / ASTERTeam / Editing / Music
 
-Feature packages -> Configuration / Contracts / Prompting / Runtime
-Prompting        -> Contracts
-Runtime          -> Configuration / Prompting
+ASTERTeam -> ASTER agents
+Agents    -> their tools / Configuration / Contracts / Prompting / Runtime
+Prompting -> Contracts
+Runtime   -> Configuration / Prompting
 ```
 
-Feature packages must not import implementation details from sibling feature
-packages. Shared behavior belongs in `runtime/`, and shared data belongs in
-`contracts/`.
+An agent may use tools in its own feature package, but must not import another
+agent's private implementation. Cross-agent work is routed through ASTERTeam.
+Shared behavior belongs in `runtime/` or a feature's `tools/`; shared data
+belongs in `contracts/`.
 
 ## Public APIs
 
-Package `__init__.py` files expose only stable workflow entry points. Tests and
-internal modules that need implementation helpers import their defining module
-directly; private helpers are not re-exported as compatibility aliases.
+Package `__init__.py` files expose only stable team and agent entry points:
 
-Avoid generic modules such as `common.py`, `helpers.py`, or `utils.py`. New code
-should be placed in a module whose name describes its responsibility.
+```python
+from cutmaster import CutMaster
+from cutmaster.analyser import MaterialAnalystAgent
+from cutmaster.planners import (
+    ASTERTeam,
+    ArrangementArchitectAgent,
+    StoryEditorAgent,
+    TimelineScoutAgent,
+    EditComposerAgent,
+    RevisionEditorAgent,
+)
+```
+
+Tools are internal and are not re-exported as compatibility aliases. Avoid
+generic modules such as `common.py`, `helpers.py`, or `utils.py`; every tool
+module must name its editorial or media responsibility.

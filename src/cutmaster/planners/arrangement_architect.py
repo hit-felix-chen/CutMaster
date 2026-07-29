@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from cutmaster.configuration.schema import LLMConfig
+from cutmaster.configuration.schema import AppConfig, LLMConfig
 from cutmaster.contracts.workflow import RunRequest
 from cutmaster.music.analysis import compact_music_profile
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planner import SlotPlanningDetails
+from cutmaster.prompting.planners import SlotPlanningDetails
 from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.workflow_context import WorkflowContext
 
@@ -550,7 +550,7 @@ def redesign_edit_slots(
     if expanded_slot_ids != target_slot_ids:
         log_event(
             "WARNING",
-            "planner.slot",
+            "aster.arrangement",
             "fallback.apply",
             "Expanded a one-Segment retry interval to source-contiguous Slots",
             failed_slot_ids=sorted(target_slot_ids),
@@ -741,3 +741,48 @@ def _globally_align_boundaries(
     if not feasible:
         raise ValueError("No musical-boundary path leaves room for the final clip")
     return min(feasible, key=lambda state: state[0])[1]
+
+
+class ArrangementArchitectAgent:
+    """A agent: arrange Slots, pacing, emotion, and narrative structure."""
+
+    def __init__(self, config: AppConfig, context: WorkflowContext) -> None:
+        self.config = config
+        self.context = context
+
+    def arrange(
+        self,
+        request: RunRequest,
+        music_profile: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        slots = plan_edit_slots(
+            request,
+            music_profile,
+            self.config.llm,
+            self.context,
+            target_clip_duration_sec=(
+                self.config.slot_planning.target_clip_duration_sec
+            ),
+        )
+        return align_slots_to_music(
+            slots,
+            music_profile,
+            request.target_output_length_sec,
+            self.config.render.fps,
+            self.config.slot_planning.target_clip_duration_sec,
+        )
+
+    def repair(
+        self,
+        slots: list[dict[str, Any]],
+        failures: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        return redesign_edit_slots(
+            slots,
+            failures,
+            self.config.llm,
+            self.context,
+        )
+
+
+__all__ = ["ArrangementArchitectAgent"]

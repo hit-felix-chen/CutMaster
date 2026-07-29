@@ -13,7 +13,7 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 ```text
 2026-07-25 14:20:31.482+08:00 | INFO     | analyser | stage.start | duration_sec=7668.400 stage=shot_detection | Full-video Shot detection started
 2026-07-25 14:22:08.104+08:00 | INFO     | model | model.complete | elapsed_sec=3.412 modality=text_and_images model=qwen3-vl-plus operation=shot_annotation response_chars=1248 | Model request completed
-2026-07-25 14:24:18.991+08:00 | WARNING  | planner.sequence | validation.reject | attempt=1 error_type=NoFeasiblePathError failed_slots=["slot_04"] stage=chronology_preflight | Planning attempt was infeasible; replanning with diagnostics
+2026-07-25 14:24:18.991+08:00 | WARNING  | aster.composition | validation.reject | attempt=1 error_type=NoFeasiblePathError failed_slots=["slot_04"] stage=chronology_preflight | Planning attempt was infeasible; replanning with diagnostics
 ```
 
 要求：
@@ -41,15 +41,15 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 固定使用以下组件名：
 
 ```text
-orchestrator
+cutmaster
 analyser
 dialogue
 music
-planner.slot
-planner.anchor
-planner.candidate
-planner.sequence
-planner.review
+aster.arrangement
+aster.story
+aster.timeline
+aster.composition
+aster.revision
 script
 source_window
 renderer

@@ -11,8 +11,8 @@ from typing import Any
 
 import cv2
 
-from cutmaster.analyser.asr import prepare_subtitles
-from cutmaster.analyser.cache import (
+from cutmaster.analyser.tools.asr import prepare_subtitles
+from cutmaster.analyser.tools.cache import (
     ANALYSIS_SCHEMA_VERSION,
     dialogue_checkpoint as _dialogue_checkpoint,
     material_directory as _material_directory,
@@ -21,10 +21,11 @@ from cutmaster.analyser.cache import (
     valid_shot_checkpoint as _valid_shot_checkpoint,
     write_json_checkpoint as _write_json_checkpoint,
 )
-from cutmaster.analyser.contracts import MaterialAnalysisResult
+from cutmaster.contracts.material import MaterialAnalysisResult
 from cutmaster.runtime.shot_detection import detect_source_cuts
-from cutmaster.analyser.dialogue import postprocess_dialogues
+from cutmaster.analyser.tools.dialogue import postprocess_dialogues
 from cutmaster.configuration.schema import (
+    AppConfig,
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
@@ -1222,7 +1223,7 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     )
 
 
-def analyse_video_material(
+def _analyse_video_material(
     video_path: Path,
     video_title: str,
     provided_subtitle: Path | None,
@@ -1606,3 +1607,31 @@ def analyse_video_material(
         video_description=description_dict,
         video_summary=video_summary,
     )
+
+
+class MaterialAnalystAgent:
+    """M agent: build reusable material memory from long-form source footage."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+    def analyse(
+        self,
+        video_path: Path,
+        video_title: str,
+        provided_subtitle: Path | None,
+    ) -> MaterialAnalysisResult:
+        return _analyse_video_material(
+            video_path,
+            video_title,
+            provided_subtitle,
+            self.config.material_analysis,
+            self.config.shot_detection,
+            self.config.asr,
+            self.config.shot_annotation,
+            self.config.llm,
+            self.config.vlm,
+        )
+
+
+__all__ = ["MaterialAnalystAgent"]

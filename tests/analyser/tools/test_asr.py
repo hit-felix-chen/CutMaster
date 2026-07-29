@@ -1,4 +1,4 @@
-from cutmaster.analyser.asr import _to_srt
+from cutmaster.analyser.tools.asr import _to_srt
 from cutmaster.configuration.schema import ASRConfig
 
 

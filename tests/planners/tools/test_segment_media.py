@@ -3,7 +3,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from cutmaster.planner.media import SegmentMediaReader
+from cutmaster.planners.tools.segment_media import SegmentMediaReader
 
 
 def _video_description(first_clip: Path, second_clip: Path) -> dict:
@@ -51,7 +51,7 @@ def test_segment_media_reader_maps_absolute_times_to_cached_clips(
         def release(self) -> None:
             return None
 
-    monkeypatch.setattr("cutmaster.planner.media.cv2.VideoCapture", Capture)
+    monkeypatch.setattr("cutmaster.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         tmp_path / "source.mp4",
         _video_description(first_clip, second_clip),
@@ -97,8 +97,8 @@ def test_segment_media_reader_rebuilds_missing_cache(
         def release(self) -> None:
             return None
 
-    monkeypatch.setattr("cutmaster.planner.media.subprocess.run", run)
-    monkeypatch.setattr("cutmaster.planner.media.cv2.VideoCapture", Capture)
+    monkeypatch.setattr("cutmaster.planners.tools.segment_media.subprocess.run", run)
+    monkeypatch.setattr("cutmaster.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         source_video,
         _video_description(first_clip, second_clip),
@@ -152,7 +152,7 @@ def test_segment_media_reader_clamps_tail_sample_to_last_video_frame(
         def release(self) -> None:
             return None
 
-    monkeypatch.setattr("cutmaster.planner.media.cv2.VideoCapture", Capture)
+    monkeypatch.setattr("cutmaster.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         tmp_path / "source.mp4",
         _video_description(first_clip, second_clip),

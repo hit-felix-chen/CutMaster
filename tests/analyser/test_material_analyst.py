@@ -12,7 +12,7 @@ from cutmaster.configuration.schema import (
     ShotDetectionConfig,
     VLMConfig,
 )
-from cutmaster.analyser.service import (
+from cutmaster.analyser.material_analyst import (
     _annotate_segments,
     _detect_full_video_shots,
     _group_dialogue,
@@ -22,7 +22,7 @@ from cutmaster.analyser.service import (
     _video_summary_context,
     _validate_dialogue_segments,
     _validate_shot_annotation,
-    analyse_video_material,
+    _analyse_video_material,
 )
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import ShotAnnotationDetails
@@ -122,7 +122,7 @@ def test_shot_sampling_repeats_last_decodable_frame(monkeypatch, tmp_path) -> No
 
     capture = FakeCapture()
     monkeypatch.setattr(
-        "cutmaster.analyser.service.cv2.VideoCapture",
+        "cutmaster.analyser.material_analyst.cv2.VideoCapture",
         lambda _path: capture,
     )
 
@@ -283,7 +283,7 @@ def test_shot_annotation_normalization_preserves_shot_id() -> None:
 
 def test_full_video_shot_detection_builds_complete_boundary_partition(monkeypatch) -> None:
     monkeypatch.setattr(
-        "cutmaster.analyser.service.detect_source_cuts",
+        "cutmaster.analyser.material_analyst.detect_source_cuts",
         lambda *_args, **_kwargs: ([1.25, 3.5], 24.0),
     )
     shots, fps = _detect_full_video_shots(
@@ -463,7 +463,7 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
         )
 
     monkeypatch.setattr(
-        "cutmaster.analyser.service._sample_shot_frames",
+        "cutmaster.analyser.material_analyst._sample_shot_frames",
         lambda *_args: (
             ["data:image/jpeg;base64,stub"] * 5,
             [0.1, 0.3, 0.5, 0.7, 0.9],
@@ -598,7 +598,7 @@ def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
         "shots": [shot],
     }
     monkeypatch.setattr(
-        "cutmaster.analyser.service._sample_shot_frames",
+        "cutmaster.analyser.material_analyst._sample_shot_frames",
         lambda *_args: (
             ["data:image/jpeg;base64,stub"] * 5,
             [0.1, 0.3, 0.5, 0.7, 0.9],
@@ -659,7 +659,7 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
     detection_calls = 0
 
     monkeypatch.setattr(
-        "cutmaster.analyser.service.probe_media",
+        "cutmaster.analyser.material_analyst.probe_media",
             lambda _path: {
                 "duration": 2.0,
                 "fps": 24.0,
@@ -674,9 +674,9 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
         detection_calls += 1
         return _shots(2), 24.0
 
-    monkeypatch.setattr("cutmaster.analyser.service._detect_full_video_shots", detect)
+    monkeypatch.setattr("cutmaster.analyser.material_analyst._detect_full_video_shots", detect)
     monkeypatch.setattr(
-        "cutmaster.analyser.service.prepare_subtitles",
+        "cutmaster.analyser.material_analyst.prepare_subtitles",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("stop after shot detection")
         ),
@@ -694,9 +694,9 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
     }
 
     with pytest.raises(RuntimeError, match="stop after shot detection"):
-        analyse_video_material(**kwargs)
+        _analyse_video_material(**kwargs)
     with pytest.raises(RuntimeError, match="stop after shot detection"):
-        analyse_video_material(**kwargs)
+        _analyse_video_material(**kwargs)
 
     assert detection_calls == 1
     assert list((tmp_path / "materials").glob("**/shots.json"))

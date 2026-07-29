@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from cutmaster.configuration.schema import DialogueAnchorConfig, LLMConfig
+from cutmaster.configuration.schema import AppConfig, DialogueAnchorConfig, LLMConfig
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planner import DialogueAnchorSelectionDetails
+from cutmaster.prompting.planners import DialogueAnchorSelectionDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.timecode import format_range, parse_range
 
@@ -580,4 +580,23 @@ def select_dialogue_anchors(
     return result
 
 
-__all__ = ["select_dialogue_anchors"]
+class StoryEditorAgent:
+    """S agent: anchor the requested story with selected original dialogue."""
+
+    def __init__(self, config: AppConfig, context: WorkflowContext) -> None:
+        self.config = config
+        self.context = context
+
+    def anchor(
+        self,
+        slots: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return select_dialogue_anchors(
+            slots,
+            self.config.llm,
+            self.config.dialogue_anchors,
+            self.context,
+        )
+
+
+__all__ = ["StoryEditorAgent"]

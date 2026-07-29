@@ -276,13 +276,14 @@ requires them.
         task=PromptTask.SLOT_PLANNING,
         prompt_version="3.3",
         operation=(
-            "Targeted edit slot replanning"
+            "Arrangement Architect targeted repair"
             if targeted
-            else "Edit slot planning"
+            else "Arrangement Architect Slot design"
         ),
         system_prompt=(
-            "You are the planning component of a professional video editor. Plan an output "
-            "timeline but do not select source timestamps. Return strict JSON only."
+            "You are CutMaster's Arrangement Architect. Arrange the output timeline, pacing, "
+            "emotional progression, and narrative structure, but do not select source "
+            "timestamps. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -495,12 +496,12 @@ title cards, and speech over unrelated imagery.
         stage=PromptStage.PLANNER,
         task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
         prompt_version="4.1",
-        operation="Original dialogue anchor selection",
+        operation="Story Editor original-dialogue anchoring",
         system_prompt=(
-            "You select a few meaningful, coherent original-speech passages that directly serve "
-            "the user's requested story. Each passage may be one complete line or multiple "
-            "consecutive lines. Every passage starts with its corresponding source picture as a "
-            "start-aligned L-cut. Return strict JSON only."
+            "You are CutMaster's Story Editor. Select a few meaningful, coherent original-speech "
+            "passages that directly anchor the user's requested story. Each passage may be one "
+            "complete line or multiple consecutive lines. Every passage starts with its "
+            "corresponding source picture as a start-aligned L-cut. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -588,10 +589,10 @@ that must not be selected again.
         prompt_version="2.0",
         operation=details.operation,
         system_prompt=(
-            "You retrieve real source-video passages from a structured VideoDescription whose "
-            "Segment timeline and Shot annotations are authoritative. Choose precise fixed-"
-            "duration windows within that timeline; never invent timestamps, visuals, or "
-            "dialogue. Return strict JSON only."
+            "You are CutMaster's Timeline Scout. Scout real source-video passages from a "
+            "structured VideoDescription whose Segment timeline and Shot annotations are "
+            "authoritative. Choose precise fixed-duration windows within that timeline; never "
+            "invent timestamps, visuals, or dialogue. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -710,10 +711,10 @@ Visual Slot Relevance Likert:
         prompt_version="2.0",
         operation=details.operation,
         system_prompt=(
-            "You inspect source-video contact sheets for a professional editor. Resolve the "
+            "As CutMaster's Timeline Scout, inspect source-video contact sheets and resolve the "
             "requested subject from the maintained request and source title, then judge whether "
-            "that subject and action are actually visible. Identity must come from pixels, never "
-            "dialogue or assumptions. Return strict JSON only."
+            "that subject and action are actually visible. Identity must come from pixels, "
+            "never dialogue or assumptions. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -810,10 +811,10 @@ Scores:
         prompt_version="1.0",
         operation=details.operation,
         system_prompt=(
-            "You evaluate whether two real source-video fragments form a coherent direct hard "
-            "cut. Judge the visible tail of the first against the visible head of the second. "
-            "Do not assume slot text is visible fact and do not rely on transition effects. "
-            "Return strict JSON only."
+            "As CutMaster's Edit Composer, evaluate whether two real source-video fragments form "
+            "a coherent direct hard cut. Judge the visible tail of the first against the visible "
+            "head of the second. Do not assume Slot text is visible fact and do not rely on "
+            "transition effects. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -880,10 +881,11 @@ candidate IDs supplied in the maintained candidate pool."""
         stage=PromptStage.PLANNER,
         task=PromptTask.SCRIPT_REVIEW,
         prompt_version="1.0",
-        operation="Script patch review",
+        operation="Revision Editor script review",
         system_prompt=(
-            "You review a structured edit timeline and return minimal patch operations. Use only "
-            "candidate IDs supplied in the maintained context. Return strict JSON only."
+            "You are CutMaster's Revision Editor. Review the composed edit and return minimal "
+            "patch operations. Use only candidate IDs supplied in the maintained context. "
+            "Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,

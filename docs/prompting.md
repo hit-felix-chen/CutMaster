@@ -86,7 +86,7 @@ result = workflow_context.call_prompt(
 
 ```text
 src/cutmaster/prompting/analyser/tasks.py
-src/cutmaster/prompting/planner/tasks.py
+src/cutmaster/prompting/planners/tasks.py
 ```
 
 注册表会拒绝重复的 stage/task，并在构造结果与请求键不一致时立即失败。

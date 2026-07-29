@@ -59,7 +59,7 @@ class SegmentMediaReader:
         temporary_path.unlink(missing_ok=True)
         log_event(
             "WARNING",
-            "planner.media",
+            "aster.media",
             "cache.miss",
             "Segment video cache missing or unreadable; rebuilding from source",
             segment_id=segment["segment_id"],
@@ -101,7 +101,7 @@ class SegmentMediaReader:
         temporary_path.replace(clip_path)
         log_event(
             "INFO",
-            "planner.media",
+            "aster.media",
             "checkpoint.write",
             "Segment video cache rebuilt",
             segment_id=segment["segment_id"],
@@ -191,7 +191,7 @@ class SegmentMediaReader:
                 return decoded
             log_event(
                 "WARNING",
-                "planner.media",
+                "aster.media",
                 "validation.reject",
                 "Segment cache could not decode requested frames",
                 segment_id=segment["segment_id"],
