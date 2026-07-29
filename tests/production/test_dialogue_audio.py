@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from cutmaster.configuration.schema import DialogueAnchorConfig
-from cutmaster.editing.dialogue_audio import _anchor_specs, prepare_dialogue_audio
+from cutmaster.production.dialogue_audio import _anchor_specs, prepare_dialogue_audio
 
 
 def test_anchor_specs_add_padding_and_preserve_exact_speech_offset() -> None:

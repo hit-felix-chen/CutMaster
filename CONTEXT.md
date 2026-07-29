@@ -71,6 +71,16 @@ The validated set of source-timeline alternatives from which the final visual
 choice for each unanchored Slot may be made.
 _Avoid_: Search results, retrieved clips
 
+**Music Profile**:
+A request-specific account of the BGM's beats, accents, energy, and sections
+used by the **Arrangement Architect** to shape pacing.
+_Avoid_: Material Memory, audio preprocessing
+
+**Production**:
+The deterministic realization of a revised edit through source-window
+adaptation, dialogue preparation, encoding, assembly, and final audio mixing.
+_Avoid_: Editing Agent, planning tool
+
 ## Flagged ambiguities
 
 **Editor**:

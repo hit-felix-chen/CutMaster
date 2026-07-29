@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from cutmaster.configuration.schema import DialogueAnchorConfig, RenderConfig
-from cutmaster.editing.renderer import (
+from cutmaster.production.renderer import (
     build_final_audio_filter,
     concatenate_clips,
     mix_bgm,
@@ -55,7 +55,7 @@ def test_mix_bgm_uses_prepared_vocal_stem_without_source_seek(
 ) -> None:
     commands = []
     monkeypatch.setattr(
-        "cutmaster.editing.renderer.run_media_command",
+        "cutmaster.production.renderer.run_media_command",
         lambda command: commands.append(command),
     )
     prepared = tmp_path / "anchor.wav"

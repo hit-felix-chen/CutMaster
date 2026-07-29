@@ -87,6 +87,7 @@ _COMPONENT_BY_MODULE = {
     "edit_composer": "aster.composition",
     "llm": "model",
     "material_analyst": "analyser",
+    "music_analysis": "music",
     "music": "music",
     "media": "aster.media",
     "renderer": "renderer",

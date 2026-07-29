@@ -4,21 +4,16 @@ import json
 import shutil
 import time
 
-from cutmaster.editing.source_windows import optimize_script_source_windows
-from cutmaster.editing.dialogue_audio import prepare_dialogue_audio
-from cutmaster.music.analysis import (
-    analyze_music,
-    compact_music_profile,
-    write_music_profile,
-)
+from cutmaster.production.source_windows import optimize_script_source_windows
+from cutmaster.production.dialogue_audio import prepare_dialogue_audio
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
 from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.planners import ASTERTeam, NoFeasiblePathError
 from cutmaster.runtime.workflow_context import WorkflowContext
-from cutmaster.editing.renderer import render_montage
+from cutmaster.production.renderer import render_montage
 from cutmaster.runtime.media_probe import media_duration
-from cutmaster.editing.script import adapt_script, script_duration, write_script
+from cutmaster.production.script import adapt_script, script_duration, write_script
 from cutmaster.analyser import MaterialAnalystAgent
 
 
@@ -106,6 +101,14 @@ def _run_cutmaster(
     shutil.copy2(material.processed_subtitle, processed_subtitle_path)
     shutil.copy2(material.dialogues_json, dialogues_json_path)
 
+    planning_context = WorkflowContext(
+        planning_history_path,
+        model_call_tree_path=planning_calls_path,
+    )
+    planning_context.set_artifact("video_description", material.video_description)
+    planning_context.set_artifact("video_summary", material.video_summary)
+    aster_team = ASTERTeam(request.video_path, config, planning_context)
+
     stage_started = time.monotonic()
     log_event(
         "INFO",
@@ -114,8 +117,11 @@ def _run_cutmaster(
         "Music analysis started",
         stage="music_analysis",
     )
-    music_profile = analyze_music(request.audio_path, request.target_output_length_sec)
-    write_music_profile(music_profile_path, music_profile)
+    music_profile = aster_team.profile_music(
+        request.audio_path,
+        request.target_output_length_sec,
+        music_profile_path,
+    )
     timings["music_analysis"] = time.monotonic() - stage_started
     log_event(
         "INFO",
@@ -125,18 +131,6 @@ def _run_cutmaster(
         stage="music_analysis",
         elapsed_sec=timings["music_analysis"],
     )
-
-    planning_context = WorkflowContext(
-        planning_history_path,
-        model_call_tree_path=planning_calls_path,
-    )
-    planning_context.set_artifact(
-        "music_profile",
-        compact_music_profile(music_profile),
-    )
-    planning_context.set_artifact("video_description", material.video_description)
-    planning_context.set_artifact("video_summary", material.video_summary)
-    aster_team = ASTERTeam(request.video_path, config, planning_context)
 
     planning_seconds = 0.0
     dialogue_anchor_seconds = 0.0

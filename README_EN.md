@@ -506,9 +506,10 @@ Each `script_adapted.json` item adds:
   the ASTER agents.
 - `prompting/`: the Material Analyst/ASTER Prompt registry and executable JSON
   response contracts.
-- `editing/`: source-window refinement, frame-exact rendering, concatenation,
-  and audio assembly.
-- `music/`: librosa music energy, beat, accent, and section analysis.
+- `planners/tools/music_analysis.py`: librosa music energy, beat, accent, and
+  section analysis owned through Arrangement Architect.
+- `production/`: source-window refinement, frame-exact rendering,
+  concatenation, and audio assembly.
 - `runtime/`: model access, planning state, observability, progress, media
   probing, and shared detection infrastructure.
 

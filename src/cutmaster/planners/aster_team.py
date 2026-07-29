@@ -53,6 +53,18 @@ class ASTERTeam:
             repair_slots=self._redesign_slots_and_refresh_anchors,
         )
 
+    def profile_music(
+        self,
+        audio_path: Path,
+        target_duration_sec: float,
+        output_path: Path,
+    ) -> dict[str, Any]:
+        return self.arrangement_architect.profile_music(
+            audio_path,
+            target_duration_sec,
+            output_path,
+        )
+
     def _warn_about_missing_shot_annotations(self) -> None:
         video_description = self.context.get_artifact("video_description") or {}
         missing = [

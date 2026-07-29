@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, LLMConfig
 from cutmaster.contracts.workflow import RunRequest
-from cutmaster.music.analysis import compact_music_profile
+from cutmaster.planners.tools.music_analysis import (
+    analyze_music,
+    compact_music_profile,
+    write_music_profile,
+)
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.planners import SlotPlanningDetails
 from cutmaster.runtime.observability import log_event
@@ -749,6 +754,20 @@ class ArrangementArchitectAgent:
     def __init__(self, config: AppConfig, context: WorkflowContext) -> None:
         self.config = config
         self.context = context
+
+    def profile_music(
+        self,
+        audio_path: Path,
+        target_duration_sec: float,
+        output_path: Path,
+    ) -> dict[str, Any]:
+        profile = analyze_music(audio_path, target_duration_sec)
+        write_music_profile(output_path, profile)
+        self.context.set_artifact(
+            "music_profile",
+            compact_music_profile(profile),
+        )
+        return profile
 
     def arrange(
         self,

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import DialogueAnchorConfig, RenderConfig
-from cutmaster.editing.ffmpeg import (
+from cutmaster.production.ffmpeg import (
     RenderError,
     encoder_args,
     run_media_command,

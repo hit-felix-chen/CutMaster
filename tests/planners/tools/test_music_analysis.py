@@ -1,6 +1,6 @@
 import numpy as np
 
-from cutmaster.music.analysis import (
+from cutmaster.planners.tools.music_analysis import (
     _duration_range,
     _normalize,
     _section_boundaries,

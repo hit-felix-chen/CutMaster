@@ -17,8 +17,7 @@ cutmaster/
 │   ├── edit_composer.py
 │   ├── revision_editor.py
 │   └── tools/
-├── editing/
-├── music/
+├── production/
 ├── prompting/
 ├── configuration/
 ├── contracts/
@@ -61,11 +60,10 @@ planning revision.
 - `planners/aster_team.py` coordinates the ASTER agents and their feedback
   loops.
 - `planners/*.py`, excluding `aster_team.py`, each define one ASTER agent.
-- `planners/tools/` contains deterministic media access, scoring, validation,
-  search, and planning-feedback capabilities.
-- `editing/` owns post-planning script adaptation, source-window optimization,
-  FFmpeg rendering, and audio assembly.
-- `music/` owns reusable beat and music-profile analysis.
+- `planners/tools/` contains deterministic music analysis, media access,
+  scoring, validation, search, and planning-feedback capabilities.
+- `production/` owns post-planning script adaptation, source-window
+  optimization, FFmpeg rendering, and audio assembly.
 - `prompting/` is the only prompt-definition and response-contract registry.
 - `configuration/` defines and loads application configuration.
 - `contracts/` contains data passed across workflow stages.
@@ -75,10 +73,11 @@ planning revision.
 ## Dependency direction
 
 ```text
-CLI -> CutMaster -> Material Analyst / ASTERTeam / Editing / Music
+CLI -> CutMaster -> Material Analyst / ASTERTeam / Production
 
 ASTERTeam -> ASTER agents
 Agents    -> their tools / Configuration / Contracts / Prompting / Runtime
+Arrangement Architect -> planners/tools/music_analysis.py
 Prompting -> Contracts
 Runtime   -> Configuration / Prompting
 ```

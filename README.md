@@ -436,8 +436,8 @@ uv run cutmaster run \
 - `planners/revision_editor.py`：候选空间内的最终审片和脚本 Patch。
 - `planners/tools/`：规划智能体使用的媒体、评分、错误和反馈工具。
 - `prompting/`：统一注册 Material Analyst/ASTER Prompt，由 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
-- `editing/`：选定脚本的源窗口优化、帧精确渲染、视频拼接和音频混合。
-- `music/`：librosa 音乐能量、节拍、重音和段落分析。
+- `planners/tools/music_analysis.py`：Arrangement Architect 使用的 librosa 音乐能量、节拍、重音和段落分析工具。
+- `production/`：选定脚本的源窗口优化、帧精确渲染、视频拼接和音频混合。
 - `runtime/`：模型访问、规划状态、日志、进度、媒体探测和共享检测能力。
 
 ## 当前范围与限制

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import DialogueAnchorConfig
-from cutmaster.editing.ffmpeg import RenderError, run_media_command
+from cutmaster.production.ffmpeg import RenderError, run_media_command
 from cutmaster.runtime.media_probe import media_duration
 from cutmaster.runtime.observability import error_summary, log_event
 

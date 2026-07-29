@@ -6,7 +6,7 @@ import numpy as np
 from scenedetect import FrameTimecode
 
 from cutmaster.runtime.shot_detection import detect_source_cuts
-from cutmaster.editing.source_windows import choose_source_window, optimize_script_source_windows
+from cutmaster.production.source_windows import choose_source_window, optimize_script_source_windows
 from cutmaster.configuration.schema import ShotDetectionConfig, SourceWindowOptimizationConfig
 
 
@@ -192,7 +192,7 @@ def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.Monkey
     ) -> tuple[list[float], float]:
         return [start + (end - start) / 2.0], 10.0
 
-    monkeypatch.setattr("cutmaster.editing.source_windows.detect_source_cuts", fake_detect)
+    monkeypatch.setattr("cutmaster.production.source_windows.detect_source_cuts", fake_detect)
     items = [
         {
             "_id": index,
