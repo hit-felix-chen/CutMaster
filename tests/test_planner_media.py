@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from cutmaster.planner.media import SegmentMediaReader
@@ -112,3 +113,53 @@ def test_segment_media_reader_rebuilds_missing_cache(
     assert commands[0][commands[0].index("-t") + 1] == "5.000000"
     assert commands[0][commands[0].index("-i") + 1] == str(source_video)
 
+
+def test_segment_media_reader_clamps_tail_sample_to_last_video_frame(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first_clip = tmp_path / "segment_0001.mp4"
+    second_clip = tmp_path / "segment_0002.mp4"
+    first_clip.write_bytes(b"first")
+    second_clip.write_bytes(b"second")
+    seek_calls: list[float] = []
+
+    class Capture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+            self.seek_time_ms = 0.0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, property_id: int) -> float:
+            if property_id == cv2.CAP_PROP_FPS:
+                return 25.0
+            if property_id == cv2.CAP_PROP_FRAME_COUNT:
+                return 120.0
+            return 0.0
+
+        def set(self, property_id: int, value: float) -> None:
+            if property_id == cv2.CAP_PROP_POS_MSEC:
+                self.seek_time_ms = value
+                seek_calls.append(value)
+
+        def read(self):
+            if self.seek_time_ms > 4760.0:
+                return False, None
+            return True, np.full((2, 2, 3), 7, dtype=np.uint8)
+
+        def release(self) -> None:
+            return None
+
+    monkeypatch.setattr("cutmaster.planner.media.cv2.VideoCapture", Capture)
+    reader = SegmentMediaReader(
+        tmp_path / "source.mp4",
+        _video_description(first_clip, second_clip),
+    )
+
+    frames = reader.sample_frames([4.999999])
+
+    assert len(frames) == 1
+    assert int(frames[0][0, 0, 0]) == 7
+    assert seek_calls == [4760.0]

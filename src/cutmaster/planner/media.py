@@ -131,6 +131,10 @@ class SegmentMediaReader:
         segment: dict[str, Any],
         requests: list[tuple[int, float]],
     ) -> dict[int, Any]:
+        segment_duration = (
+            float(segment["time_range"]["end_sec"])
+            - float(segment["time_range"]["start_sec"])
+        )
         for attempt in range(2):
             clip_path = self._ensure_segment_clip(
                 segment,
@@ -140,12 +144,43 @@ class SegmentMediaReader:
             decoded: dict[int, Any] = {}
             try:
                 if capture.isOpened():
+                    try:
+                        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+                        frame_count = int(
+                            capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        fps = 0.0
+                        frame_count = 0
+                    last_frame_time = (
+                        (frame_count - 1) / fps
+                        if fps > 0.0 and frame_count > 0
+                        else None
+                    )
                     for output_index, local_time_sec in requests:
+                        requested_time = max(0.0, local_time_sec)
+                        seek_time = (
+                            min(requested_time, last_frame_time)
+                            if last_frame_time is not None
+                            else requested_time
+                        )
                         capture.set(
                             cv2.CAP_PROP_POS_MSEC,
-                            max(0.0, local_time_sec) * 1000.0,
+                            seek_time * 1000.0,
                         )
                         ok, frame = capture.read()
+                        if not ok and self._is_tail_request(
+                            requested_time,
+                            segment_duration,
+                            fps,
+                        ):
+                            frame = self._read_last_decodable_frame(
+                                capture,
+                                requested_time=requested_time,
+                                fps=fps,
+                                frame_count=frame_count,
+                            )
+                            ok = frame is not None
                         if not ok:
                             decoded = {}
                             break
@@ -166,6 +201,47 @@ class SegmentMediaReader:
         raise RuntimeError(
             f"Could not decode Segment cache for {segment['segment_id']}"
         )
+
+    @staticmethod
+    def _is_tail_request(
+        requested_time: float,
+        segment_duration: float,
+        fps: float,
+    ) -> bool:
+        frame_duration = 1.0 / fps if fps > 0.0 else 1.0 / 30.0
+        return requested_time >= max(
+            0.0,
+            segment_duration - max(0.5, frame_duration * 3.0),
+        )
+
+    @staticmethod
+    def _read_last_decodable_frame(
+        capture: Any,
+        *,
+        requested_time: float,
+        fps: float,
+        frame_count: int,
+    ) -> Any | None:
+        if frame_count > 0:
+            for offset in range(1, min(frame_count, 12) + 1):
+                capture.set(
+                    cv2.CAP_PROP_POS_FRAMES,
+                    float(frame_count - offset),
+                )
+                ok, frame = capture.read()
+                if ok:
+                    return frame
+
+        frame_duration = 1.0 / fps if fps > 0.0 else 1.0 / 30.0
+        for offset in (1, 2, 4, 8, 16):
+            capture.set(
+                cv2.CAP_PROP_POS_MSEC,
+                max(0.0, requested_time - frame_duration * offset) * 1000.0,
+            )
+            ok, frame = capture.read()
+            if ok:
+                return frame
+        return None
 
     def sample_frames(self, source_times_sec: list[float]) -> list[Any]:
         if not source_times_sec:
