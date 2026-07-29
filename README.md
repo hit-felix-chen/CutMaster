@@ -1,462 +1,313 @@
 # CutMaster
 
-<p align="center">
-  <a href="README.md"><kbd>中文</kbd></a>
-  &nbsp;|&nbsp;
-  <a href="README_EN.md"><kbd>English</kbd></a>
-</p>
+[English](README_EN.md) | 简体中文
 
-<p align="center">
-  <img src="assets/cutmaster_pipeline.png" alt="CutMaster 方法总览" width="100%">
-</p>
+**CutMaster: Let the MASTER team edit.**
 
-<p align="center"><em>CutMaster：面向叙事、情绪与视觉质量协同优化的 MASTER 多智能体剪辑框架</em></p>
+CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它将素材理解、节奏设计、故事锚定、候选检索、序列组接和成片复核拆分给六个职责明确的角色，在同一条剪辑链路中平衡：
 
-CutMaster 是一个纯后端长视频混剪框架。它组织一支 **MASTER Editing Team**，接收一部长视频、一条背景音乐和一条自然语言指令，生成时间轴精确到帧的音乐混剪。项目从 Mashup-Benchmark 的 NarratoAI adapter 所使用的生产流程中提取并扩展而来，现已成为独立的 Python 项目。
+- **叙事导向**：关键原声锚定情节、人物和提示词意图；
+- **情绪导向**：Slot 结构跟随音乐段落、节拍和能量曲线；
+- **视觉质量导向**：候选核验、运动过滤、转场评分和全局序列搜索共同控制画面质量。
 
-CutMaster 当前支持可复用的全片 Shot/Segment 视觉分析、LLM 辅助台词重组、结构化音乐分析、抽象剪辑 Slot 规划、原声台词锚点、基于结构化视频描述的多候选检索、带时序依赖的 Beam Search、版本化脚本补丁、结合视觉切点的原片窗口优化，以及确定性的 FFmpeg 渲染。最终视频默认静音普通原片片段，只在模型选中的台词锚点混入对应原声。
+> CutMaster employs a MASTER team of specialized agents that progressively transforms long-form footage into a narrative-aligned, emotionally paced, and visually coherent montage.
 
-```text
-M     = Material Analyst
-ASTER = Arrangement Architect
-        Story Editor
-        Timeline Scout
-        Edit Composer
-        Revision Editor
-```
+## MASTER Editing Team
 
-M 建立与剪辑任务无关的素材记忆；ASTER 五智能体团队依次完成节奏编排、故事锚定、时间线选材、序列组接和最终修订。语义智能体负责编辑判断，节拍对齐、容量校验、时序约束和 Beam Search 等确定性工具保证结果可执行、可审计。
+CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 
-## 工作流
+| 字母 | 智能体 | 代码入口 | 剪辑职责 |
+|---|---|---|---|
+| **M** | **Material Analyst** | `analyser/material_analyst.py` | 建立 Shot、Segment、台词和故事摘要等可复用素材记忆 |
+| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | 分析 BGM，编排 Slot 长度、剪辑节奏、情绪曲线和叙事结构 |
+| **S** | **Story Editor** | `planners/story_editor.py` | 用关键原声锚定情节、人物弧光和提示词意图 |
+| **T** | **Timeline Scout** | `planners/timeline_scout.py` | 沿原片时间线检索并验证每个 Slot 的候选镜头 |
+| **E** | **Edit Composer** | `planners/edit_composer.py` | 综合单镜头质量与镜头衔接，用 Beam Search 组接最终序列 |
+| **R** | **Revision Editor** | `planners/revision_editor.py` | 在候选池内审片、替换弱镜头并完成最终修订 |
+
+其中：
 
 ```text
-原始视频 + 背景音乐 + 用户指令
-  -> 校验输入；除非指定 --overwrite，否则保护已有输出
-  -> 使用 PySceneDetect 完整提取全片 Shot 边界
-  -> 复用用户提供/已有的 SRT，或使用 DashScope Fun-ASR 转写
-  -> 并行重组完整台词，同时保留原始字幕锚点
-  -> LLM 一次读取完整台词，按连续对话/独白返回台词序号范围
-  -> 将对白范围扩展到能完整覆盖它的 Shot；间隙、片头和片尾 Shot 成为无对白 Segment
-  -> 按 Segment 将全片准确切开并缓存
-  -> Segment 之间并行、内部 Shot 串行；每次 VLM 用均匀采样的 5 帧标注一个 Shot
-  -> 生成可跨剪辑任务复用的 video_description.json
-  -> 在全部 Shot/Segment 标注完成后生成并缓存 video_summary.json
-  -> 使用 librosa 生成节拍、重音、能量曲线和音乐段落的结构化画像
-  -> Arrangement Architect 根据指令、音乐画像和素材记忆编排剪辑 Slot
-  -> 确定性对齐 Slot 边界与音乐重音
-  -> Story Editor 选择少量原声 Story Anchor
-  -> Timeline Scout 为未绑定 Anchor 的 Slot 建立候选空间
-  -> 从真实候选画面生成接触图，由多模态模型验证可见内容与主体出镜
-  -> 候选不足时将诊断反馈给 Arrangement Architect，并在必要时刷新 Story Anchor
-  -> 从真实视频计算候选片段运动强度
-  -> Edit Composer 只为存活 Beam 延迟计算候选首尾画面连续性
-  -> 在严格原片时序约束下用 Beam Search 组接全局路径
-  -> Revision Editor 在既有候选空间内复核并以补丁方式修订脚本
-  -> 并行检测每个候选窗口内的原片切点
-       - 在自适应场景检测前过滤近重复帧
-       - 所有保留帧继续使用原片时间戳
-       - 每个原片窗口最多向后搜索 2 秒
-       - 最小化所有内部切点到最近音乐节拍的最大距离
-       - 内部切点与片段边界优先保持至少 1 秒距离
-  -> 按精确输出帧数渲染每个片段
-  -> 拼接标准化的无声视频片段
-  -> 一次批量运行 Demucs，分离并缓存最终锚点的人声
-  -> 循环并淡出背景音乐；在锚点区间混入分离后人声并压低 BGM
-  -> output.mp4 + 结构化中间产物
+M       = Analyser
+ASTER   = Planning team
+M + ASTER = MASTER
 ```
 
-### 台词重组
+`CutMaster` 是完整工作流的唯一入口，`ASTERTeam` 是五个规划智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
 
-Fun-ASR 最初会将转写结果切分为较短的字幕条目。CutMaster 将同一说话人的相邻字幕组织为候选段落，再调用文本模型判断哪些完整段落应当合并。请求并发数由 `llm.max_concurrency` 控制。
+## 架构
 
-`dialogues.json` 同时记录重组后的完整句子时间范围以及对应的每一个原始字幕锚点。`dialogue_merged.srt` 是传给剪辑脚本生成阶段的句子级字幕。台词重组是一个约束明确的边界选择任务，因此会关闭模型 thinking。
+```mermaid
+flowchart LR
+    V["长视频 / 字幕"] --> M["M · Material Analyst"]
+    M --> MM["Material Memory"]
 
-### 可复用视频素材描述
+    B["BGM"] --> A["A · Arrangement Architect"]
+    P["用户提示词"] --> A
+    MM --> A
+    A --> S["S · Story Editor"]
+    MM --> S
+    S --> T["T · Timeline Scout"]
+    MM --> T
+    T --> E["E · Edit Composer"]
+    E --> R["R · Revision Editor"]
+    R --> PR["Production"]
+    PR --> O["最终视频"]
 
-素材分析与用户剪辑指令、背景音乐和输出目录解耦。缓存目录由
-`material_analysis.material_cache_dir` 指定，并按照视频文件、字幕输入、模型、分析 schema
-和检测参数生成稳定目录。命中完整缓存时，不再执行 ASR、场景检测、素材切片或
-Shot VLM 标注。
+    T -. "候选不足 / 定向修复" .-> A
+    E -. "无可行时序路径 / 重新规划" .-> A
+    A -. "Slot 变化后刷新锚点" .-> S
+```
 
-素材分析同时采用逐阶段检查点，而不是只有全部成功后才能复用。PySceneDetect、
-字幕与台词、Segment 边界、每个 Segment 视频和每个成功的 Shot VLM 标注都会在完成后
-立即持久化。后续阶段失败或进程中断时，再次启动会校验已有产物，并从第一个缺失阶段
-继续；已经成功的单 Shot VLM 请求也不会重复调用。JSON 历史和检查点采用原子替换，
-避免中断留下半写文件。
+完整调用关系：
 
-全片 Shot 检测、Segment 切片、逐 Shot VLM、候选抽帧与运动分析、Pairwise VLM、
-源窗口优化和最终片段渲染都会输出进度条，包括完成比例、处理速度和 ETA。通过
-benchmark adapter 运行时，这些进度同时进入 task 的 `logs/backend.log`。
+```text
+CLI
+└── CutMaster
+    ├── MaterialAnalystAgent
+    ├── ASTERTeam
+    │   ├── ArrangementArchitectAgent
+    │   ├── StoryEditorAgent
+    │   ├── TimelineScoutAgent
+    │   ├── EditComposerAgent
+    │   └── RevisionEditorAgent
+    └── Production
+        ├── source-window optimization
+        ├── dialogue audio preparation
+        └── frame-exact rendering
+```
 
-PySceneDetect 首先使用与后续切点优化相同的 `AdaptiveDetector` 参数完整检测全片。
-对白划分 LLM 读取全部句子及每句覆盖的 Shot ID，必须把每个台词序号恰好分配一次，
-且不能在同一个 Shot 内建立 Segment 边界。Python 随后把每个对白组扩展到最小覆盖
-Shot 区间，并将所有剩余 Shot 确定性地补成无对白 Segment。
+### 智能体与工具的边界
 
-每个 Segment 会先保存为独立 MP4。VLM 标注以 Segment 为并发单位，共用
-`vlm.max_concurrency`；同一 Segment 内的 Shot 严格串行。每个请求只标注一个 Shot，
-输入是该 Shot 的 5 张均匀采样帧以及完整台词全局上下文。台词只能帮助理解叙事和
-名字，不能作为人物出镜、动作、地点或道具的视觉证据。极短 Shot 不足 5 个可解码
-采样点时，以最后一个成功解码帧补足。每个 Shot 的最终结构化标注
-独立保存在 `shot_annotations/`，`analysis_history.json` 只保存轻量工作流状态，
-不记录模型调用、完整提示词、上下文快照或原始响应。
+- **Agent 负责决策**：理解素材、规划结构、选择故事锚点、构造候选空间、组接序列和复核脚本。
+- **Tool 负责能力**：ASR、缓存、音乐分析、媒体读取、运动计算、视觉评分和规划反馈等非智能体能力分别位于 `analyser/tools/` 与 `planners/tools/`。
+- **Production 负责执行**：规划完成后进行源窗口优化、人声准备、FFmpeg 渲染和混音；它不是第七个智能体。
+- **共享基础设施保持中立**：配置、契约、Prompt 注册和运行时能力分别位于 `configuration/`、`contracts/`、`prompting/` 与 `runtime/`。
 
-所有 Shot 和 Segment 标注完成后，文本模型会基于完整结构化描述生成
-`video_summary.json`，概括剧情、按时间排列的关键事件、人物弧光、主题和结局。该总结
-按视频素材缓存。后续规划和候选检索以它代替完整台词来理解剧情；只有原声锚点选择会
-额外收到对应 Slot 已选 Segment 的精确台词，以便返回可执行的台词 ID 范围。
+## 核心机制
 
-### 音乐画像与抽象规划
+### 1. 可复用的 Material Memory
 
-CutMaster 使用 `librosa` 计算 RMS、onset strength、spectral centroid 和节拍，并生成统一的 `music_profile.json`。画像包括能量时间序列、普通节拍、强重音、段落边界、段落角色，以及根据段落能量建议的片段时长范围。背景音乐短于目标视频时，节拍和重音会按照最终循环方式同步扩展。
+Material Analyst 对完整原片执行切镜、逐 Shot 视觉标注、Segment 聚合、ASR、台词重建和故事摘要。结果按素材与分析配置缓存在 `.cutmaster/materials/`，同一原片可被不同提示词和 BGM 复用。
 
-初始规划会开启模型 thinking。模型自行决定 Slot 数量，并以
-`slot_planning.target_clip_duration_sec` 作为普通连续片段的软目标时长。每个
-`narrative_role` 都可以重复出现或完全不出现，不代表必须生成一次的五幕结构。模型只
-描述每个 Slot 应承载的内容、叙事作用、目标情绪强度、目标运动强度、与前一片段的衔接
-关系和期望时长，不允许给出原片时间戳。随后通过全局动态规划同时修正全部边界，使剪辑
-点落在音乐重音上，并保持单调、非零的片段时长。
+Material Memory 独立于某一次剪辑方案，避免每次运行都重新理解整部视频。
 
-重音对齐后，第二次规划调用会从 Slot 所引用 Segment 的真实台词中选择少量原声锚点。
-模型读取用户指令、可复用剧情总结、Slot 选中的 Segment 完整描述、相关 Shot 描述和
-这些 Segment 内的精确台词，不再接收音乐画像或全片逐句台词。
-每个锚点可以是一句完整的长台词，也可以是同一 Segment 内一段连续的对话：模型返回
-起始和结束台词 ID，范围内的全部台词、说话人切换和自然停顿都会保留，不能跳过中间
-台词或跨越 Segment。模型只保留能够独立表达完整含义、直接服务用户剪辑要求且对剧情
-有重要意义的长句或连续对话；问候、语气词、孤立应答和需要上下文才能理解的碎片会被
-排除。每段原声至少满足配置的最短时长，并由模型给出重要性、连贯性及选择理由。
+### 2. 音乐驱动的 Slot 编排
 
-所有原声锚点统一采用开头对齐的 L-cut：原声与对应 Slot 开头同时开始，对应原片画面
-也从相同源时间开始；原声较长时继续覆盖后续短画面 Slot。原片画面与原声共存的部分
-始终保持同一源时间映射。Python 会保证原声仍处于整个成片时间线内，且不同原声锚点
-互不覆盖。如果模型返回的多段原声发生冲突，Python 会确定性选择最优的非重叠子集：
-首先保留尽可能多的台词段数，段数相同时选择原声总时长最长的方案。该 Slot
-的源画面窗口与整段原声音频范围一同锁定，后续候选检索、Beam Search 和源窗口优化
-都不能移动或替换它。普通 Slot 仍走候选检索与 Beam Search。最终混音只截取锚点
-覆盖的连续原片音频，普通原片音频保持静音。
+Arrangement Architect 通过 `planners/tools/music_analysis.py` 提取节拍、重音、能量和音乐段落，并把目标时长编排为一组 Slot。每个 Slot 同时表达：
 
-### 候选检索、路径选择与补丁
+- 时间预算与节奏位置；
+- 叙事功能和目标内容；
+- 情绪、镜头尺度与运动倾向；
+- 与前后 Slot 的结构关系。
 
-候选检索模型根据 Slot 描述、`video_summary.json` 和去除逐句台词后的 Segment/Shot
-视觉描述，为每个 Slot 返回若干原片区间。同一轮中，每次 LLM 请求只包含一个 Slot，
-多个 Slot 请求按照 `llm.max_concurrency` 并发执行。请求前，Python 会先计算当前
-Segment 范围最多能容纳多少个互不重叠的固定时长窗口；容量不足时不调用 LLM，直接让
-该 Slot 在下一轮扩大 Segment 检索范围，不会回滚其他 Slot。候选 VLM 核验同样按
-Slot 独立并发，并由 `vlm.max_concurrency` 控制。每个候选必须满足：
+Slot Planning 决定“成片需要什么”，而不是直接决定“使用哪个镜头”。
 
-- 长度在毫秒时间码精度内等于对应 Slot 的 `planned_duration_sec`；
-- 完整落在当前检索轮次提供的 Segment 时间线内；
-- 同一 Slot 的候选彼此不重叠，也不与此前保留或拒绝的窗口重叠；
-- 起止点可以位于 Shot 内部，覆盖的 Shot ID 由 Python 根据时间戳自动推导；
-- 包含来自 Shot VLM 标注的非空内容描述；
-- 只使用当前检索轮次提供的 Segment 和 Shot 描述。
+### 3. 原声台词作为故事锚点
 
-CutMaster 对候选计算结构化语义相关性、真实画面相关性、主体出镜置信度、情绪匹配、画面运动匹配、显著性和时长可行性等单片段分数。候选池完成后，它会对每对相邻 Slot 的所有候选组合并行抽取前段尾帧和后段首帧，由多模态模型预计算直接硬切的视觉连续性、情绪连续性和叙事桥接分；不生成或依赖任何转场特效。视觉模型调用并发数由 `vlm.max_concurrency` 控制，Beam Search 只读取缓存分数，不会在路径扩展时重复调用模型。它同时保留：
+Story Editor 从 Material Memory 中选择少量高价值原声台词，并将其固定到对应的源画面。锚点保证关键情节、人物关系和提示词意图不会被纯视觉蒙太奇稀释。
 
-- 每个 Slot 单独取最高分候选得到的独立最优路径；
-- 在原片时间严格单调且片段不重叠的硬约束下，将相邻连续性和音乐能量变化纳入路径分数的 Beam Search 全局路径。
+普通片段的原片声音保持静音；仅选中的 Dialogue Anchor 会经过人声准备后与 BGM 混合，并在台词区间自动压低背景音乐。
 
-选择后，复核 LLM 只能使用候选池中已有的 `candidate_id` 进行 `keep/replace` 补丁，不能直接创造新时间戳。补丁会选择可共同成立的最大子集；冲突补丁会单独拒绝并记录原因，不再导致整批回滚。`planning_history.json` 只保存规划产物、脚本版本、已接纳补丁和拒绝原因。`planning_calls.json` 按任务和调用组织规划阶段的调用树，保留每次重试的完整模型回复，但 Prompt 只记录 ID、版本、指纹、字符数和上下文字段等元数据，不保存 Prompt 正文或上下文快照。CutMaster 对完整的 API 请求、JSON 解析和语义校验事务进行指数退避重试，不会接受残缺结果。
+### 4. 候选空间与闭环修复
 
-### 视觉切点优化
+Timeline Scout 为非锚点 Slot 沿原片时间线检索候选，并验证主体身份、内容相关性、可见性和运动强度。候选不足时，它不会静默降级，而是把诊断返回 Arrangement Architect，触发定向 Slot 修复；如果 Slot 语义发生变化，Story Editor 会重新检查锚点。
 
-对于每个选中的原片区间，CutMaster 会在该区间及其向后两秒的搜索范围内检测内部视觉切点。当前使用 PySceneDetect 的 `AdaptiveDetector`，默认参数为：
+### 5. 高效的全局序列选择
 
-- 自适应阈值：`2.0`；
-- 最小内容变化值：`15.0`；
-- 最短场景长度：`0.25s`；
-- 近重复帧阈值：灰度平均绝对差 `< 1.0`。
+Edit Composer 同时考虑：
 
-近重复帧过滤对于由较低帧率素材生成的 50/60 fps 视频十分重要。如果不做过滤，交替出现的“重复帧/新帧”会让自适应检测器将普通运动误判为大量切点。过滤只影响参与检测的帧，所有保留帧仍携带原视频中的真实时间码。
+- 候选对当前 Slot 的单镜头适配度；
+- 相邻镜头的视觉连续性与转场质量；
+- 全片时间顺序等硬约束。
 
-候选起点会在原片帧网格上从初始位置搜索至 `+2s`。Minimax 目标首先最小化任意内部输出切点到最近背景音乐节拍的最大距离，然后依次偏好更小的向后位移和更少的内部切点。
+序列搜索采用 Beam Search。转场 VLM 评分只对仍可能进入最优路径的边进行惰性计算，在保留全局组合空间的同时控制推理成本。默认评分由 `0.60 × unary + 0.40 × pairwise` 组成。
 
-内部切点与片段边界的期望安全距离为 `1.0s`。如果没有可行候选窗口，CutMaster 会依次尝试 `0.75s`、`0.5s`、`0.25s`，最后尝试 `0.0s`。任何约束放宽都会记录在 `script_adapted.json` 中并输出 warning。`0.0s` 仅是保证任务完成的最后手段，不是正常优化目标。
+### 6. 候选约束下的最终修订
 
-### 帧精确渲染
+Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeline Scout 临时生成未经验证的片段。最终脚本随后进入 Production，完成切点适配、帧精确渲染、人声混合和成片输出。
 
-每个适配后的片段都包含 `output_frame_range`。FFmpeg 会按照配置的分辨率和 FPS 精确渲染对应数量的帧，并移除原片音频。所有片段拼接后不会改变已规划的时间轴；随后背景音乐会循环、裁剪到混剪的精确时长、执行淡出并编码为 AAC。
+## 快速开始
 
-当 `render.encoder = "auto"` 时，编码器按以下顺序选择：
+### 环境要求
 
-1. macOS 上可用的 `h264_videotoolbox`；
-2. 可用的 `h264_nvenc`；
-3. 其他情况下使用 `libx264`。
+- Python `3.12`
+- [uv](https://docs.astral.sh/uv/)
+- FFmpeg 与 FFprobe
+- 支持 OpenAI-compatible 接口的 LLM/VLM 服务
+- 百炼 ASR 所需的 API Key
 
-## 环境要求
-
-- Python `3.12`（`>=3.12,<3.13`）
-- `uv`
-- `PATH` 中可用的 `ffmpeg` 和 `ffprobe`
-- 用于默认 LLM 和 Fun-ASR 配置的 DashScope API Key
-
-项目暂不支持 Python 3.13，因为当前使用的 librosa/Numba 节拍跟踪路径在该环境中不稳定。
-
-## 安装
+macOS 可使用：
 
 ```bash
+brew install ffmpeg uv
+```
+
+### 安装
+
+```bash
+git clone <repository-url>
+cd CutMaster
 uv sync
+```
+
+复制环境变量模板：
+
+```bash
 cp .env.example .env
 ```
 
-将真实密钥填写到 `.env`：
+填写：
 
 ```dotenv
-DASHSCOPE_API_KEY="..."
+DASHSCOPE_API_KEY=your_api_key
+
+# 可选：用于认证 Demucs 模型下载
+HF_TOKEN=
 ```
 
-`config.toml` 中的 `[llm]`、`[vlm]` 和 `[asr]` 统一使用：
+CLI 会自动读取与 `config.toml` 同目录的 `.env`，且不会覆盖进程中已有的环境变量。
 
-```toml
-api_key_env = "DASHSCOPE_API_KEY"
-```
+## 运行
 
-CutMaster 每次启动时会自动读取 `config.toml` 同目录的 `.env`，且不会覆盖调用进程
-已经设置的同名环境变量。因此 benchmark 从其他工作目录启动时也会读取 CutMaster
-项目目录中的 `.env`。`config.toml` 是项目中唯一且纳入版本管理的工作流配置；
-`.env` 被 Git 忽略，只用于保存密钥。
-
-## 配置
-
-配置文件严格按照工作流执行顺序排列。没有可调参数的音乐分析阶段只保留阶段注释，
-不创建空配置表。
-
-### Stage 0a/0b：`[llm]` 与 `[vlm]`
-
-两个配置表拥有相同字段，但完全独立。`[llm]` 用于台词重组、Segment 划分、Slot
-规划、候选检索和脚本复核；`[vlm]` 用于逐 Shot 标注、候选视觉核验和 Pairwise
-连续性评分。
-
-| 配置项 | 含义 | 示例配置默认值 |
-| --- | --- | --- |
-| `model` | OpenAI-compatible 文本或视觉语言模型 | `qwen3.7-plus` |
-| `base_url` | OpenAI-compatible API Base URL | DashScope compatible-mode URL |
-| `api_key` / `api_key_env` | 直接密钥或环境变量名称 | 占位值 |
-| `enable_thinking` | 是否向该模型的所有请求启用 thinking | `true` |
-| `temperature` | 采样温度 | `0.1` |
-| `max_tokens` | 最大输出 token 数 | `4000` |
-| `timeout_sec` | 单次模型请求超时 | `180` |
-| `max_retries` | 首次请求失败后的重试次数 | `3` |
-| `max_concurrency` | 该模型服务的最大并发请求数 | `4` |
-
-OpenAI SDK 自身的重试已关闭，由 CutMaster 负责完整的“请求/解析/校验”重试周期。因此 `max_retries = 3` 表示最多执行四次完整请求，失败后的等待时间依次为 `1s`、`2s`、`4s`。
-
-### Stage 1：素材分析
-
-`[material_analysis]`
-
-| 配置项 | 含义 | 示例配置默认值 |
-| --- | --- | --- |
-| `material_cache_dir` | 与任务输出解耦的可复用视频素材分析目录 | `.cutmaster/materials` |
-
-`[shot_detection]`
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `adaptive_threshold` | PySceneDetect 自适应阈值 | `2.0` |
-| `adaptive_min_content_val` | 最小内容变化值 | `15.0` |
-| `adaptive_min_scene_len_sec` | 最短 Shot 时长 | `0.25` |
-| `duplicate_frame_threshold` | 近重复帧灰度平均绝对差阈值 | `1.0` |
-
-这组检测参数同时用于全片素材分析和最终源窗口优化。
-
-`[asr]`
-
-| 配置项 | 含义 | 示例配置默认值 |
-| --- | --- | --- |
-| `backend` | ASR 后端；当前仅支持 `bailian` | `bailian` |
-| `api_key` / `api_key_env` | 直接密钥或环境变量名称 | 占位值 |
-| `reuse` | 复用非空 `source.srt` 和已提取的 ASR 音频 | `true` |
-| `timeout_sec` | 异步 ASR 总超时 | `1800` |
-| `poll_interval_sec` | ASR 任务轮询间隔 | `2` |
-| `max_chars` | 初始字幕条目的期望最大字符数 | `20` |
-| `max_subtitle_duration_sec` | 初始字幕条目的期望最大时长 | `3.5` |
-
-`[shot_annotation]`
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `shot_sample_frames` | 单次 Shot VLM 标注的均匀采样帧数；固定为 5 | `5` |
-
-### Stage 3：`[slot_planning]`
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `target_clip_duration_sec` | 普通连续片段的软目标时长；不固定 Slot 数量 | `4.0` |
-| `replan_max_rounds` | 候选或严格时序路径不可行时的最大重新规划次数 | `3` |
-
-### Stage 4：`[dialogue_anchors]`
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `max_anchors` | 一条成片最多选择的原声锚点数量 | `4` |
-| `min_anchor_duration_sec` | 连贯原声范围的最短时长 | `1.5` |
-| `enable_vocal_separation` | 是否使用 Demucs 分离最终锚点人声 | `true` |
-| `separator_model` | Demucs 模型 | `htdemucs` |
-| `separator_device` | 推理设备；`auto` 依次选择 CUDA、MPS、CPU | `auto` |
-| `separator_segment_sec` | Demucs 分块长度；用于限制内存 | `7` |
-| `separator_shifts` | Demucs 随机平移集成次数；`0` 最快 | `0` |
-| `separator_padding_sec` | 每段台词送入分离器前增加的首尾上下文 | `1.0` |
-| `separated_loudness_lufs` | 分离后每段对白的目标响度 | `-16.0` |
-| `dialogue_volume` | 锚点原声台词音量倍率 | `1.0` |
-| `bgm_duck_volume` | 台词播放区间的 BGM 音量倍率 | `0.08` |
-| `fade_sec` | 每段锚点原声首尾的短淡入淡出 | `0.05` |
-
-### Stage 5：`[candidate_retrieval]`
-
-| 配置项 | 含义 | 示例配置默认值 |
-| --- | --- | --- |
-| `candidates_per_slot` | 每个 Slot 最终保留的原片候选数 | `3` |
-| `retrieval_max_rounds` | 指定 Segment 首次检索后的重试次数；相邻 Segment 再检索同样次数 | `3` |
-| `visual_sample_frames` | 每个候选用于视觉核验的均匀采样帧数 | `4` |
-| `protagonist_visibility_likert_threshold` | 必须出镜主体的最低 Likert 分数（1–5） | `3` |
-| `motion_sample_fps` | 候选运动强度的采样帧率 | `2.0` |
-| `motion_workers` | 候选运动特征解码 worker 数 | `4` |
-| `static_kinetic_energy_threshold` | 丢弃静止候选的最高平均运动强度 | `0.05` |
-
-### Stage 5–7：选择、复核与源窗口优化
-
-| 配置表 | 配置项 | 含义 | 默认值 |
-| --- | --- | --- | --- |
-| `[beam_search]` | `beam_width` | Beam Search 保留的路径数量 | `8` |
-| `[script_review]` | `review_rounds` | 候选内脚本补丁复核轮数 | `1` |
-| `[source_window_optimization]` | `search_margin_sec` | 候选窗口向后搜索范围 | `2.0` |
-| `[source_window_optimization]` | `min_boundary_distance_sec` | 内部切点与片段边界的首选安全距离 | `1.0` |
-| `[source_window_optimization]` | `max_workers` | 源窗口切点优化并发数 | `8` |
-
-### Stage 8：`[render]`
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `width`, `height` | 输出画布 | `1920×1080` |
-| `fps` | 输出帧率和时间轴网格 | `30` |
-| `encoder` | FFmpeg 视频编码器或 `auto` | `auto` |
-| `threads` | libx264 编码线程数 | `8` |
-| `bgm_volume` | 最终背景音乐音量倍率 | `0.3` |
-| `original_volume` | 原片音频音量；帧精确模式要求为 `0` | `0.0` |
-| `audio_sample_rate` | 最终 AAC 采样率 | `48000` |
-
-文本和视觉模型并发分别由 `llm.max_concurrency`、`vlm.max_concurrency` 控制，运动特征解码由
-`candidate_retrieval.motion_workers` 控制，源窗口优化由
-`source_window_optimization.max_workers` 控制，编码线程由 `render.threads` 控制。
-
-## 使用方法
+### 命令行
 
 ```bash
 uv run cutmaster run \
   --video /path/to/source.mp4 \
   --audio /path/to/bgm.mp3 \
-  --prompt "剪出所有决定比赛走向的进球" \
-  --output-dir outputs/demo \
+  --prompt "剪出一支突出主角成长与最终胜利的高燃短片" \
+  --output-dir /path/to/output \
   --target-duration 60 \
   --target-shot-length 4 \
-  --prompt-type event
+  --config config.toml \
+  --overwrite
 ```
 
-`run` 命令支持以下参数：
+也可以使用模块入口：
 
-| 参数 | 是否必需 | 说明 |
-| --- | --- | --- |
-| `--video PATH` | 是 | 长视频原片 |
-| `--audio PATH` | 是 | 背景音乐 |
-| `--prompt TEXT` | 是 | 混剪指令 |
-| `--output-dir PATH` | 是 | 中间产物和输出目录 |
-| `--config PATH` | 否 | TOML 配置；默认为 `config.toml` |
-| `--subtitle PATH` | 否 | 已有 SRT；提供后跳过 Fun-ASR |
-| `--target-duration SEC` | 否 | 目标输出时长；默认 `60` |
-| `--target-shot-length SEC` | 否 | 时长适配阶段的缺省片段长度；不限制 Slot 数量，默认 `4` |
-| `--prompt-type TYPE` | 否 | 提供给脚本生成阶段的元数据；默认 `event` |
-| `--video-title TEXT` | 否 | 提供给模型的人类可读原片标题 |
-| `--max-clip-duration SEC` | 否 | 时长适配阶段使用的片段硬上限 |
-| `--overwrite` | 否 | 覆盖已有运行结果 |
+```bash
+uv run python -m cutmaster run --help
+```
 
-如果 `output.mp4` 已存在，运行会直接停止，除非指定 `--overwrite`。`--overwrite`
-只重建当前剪辑任务；输入签名一致的视频素材分析完整缓存和有效阶段检查点仍会复用。
+常用可选参数：
 
-## 输出文件
+| 参数 | 含义 |
+|---|---|
+| `--subtitle` | 使用已有字幕；未提供时运行 ASR |
+| `--prompt-type` | 提示词类型，默认 `event` |
+| `--video-title` | 提供给素材分析的片名 |
+| `--max-clip-duration` | 限制单个候选片段的最长时长 |
+| `--overwrite` | 覆盖已有输出并启动新一轮规划 |
 
-运行日志写入输出目录中的 `cutmaster.log`，采用稳定的
-`TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message` 单行格式。
-模型 Prompt、原始响应、上下文快照和图片数据既不会进入运行日志，也不会写入工作流
-状态文件。事件命名、级别、安全边界及开发约束见
-[日志规范](docs/logging.md)。
+### Python API
 
-素材缓存目录包含：
+```python
+from pathlib import Path
 
-| 路径 | 内容 |
-| --- | --- |
-| `shots.json` | PySceneDetect 产生的全片 Shot 边界检查点；FPS 由 ffprobe 读取 |
-| `source.srt` / `dialogues.json` / `dialogue_merged.srt` | ASR 与完整台词重组结果 |
-| `segment_boundaries.json` | 对白组、无对白间隙和 Segment/Shot 归属 |
-| `segments/segment_XXXX.mp4` | 按 Shot 边界保存的独立 Segment 视频 |
-| `shot_annotations/shot_XXXXX.json` | 可断点复用的单-Shot最终结构化标注 |
-| `video_description.json` | Segment、Shot、场景、人物和对白的完整结构化描述 |
-| `video_summary.json` | 可复用的全片剧情总结、关键事件、人物弧光、主题和结局 |
-| `analysis_history.json` | 不含模型调用内容的轻量素材分析状态 |
-| `analysis_manifest.json` | 缓存输入、模型、schema 和检测参数签名 |
+from cutmaster import CutMaster
+from cutmaster.configuration.loader import load_config
+from cutmaster.contracts.workflow import RunRequest
 
-每个任务输出目录包含：
+config = load_config(Path("config.toml"))
+request = RunRequest(
+    video_path=Path("/path/to/source.mp4"),
+    audio_path=Path("/path/to/bgm.mp3"),
+    prompt="剪出一支突出主角成长与最终胜利的高燃短片",
+    output_dir=Path("/path/to/output"),
+    target_output_length_sec=60,
+    target_shot_length_sec=4,
+    overwrite=True,
+)
 
-| 路径 | 内容 |
-| --- | --- |
-| `source.srt` / `dialogues.json` / `dialogue_merged.srt` | 从素材缓存复制的任务审计副本 |
-| `music_profile.json` | 音乐能量、节拍、重音、段落和建议时长 |
-| `edit_plan.json` | 重音对齐后的抽象剪辑 Slot，不含原片时间戳 |
-| `dialogue_anchors.json` | 选中的连续台词列表、说话人、Slot、源音频与输出时间范围 |
-| `candidate_pool.json` | 每个 Slot 的结构化视频候选、模型分数和本地运动特征 |
-| `selection_diagnostics.json` | VLM Pairwise Beam Search 的候选路径、路径分数和评分数量 |
-| `planning_history.json` | 规划产物和脚本版本/补丁状态，不含模型调用内容 |
-| `planning_calls.json` | 规划调用树；包含每次重试的完整模型回复和 Prompt 元数据，不含 Prompt 正文 |
-| `script_raw.json` | 最终选中的候选路径及 Slot/候选 ID |
-| `script_adapted.json` | 输出帧范围、节拍对齐、优化后的原片范围和切点诊断信息 |
-| `clips/clip_XXXX.mp4` | 标准化的无声中间视频片段 |
-| `montage.mp4` | 混入背景音乐前拼接得到的无声视频 |
-| `output.mp4` | 带循环/淡出背景音乐、原声静音的最终视频 |
-| `result.json` | 最终路径、时长、片段数、总耗时和各阶段耗时 |
-| `cutmaster.log` | INFO/DEBUG 后端运行日志 |
+result = CutMaster(config).run(request)
+print(result.output_video)
+```
 
-`script_adapted.json` 中的每个片段还会记录：
+外部调用方和 Benchmark Adapter 应通过 `from cutmaster import CutMaster` 使用公共入口，不应依赖内部 Agent 或 Tool。
 
-- `output_timestamp` 和 `output_frame_range`；
-- 优化后的原片 `timestamp`；
-- 检测到的原片/输出切点时间戳；
-- 优化前后切点到节拍的最大距离；
-- 原片位移、边界安全距离 fallback 等级和实际生效距离。
+## 配置
 
-## 包结构
+默认配置位于 [`config.toml`](config.toml)。配置按职责边界组织：
 
-- `cutmaster.py`：完整 MASTER Editing Team 的唯一入口、输入校验、阶段计时和结果输出。
-- `analyser/material_analyst.py`：Material Analyst Agent，建立可复用的素材记忆。
-- `analyser/tools/`：ASR、台词重组、缓存等素材分析工具。
-- `planners/aster_team.py`：五个 ASTER Agent 的团队编排器和反馈闭环。
-- `planners/arrangement_architect.py`：Slot、节奏、情绪曲线和叙事结构编排。
-- `planners/story_editor.py`：关键原声 Story Anchor 选择。
-- `planners/timeline_scout.py`：候选窗口检索、视觉核验和运动分析。
-- `planners/edit_composer.py`：时序预检、延迟 VLM 转场评分和 Beam Search 组接。
-- `planners/revision_editor.py`：候选空间内的最终审片和脚本 Patch。
-- `planners/tools/`：规划智能体使用的媒体、评分、错误和反馈工具。
-- `prompting/`：统一注册 Material Analyst/ASTER Prompt，由 JSON Schema 生成响应模板、执行结构校验并管理版本 fingerprint；详见 [Prompt 中间层](docs/prompting.md)。
-- `planners/tools/music_analysis.py`：Arrangement Architect 使用的 librosa 音乐能量、节拍、重音和段落分析工具。
-- `production/`：选定脚本的源窗口优化、帧精确渲染、视频拼接和音频混合。
-- `runtime/`：模型访问、规划状态、日志、进度、媒体探测和共享检测能力。
+| 配置段 | 所有者 | 主要内容 |
+|---|---|---|
+| `[llm]`, `[vlm]` | Runtime | 模型、接口、超时、重试和并发 |
+| `[asr]`, `[shot_detection]`, `[shot_annotation]` | Material Analyst | 字幕生成、切镜和 Shot 标注 |
+| `[material_analysis]` | Material Analyst | Material Memory 缓存目录 |
+| `[slot_planning]` | Arrangement Architect | 目标镜头长度与重规划轮数 |
+| `[dialogue_anchors]` | Story Editor / Production | 锚点数量、人声分离与混音参数 |
+| `[candidate_retrieval]` | Timeline Scout | 候选数量、检索轮次和视觉验证 |
+| `[beam_search]` | Edit Composer | Beam Search 宽度 |
+| `[script_review]` | Revision Editor | 候选约束下的复核轮数 |
+| `[source_window_optimization]`, `[render]` | Production | 切点搜索、画布、帧率、编码与音量 |
 
-## 当前范围与限制
+默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `1800` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
 
-- 首次素材分析需要对全片完成场景检测、准确切片和逐 Shot VLM 标注，成本较高；相同素材分析完成后会直接复用。
-- 当前运动特征使用低分辨率帧差近似画面活动程度，还不是稠密光流或语义动作识别。
-- 每次运行只接受一部原片和一条背景音乐。
-- 普通片段的原片音频会被主动静音；默认只将 `dialogue_anchors.json` 中经 Demucs 分离的精确台词区间混入成片。
-- 项目不包含 UI、Web 任务队列、TTS、旁白字幕、素材搜索或 benchmark 专用运行记录。
-- CutMaster 运行时不需要导入或安装 NarratoAI。
+## 输出产物
+
+一次运行会在 `output_dir` 下保留可审计的中间结果：
+
+| 产物 | 含义 |
+|---|---|
+| `output.mp4` | 最终视频 |
+| `montage.mp4` | 最终混音前的画面蒙太奇 |
+| `result.json` | 完整运行结果、耗时和产物路径 |
+| `source.srt`, `dialogue_merged.srt`, `dialogues.json` | 原始与重建后的台词数据 |
+| `music_profile.json` | 节拍、能量与音乐段落画像 |
+| `edit_plan.json` | Arrangement Architect 生成的 Slot 方案 |
+| `dialogue_anchors.json` | Story Editor 选中的原声锚点 |
+| `candidate_pool.json` | Timeline Scout 构造的候选空间 |
+| `selection_diagnostics.json` | Edit Composer 的路径与评分诊断 |
+| `script_raw.json`, `script_adapted.json` | 修订前脚本与 Production 适配后的脚本 |
+| `planning_history.json`, `planning_calls.json` | 规划反馈历史与模型调用树 |
+| `cutmaster.log` | 结构化运行日志 |
+
+素材级缓存目录还会保存 `video_description.json`、`video_summary.json` 和 `analysis_history.json`，用于跨任务复用与分析追踪。
+
+## 源码结构
+
+```text
+src/cutmaster/
+├── cutmaster.py                     # 完整工作流入口
+├── analyser/
+│   ├── material_analyst.py          # M
+│   └── tools/                       # ASR、台词重建、缓存
+├── planners/
+│   ├── aster_team.py                # ASTER 团队编排器
+│   ├── arrangement_architect.py     # A
+│   ├── story_editor.py              # S
+│   ├── timeline_scout.py            # T
+│   ├── edit_composer.py             # E
+│   ├── revision_editor.py           # R
+│   └── tools/                       # 音乐分析、检索、验证、评分、反馈
+├── production/                      # 脚本适配、音频与帧精确渲染
+├── prompting/                       # Prompt 与响应契约注册
+├── configuration/                   # 配置模型与加载
+├── contracts/                       # 跨阶段数据契约
+├── runtime/                         # 模型访问、上下文、日志、媒体基础设施
+└── timecode.py                      # 时间码基础类型
+```
+
+详细的依赖边界和公共 API 参见 [`docs/architecture.md`](docs/architecture.md)，架构决策参见 [`docs/adr/`](docs/adr/)。
 
 ## 验证
 
 ```bash
 uv run pytest
-uv run python -m cutmaster --help
-uv run python -m cutmaster run --help
+uv run cutmaster --help
+uv run cutmaster run --help
 ```
 
-## 开源归属
+## 当前范围
 
-初始工作流源自采用 MIT 许可证的 NarratoAI 项目。详情参见 `THIRD_PARTY_NOTICES.md` 和 `LICENSE`。
+- 输入为一条长视频、一条 BGM，以及一个自然语言提示词；
+- 输出为单条横屏视频；
+- 时间线严格遵循原片顺序；
+- 普通素材原声静音，仅保留选中的 Dialogue Anchor；
+- 当前 ASR 后端为百炼；
+- 默认依赖远程 LLM/VLM 服务，整体耗时受视频长度、候选数量、模型并发和人声分离影响。
+
+## Attribution
+
+CutMaster 的镜头检测基于 [PySceneDetect](https://www.scenedetect.com/)，音乐分析基于 [librosa](https://librosa.org/)，人声分离基于 [Demucs](https://github.com/facebookresearch/demucs)，媒体渲染基于 [FFmpeg](https://ffmpeg.org/)。

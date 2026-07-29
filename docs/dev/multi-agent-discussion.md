@@ -1,3 +1,5 @@
+gt
+
 # MASTER 多智能体剪辑机制
 
 CutMaster 将长视频剪辑组织为 **MASTER Editing Team**：
@@ -155,14 +157,14 @@ Revision Editor 不增加 Slot、不改变 Slot 时长、不扩展 Candidate Spa
 
 Agent 拥有编辑决策和业务责任；Tool 提供确定性能力：
 
-| Agent | 典型 Tool |
-| --- | --- |
-| Material Analyst | ASR、Shot detection、缓存、视频摘要校验 |
+| Agent                 | 典型 Tool                                       |
+| --------------------- | ----------------------------------------------- |
+| Material Analyst      | ASR、Shot detection、缓存、视频摘要校验         |
 | Arrangement Architect | Music analysis、Beat alignment、Slot validation |
-| Story Editor | 台词连续性、同步范围与 Anchor 冲突校验 |
-| Timeline Scout | Segment media、容量检查、运动分析、视觉验证 |
-| Edit Composer | Chronology preflight、视觉评分、Beam Search |
-| Revision Editor | Patch validation、路径重新评分 |
+| Story Editor          | 台词连续性、同步范围与 Anchor 冲突校验          |
+| Timeline Scout        | Segment media、容量检查、运动分析、视觉验证     |
+| Edit Composer         | Chronology preflight、视觉评分、Beam Search     |
+| Revision Editor       | Patch validation、路径重新评分                  |
 
 Agent 可以同时使用 LLM、VLM 和确定性工具；“Agent”不等于一次模型调用。
 Production 位于 ASTER 完成修订之后，不属于任何 Planner Agent 的私有工具。
