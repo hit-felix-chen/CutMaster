@@ -3,11 +3,17 @@ from __future__ import annotations
 import bisect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import SourceWindowOptimizationConfig
+from cutmaster.configuration.schema import (
+    ShotDetectionConfig,
+    SourceWindowOptimizationConfig,
+)
+from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.progress import progress_bar
+from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.timecode import format_range, parse_range
 
 
@@ -22,8 +28,24 @@ class SourceWindowOptimization:
     fallback_level: int
 
 
-def _cached_source_cuts(
+def _merge_intervals(
+    intervals: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if not merged or start > merged[-1][1] + 1e-6:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _detect_used_segment_cuts(
+    source_video: Path,
+    items: list[dict[str, Any]],
     video_description: dict[str, Any],
+    detection_config: ShotDetectionConfig,
+    optimization_config: SourceWindowOptimizationConfig,
 ) -> tuple[tuple[float, ...], float, float]:
     source = video_description["source"]
     source_duration_sec = float(source["duration_sec"])
@@ -33,12 +55,102 @@ def _cached_source_cuts(
     if frame_rate <= 0.0:
         raise ValueError("Cached video description has an invalid source frame rate")
 
-    cuts = {
-        round(float(shot["time_range"]["end_sec"]), 6)
-        for segment in video_description["segments"]
-        for shot in segment["shots"]
-        if 0.0 < float(shot["time_range"]["end_sec"]) < source_duration_sec
-    }
+    media = SegmentMediaReader(source_video, video_description)
+    requested_by_segment: dict[
+        str,
+        tuple[dict[str, Any], Path, list[tuple[float, float]]],
+    ] = {}
+    for item in items:
+        if item.get("dialogue_anchor") is not None:
+            continue
+        source_start, source_end = parse_range(str(item["timestamp"]))
+        detection_end = min(
+            source_duration_sec,
+            source_end + optimization_config.search_margin_sec,
+        )
+        for segment, clip_path in media.cached_segments_for_range(
+            source_start,
+            detection_end,
+        ):
+            segment_id = str(segment["segment_id"])
+            segment_start = float(segment["time_range"]["start_sec"])
+            segment_end = float(segment["time_range"]["end_sec"])
+            local_start = max(source_start, segment_start) - segment_start
+            local_end = min(detection_end, segment_end) - segment_start
+            entry = requested_by_segment.setdefault(
+                segment_id,
+                (segment, clip_path, []),
+            )
+            entry[2].append((local_start, local_end))
+
+    jobs = [
+        (segment, clip_path, local_start, local_end)
+        for segment, clip_path, intervals in requested_by_segment.values()
+        for local_start, local_end in _merge_intervals(intervals)
+    ]
+    cuts: set[float] = set()
+
+    def detect_job(
+        job: tuple[dict[str, Any], Path, float, float],
+    ) -> tuple[dict[str, Any], list[float]]:
+        segment, clip_path, local_start, local_end = job
+        local_cuts, _ = detect_source_cuts(
+            clip_path,
+            local_start,
+            local_end,
+            adaptive_threshold=detection_config.adaptive_threshold,
+            adaptive_min_content_val=(
+                detection_config.adaptive_min_content_val
+            ),
+            adaptive_min_scene_len_sec=(
+                detection_config.adaptive_min_scene_len_sec
+            ),
+            duplicate_frame_threshold=(
+                detection_config.duplicate_frame_threshold
+            ),
+        )
+        return segment, local_cuts
+
+    worker_count = max(
+        1,
+        min(optimization_config.max_workers, len(jobs) or 1),
+    )
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="segment-cut-detector",
+    ) as executor:
+        for segment, local_cuts in executor.map(detect_job, jobs):
+            segment_start = float(segment["time_range"]["start_sec"])
+            cuts.update(
+                round(segment_start + local_cut, 6)
+                for local_cut in local_cuts
+                if 0.0 < segment_start + local_cut < source_duration_sec
+            )
+
+    used_segments = [
+        entry[0] for entry in requested_by_segment.values()
+    ]
+    cuts.update(
+        round(float(segment["time_range"]["end_sec"]), 6)
+        for segment in used_segments
+        if 0.0
+        < float(segment["time_range"]["end_sec"])
+        < source_duration_sec
+        and any(
+            float(other["time_range"]["start_sec"])
+            == float(segment["time_range"]["end_sec"])
+            for other in used_segments
+        )
+    )
+    log_event(
+        "INFO",
+        "source_window",
+        "stage.complete",
+        "Used Segment caches inspected for source-window cut optimization",
+        segments=len(requested_by_segment),
+        intervals=len(jobs),
+        cuts=len(cuts),
+    )
     return tuple(sorted(cuts)), frame_rate, source_duration_sec
 
 
@@ -142,17 +254,16 @@ def choose_source_window(
         if cut_bearing:
             feasible = cut_bearing
 
-    def objective(candidate: float) -> tuple[float, float, int, float]:
+    def objective(candidate: float) -> float:
         cuts = feasible[candidate]
         output_cuts = [output_start_sec + cut - candidate for cut in cuts]
-        worst_distance = (
+        return (
             max((_nearest_beat_distance(cut, beats) for cut in output_cuts), default=0.0)
             if beats
             else 0.0
         )
-        return worst_distance, candidate - original_start_sec, len(cuts), candidate
 
-    selected = min(feasible, key=objective)
+    selected = min(sorted(feasible), key=objective)
     selected_cuts = feasible[selected]
     selected_output_cuts = tuple(output_start_sec + cut - selected for cut in selected_cuts)
     return SourceWindowOptimization(
@@ -260,27 +371,24 @@ def _optimize_item(
 
 
 def optimize_script_source_windows(
+    source_video: Path,
     items: list[dict[str, Any]],
     beat_times: list[float],
     video_description: dict[str, Any],
     *,
     output_fps: int,
+    detection_config: ShotDetectionConfig,
     optimization_config: SourceWindowOptimizationConfig,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
 
-    source_cuts, frame_rate, source_duration_sec = _cached_source_cuts(
-        video_description
-    )
-    log_event(
-        "INFO",
-        "source_window",
-        "cache.hit",
-        "Reusable analysed Shot boundaries loaded",
-        artifact="shot_boundaries",
-        cuts=len(source_cuts),
-        frame_rate=frame_rate,
+    source_cuts, frame_rate, source_duration_sec = _detect_used_segment_cuts(
+        source_video,
+        items,
+        video_description,
+        detection_config,
+        optimization_config,
     )
     optimized: list[dict[str, Any] | None] = [None] * len(items)
     worker_count = max(

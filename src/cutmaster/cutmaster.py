@@ -438,10 +438,12 @@ def _run_cutmaster(
         clips=len(adapted_script),
     )
     adapted_script = optimize_script_source_windows(
+        request.video_path,
         adapted_script,
         music_profile["beats_sec"],
         material.video_description,
         output_fps=config.render.fps,
+        detection_config=config.shot_detection,
         optimization_config=config.source_window_optimization,
     )
     write_script(adapted_script_path, adapted_script)

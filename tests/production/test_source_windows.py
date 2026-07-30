@@ -4,8 +4,15 @@ import numpy as np
 from scenedetect import FrameTimecode
 
 from cutmaster.runtime.shot_detection import detect_source_cuts
-from cutmaster.production.source_windows import choose_source_window, optimize_script_source_windows
-from cutmaster.configuration.schema import SourceWindowOptimizationConfig
+from cutmaster.production.source_windows import (
+    _detect_used_segment_cuts,
+    choose_source_window,
+    optimize_script_source_windows,
+)
+from cutmaster.configuration.schema import (
+    ShotDetectionConfig,
+    SourceWindowOptimizationConfig,
+)
 
 
 def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path) -> None:
@@ -181,7 +188,10 @@ def test_edge_constraint_is_enforced_without_audio_beats() -> None:
     )
 
 
-def test_parallel_optimization_preserves_script_order() -> None:
+def test_parallel_optimization_preserves_script_order(
+    monkeypatch,
+    tmp_path,
+) -> None:
     items = [
         {
             "_id": index,
@@ -191,33 +201,26 @@ def test_parallel_optimization_preserves_script_order() -> None:
         }
         for index, (source, output) in enumerate(((10, 0), (20, 4), (30, 8)), start=1)
     ]
-    boundaries = [0.0, 12.0, 22.0, 32.0, 60.0]
     video_description = {
         "source": {"duration_sec": 60.0, "fps": 10.0},
-        "segments": [
-            {
-                "shots": [
-                    {
-                        "time_range": {
-                            "start_sec": start,
-                            "end_sec": end,
-                        }
-                    }
-                    for start, end in zip(
-                        boundaries,
-                        boundaries[1:],
-                        strict=False,
-                    )
-                ]
-            }
-        ],
+        "segments": [],
     }
+    monkeypatch.setattr(
+        "cutmaster.production.source_windows._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: (
+            (12.0, 22.0, 32.0),
+            10.0,
+            60.0,
+        ),
+    )
 
     optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
         items,
         beat_times=[2.0, 6.0, 10.0],
         video_description=video_description,
         output_fps=10,
+        detection_config=ShotDetectionConfig(),
         optimization_config=SourceWindowOptimizationConfig(max_workers=3),
     )
 
@@ -225,7 +228,10 @@ def test_parallel_optimization_preserves_script_order() -> None:
     assert all(item["cut_optimization"]["max_beat_distance_sec"] == 0.0 for item in optimized)
 
 
-def test_cached_single_shot_video_preserves_source_window() -> None:
+def test_cutless_used_segment_preserves_source_window(
+    monkeypatch,
+    tmp_path,
+) -> None:
     items = [
         {
             "timestamp": "00:00:10,000-00:00:14,000",
@@ -234,27 +240,92 @@ def test_cached_single_shot_video_preserves_source_window() -> None:
     ]
     video_description = {
         "source": {"duration_sec": 60.0, "fps": 10.0},
-        "segments": [
-            {
-                "shots": [
-                    {
-                        "time_range": {
-                            "start_sec": 0.0,
-                            "end_sec": 60.0,
-                        }
-                    }
-                ]
-            }
-        ],
+        "segments": [],
     }
+    monkeypatch.setattr(
+        "cutmaster.production.source_windows._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((), 10.0, 60.0),
+    )
 
     optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
         items,
         beat_times=[1.0, 2.0, 3.0],
         video_description=video_description,
         output_fps=10,
+        detection_config=ShotDetectionConfig(),
         optimization_config=SourceWindowOptimizationConfig(),
     )
 
     assert optimized[0]["timestamp"] == "00:00:10,000-00:00:14,000"
     assert optimized[0]["cut_optimization"]["num_internal_cuts"] == 0
+
+
+def test_used_segment_detection_skips_anchor_and_unused_segments(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    segments = []
+    for index, (start, end) in enumerate(
+        ((0.0, 10.0), (10.0, 20.0), (20.0, 30.0)),
+        1,
+    ):
+        clip_path = tmp_path / f"segment_{index:04d}.mp4"
+        clip_path.write_bytes(b"cached")
+        segments.append(
+            {
+                "segment_id": f"segment_{index:04d}",
+                "time_range": {"start_sec": start, "end_sec": end},
+                "clip_path": str(clip_path),
+            }
+        )
+    video_description = {
+        "source": {"duration_sec": 30.0, "fps": 30.0},
+        "segments": segments,
+    }
+    calls = []
+
+    def fake_detect(clip_path, start_sec, end_sec, **kwargs):
+        calls.append((clip_path.name, start_sec, end_sec, kwargs))
+        return [3.5], 30.0
+
+    monkeypatch.setattr(
+        "cutmaster.production.source_windows.detect_source_cuts",
+        fake_detect,
+    )
+
+    cuts, frame_rate, source_duration = _detect_used_segment_cuts(
+        tmp_path / "source.mp4",
+        [
+            {
+                "timestamp": "00:00:12,000-00:00:16,000",
+            },
+            {
+                "timestamp": "00:00:22,000-00:00:26,000",
+                "dialogue_anchor": {"anchor_id": "anchor_01"},
+            },
+        ],
+        video_description,
+        ShotDetectionConfig(
+            adaptive_threshold=3.0,
+            adaptive_min_content_val=12.0,
+            adaptive_min_scene_len_sec=0.4,
+            duplicate_frame_threshold=2.0,
+        ),
+        SourceWindowOptimizationConfig(search_margin_sec=2.0),
+    )
+
+    assert cuts == (13.5,)
+    assert frame_rate == 30.0
+    assert source_duration == 30.0
+    assert len(calls) == 1
+    clip_name, start_sec, end_sec, kwargs = calls[0]
+    assert clip_name == "segment_0002.mp4"
+    assert start_sec == pytest.approx(2.0)
+    assert end_sec == pytest.approx(8.0)
+    assert kwargs == {
+        "adaptive_threshold": 3.0,
+        "adaptive_min_content_val": 12.0,
+        "adaptive_min_scene_len_sec": 0.4,
+        "duplicate_frame_threshold": 2.0,
+    }

@@ -126,6 +126,29 @@ class SegmentMediaReader:
             self._extract_segment_clip(segment, clip_path)
         return clip_path
 
+    def cached_segments_for_range(
+        self,
+        start_sec: float,
+        end_sec: float,
+    ) -> list[tuple[dict[str, Any], Path]]:
+        if end_sec <= start_sec:
+            raise ValueError("Segment media range must have positive duration")
+        matches = [
+            segment
+            for segment in self.segments
+            if float(segment["time_range"]["start_sec"]) < end_sec
+            and float(segment["time_range"]["end_sec"]) > start_sec
+        ]
+        if not matches:
+            raise ValueError(
+                f"Source range {start_sec:.6f}-{end_sec:.6f}s is outside "
+                "the analysed Segment timeline"
+            )
+        return [
+            (segment, self._ensure_segment_clip(segment))
+            for segment in matches
+        ]
+
     def _read_segment_frames(
         self,
         segment: dict[str, Any],
