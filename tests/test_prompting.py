@@ -11,6 +11,11 @@ from cutmaster.prompting.analyser import (
     VideoSummaryDetails,
 )
 from cutmaster.prompting.core import response_template_from_schema
+from cutmaster.prompting.failure_catalog import (
+    PROMPT_FAILURE_CATALOG,
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.prompting.planners import (
     DialogueAnchorSelectionDetails,
     SlotPlanningDetails,
@@ -164,14 +169,18 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
             existing_slots=[{"slot_id": "slot_01"}],
             target_slot_constraints=constraints,
             rejection_feedback=[
-                {
-                    "slot_id": "slot_02",
-                    "reason": "no_candidate_passed_visual_diagnostics",
-                },
-                {
-                    "slot_id": "slot_04",
-                    "reason": "insufficient_non_overlapping_capacity",
-                },
+                build_prompt_failure(
+                    PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+                    slot_id="slot_02",
+                    candidate_rejections=[],
+                ),
+                build_prompt_failure(
+                    PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+                    slot_id="slot_04",
+                    available_capacity=1,
+                    candidates_needed=3,
+                    planned_duration_sec=4.0,
+                ),
             ],
         ),
     )
@@ -350,7 +359,26 @@ def test_registry_rebuilds_prompt_with_accumulated_failure_reasons() -> None:
     assert '"attempt": 2' in retried.user_prompt
     assert "Candidate is shorter than planned_duration_sec" in retried.user_prompt
     assert "Duplicate candidate range for slot_01" in retried.user_prompt
+    assert retried.user_prompt.count('"reason_code": "response_validation_failed"') == 2
+    assert retried.user_prompt.count('"diagnosis":') >= 2
+    assert retried.user_prompt.count('"repair_requirement":') >= 2
     assert retried.user_prompt.count("<previous_attempt_failures>") == 1
+
+
+def test_prompt_failure_catalog_covers_every_reason_code() -> None:
+    assert set(PROMPT_FAILURE_CATALOG) == set(PromptFailureCode)
+    assert all(item.diagnosis.strip() for item in PROMPT_FAILURE_CATALOG.values())
+    assert all(
+        item.repair_requirement.strip()
+        for item in PROMPT_FAILURE_CATALOG.values()
+    )
+
+
+def test_prompt_failure_requires_template_details() -> None:
+    with pytest.raises(ValueError, match="missing_shot_count"):
+        build_prompt_failure(
+            PromptFailureCode.PROVIDER_DATA_INSPECTION_FAILED,
+        )
 
 
 def test_same_contract_rejects_unlisted_enum_and_extra_fields() -> None:

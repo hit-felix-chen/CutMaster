@@ -201,7 +201,10 @@ forbidden_segment_assignments.
 The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
 static imagery, or the deterministic capacity check proved that the assigned source range cannot
 contain the required number of distinct, non-overlapping windows. Use rejection_feedback to
-correct the actual cause. Redesign the Slot's visible event,
+correct the actual cause. Every feedback item has reason_code, diagnosis, and repair_requirement:
+reason_code is the stable machine-readable category, diagnosis explains the concrete failed
+constraint with measured values, and repair_requirement is mandatory for the replacement. Redesign
+the Slot's visible event,
 required_visible_subjects, and source_segment_ids so that one continuous
 planned_duration_sec-long passage is visually realizable. Do not merely paraphrase the failed
 description while retaining unsupported subjects or source evidence. Role, team, and object

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import DialogueAnchorConfig
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.production.ffmpeg import RenderError, run_media_command
 from cutmaster.runtime.media_probe import media_duration
 from cutmaster.runtime.observability import error_summary, log_event
@@ -211,6 +215,12 @@ def _run_demucs(
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
+        failure = build_prompt_failure(
+            PromptFailureCode.EXTERNAL_PROCESS_FAILED,
+            operation="demucs_vocal_separation",
+            error_type=type(exc).__name__,
+            error_message=error_summary(exc),
+        )
         log_event(
             "ERROR",
             "dialogue_audio",
@@ -219,8 +229,7 @@ def _run_demucs(
             model=config.separator_model,
             device=device,
             elapsed_sec=time.monotonic() - started,
-            error_type=type(exc).__name__,
-            reason=error_summary(exc),
+            **failure,
         )
         raise RenderError(
             f"Demucs vocal separation failed with exit code {exc.returncode}"

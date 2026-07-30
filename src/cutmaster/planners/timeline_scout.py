@@ -16,6 +16,10 @@ from cutmaster.configuration.schema import (
 )
 from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.prompting.planners import (
     CandidateRetrievalDetails,
     CandidateVisualScoringDetails,
@@ -442,6 +446,11 @@ def add_visual_features(
         except Exception as exc:
             if "data_inspection_failed" not in str(exc).lower():
                 raise
+            inspection_failure = build_prompt_failure(
+                PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
+                operation=subset_operation,
+                error_message=error_summary(exc),
+            )
             if len(subset) > 1:
                 midpoint = len(subset) // 2
                 log_event(
@@ -453,7 +462,7 @@ def add_visual_features(
                     candidates=len(subset),
                     fallback="split_batch",
                     error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **inspection_failure,
                 )
                 return {
                     **score_subset(
@@ -478,7 +487,7 @@ def add_visual_features(
                     candidate_id=candidate["candidate_id"],
                     fallback="resample_single_frame",
                     error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **inspection_failure,
                 )
                 return score_subset(
                     subset,
@@ -659,17 +668,22 @@ def retrieve_candidates(
                 excluded[slot_id],
             )
             if available_capacity < candidates_needed:
-                capacity_failure = {
-                    "slot_id": slot_id,
-                    "reason": "insufficient_non_overlapping_capacity",
-                    "round": round_index,
-                    "scope": scope,
-                    "scope_round": scope_round,
-                    "available_capacity": available_capacity,
-                    "candidates_needed": candidates_needed,
-                    "excluded_ranges": excluded[slot_id],
-                    "source_segment_ids": list(slot["source_segment_ids"]),
-                }
+                capacity_failure = build_prompt_failure(
+                    PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+                    slot_id=slot_id,
+                    round=round_index,
+                    scope=scope,
+                    scope_round=scope_round,
+                    available_capacity=available_capacity,
+                    candidates_needed=candidates_needed,
+                    candidate_deficit=candidates_needed - available_capacity,
+                    planned_duration_sec=float(slot["planned_duration_sec"]),
+                    minimum_usable_source_duration_sec=(
+                        candidates_needed * float(slot["planned_duration_sec"])
+                    ),
+                    excluded_ranges=excluded[slot_id],
+                    source_segment_ids=list(slot["source_segment_ids"]),
+                )
                 log_event(
                     "WARNING",
                     "aster.timeline",
@@ -681,13 +695,7 @@ def retrieve_candidates(
                         else "Candidate scope lacks enough non-overlapping fixed-duration "
                         "windows; expanding in the next round"
                     ),
-                    round=round_index,
-                    scope=scope,
-                    scope_round=scope_round,
-                    slot_id=slot_id,
-                    candidates_needed=candidates_needed,
-                    available_capacity=available_capacity,
-                    planned_duration_sec=float(slot["planned_duration_sec"]),
+                    **capacity_failure,
                 )
                 return slot_id, None, capacity_failure
             confirmed_candidates = {
@@ -726,17 +734,21 @@ def retrieve_candidates(
                     ),
                 )
             except Exception as exc:
+                retrieval_failure = build_prompt_failure(
+                    PromptFailureCode.CANDIDATE_RETRIEVAL_FAILED,
+                    slot_id=slot_id,
+                    round=round_index,
+                    scope=scope,
+                    scope_round=scope_round,
+                    error_type=type(exc).__name__,
+                    error_message=error_summary(exc),
+                )
                 log_event(
                     "WARNING",
                     "aster.timeline",
                     "validation.reject",
                     "Slot candidate retrieval failed; expanding in the next round",
-                    round=round_index,
-                    scope=scope,
-                    scope_round=scope_round,
-                    slot_id=slot_id,
-                    error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **retrieval_failure,
                 )
                 return slot_id, None, None
             for item_index, candidate in enumerate(slot_pool[slot_id], 1):
@@ -806,33 +818,31 @@ def retrieve_candidates(
                     if kinetic_energy > static_threshold:
                         moving_candidates.append(candidate)
                         continue
+                    static_failure = build_prompt_failure(
+                        PromptFailureCode.VISUALLY_STATIC,
+                        slot_id=slot_id,
+                        candidate_id=candidate["candidate_id"],
+                        timestamp=candidate["timestamp"],
+                        kinetic_energy=kinetic_energy,
+                        static_threshold=static_threshold,
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                    )
                     log_event(
                         "WARNING",
                         "aster.timeline",
                         "validation.reject",
                         "Candidate rejected by local motion diagnostics",
-                        round=round_index,
-                        scope=scope,
-                        scope_round=scope_round,
-                        slot_id=slot_id,
-                        candidate_id=candidate["candidate_id"],
-                        timestamp=candidate["timestamp"],
-                        reason="visually_static",
-                        kinetic_energy=kinetic_energy,
-                        static_threshold=static_threshold,
+                        **static_failure,
                     )
                     rejected.append(
                         {
-                            "slot_id": slot_id,
-                            "timestamp": candidate["timestamp"],
-                            "candidate_id": candidate["candidate_id"],
-                            "reason": "visually_static",
+                            **static_failure,
                             "diagnostic_source": "local_motion",
                             "planned_content_description": slot[
                                 "content_description"
                             ],
-                            "kinetic_energy": kinetic_energy,
-                            "static_threshold": static_threshold,
                         }
                     )
                 round_pool[slot_id] = moving_candidates
@@ -896,25 +906,24 @@ def retrieve_candidates(
                         >= retrieval_config.protagonist_visibility_likert_threshold
                     )
                     if overlap or not visibility_ok:
-                        rejection_reason = (
-                            "overlapping_range"
+                        rejection_code = (
+                            PromptFailureCode.OVERLAPPING_RANGE
                             if overlap
-                            else "required_subject_not_visually_confirmed"
+                            else PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED
                         )
-                        log_event(
-                            "WARNING",
-                            "aster.timeline",
-                            "validation.reject",
-                            "Candidate rejected after visual diagnostics",
+                        visual_failure = build_prompt_failure(
+                            rejection_code,
                             round=round_index,
                             scope=scope,
                             scope_round=scope_round,
                             slot_id=slot_id,
                             candidate_id=candidate["candidate_id"],
                             timestamp=candidate["timestamp"],
-                            reason=rejection_reason,
                             required_visible_subjects=list(
                                 slot.get("required_visible_subjects") or []
+                            ),
+                            visible_subjects=list(
+                                candidate.get("visible_subjects") or []
                             ),
                             protagonist_visibility_likert=candidate[
                                 "protagonist_visibility_likert"
@@ -925,30 +934,23 @@ def retrieve_candidates(
                             kinetic_energy=candidate["kinetic_energy"],
                             visual_evidence=candidate["visual_evidence"],
                         )
+                        log_event(
+                            "WARNING",
+                            "aster.timeline",
+                            "validation.reject",
+                            "Candidate rejected after visual diagnostics",
+                            **visual_failure,
+                        )
                         rejected.append(
                             {
-                                "slot_id": slot_id,
-                                "timestamp": candidate["timestamp"],
-                                "candidate_id": candidate["candidate_id"],
-                                "reason": rejection_reason,
+                                **visual_failure,
                                 "planned_content_description": slot[
                                     "content_description"
                                 ],
-                                "required_visible_subjects": list(
-                                    slot.get("required_visible_subjects") or []
-                                ),
                                 "visible_description": candidate["description"],
-                                "visible_subjects": list(
-                                    candidate.get("visible_subjects") or []
-                                ),
                                 "visual_slot_relevance_likert": candidate.get(
                                     "visual_slot_relevance_likert"
                                 ),
-                                "protagonist_visibility_likert": candidate[
-                                    "protagonist_visibility_likert"
-                                ],
-                                "kinetic_energy": candidate["kinetic_energy"],
-                                "visual_evidence": candidate["visual_evidence"],
                             }
                         )
                         continue
@@ -965,19 +967,19 @@ def retrieve_candidates(
                 if item["slot_id"] == slot_id
             ]
             targeted_failures.append(
-                {
-                    "slot_id": slot_id,
-                    "reason": "no_candidate_passed_visual_diagnostics",
-                    "round": round_index,
-                    "scope": scope,
-                    "scope_round": scope_round,
-                    "source_segment_ids": list(slot["source_segment_ids"]),
-                    "planned_content_description": slot["content_description"],
-                    "required_visible_subjects": list(
+                build_prompt_failure(
+                    PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+                    slot_id=slot_id,
+                    round=round_index,
+                    scope=scope,
+                    scope_round=scope_round,
+                    source_segment_ids=list(slot["source_segment_ids"]),
+                    planned_content_description=slot["content_description"],
+                    required_visible_subjects=list(
                         slot.get("required_visible_subjects") or []
                     ),
-                    "candidate_rejections": slot_rejections,
-                }
+                    candidate_rejections=slot_rejections,
+                )
             )
 
         if replan_slots is not None and targeted_failures:
@@ -992,7 +994,7 @@ def retrieve_candidates(
                 round=round_index,
                 slot_ids=sorted(target_slot_ids),
                 reasons={
-                    failure["slot_id"]: failure["reason"]
+                    failure["slot_id"]: failure["reason_code"]
                     for failure in targeted_failures
                 },
             )
@@ -1046,12 +1048,12 @@ def retrieve_candidates(
     }
     context.set_artifact("candidate_rejections", rejected)
     if shortages:
-        failure = {
-            "reason": "insufficient_visually_grounded_candidates",
-            "shortages": shortages,
-            "planned_segment_rounds": primary_rounds,
-            "adjacent_expansion_rounds": adjacent_rounds,
-        }
+        failure = build_prompt_failure(
+            PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
+            shortages=shortages,
+            planned_segment_rounds=primary_rounds,
+            adjacent_expansion_rounds=adjacent_rounds,
+        )
         context.set_artifact("retrieval_failure", failure)
         empty_slots = [
             slot_id

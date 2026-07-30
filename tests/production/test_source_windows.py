@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 import numpy as np
@@ -7,7 +5,7 @@ from scenedetect import FrameTimecode
 
 from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.production.source_windows import choose_source_window, optimize_script_source_windows
-from cutmaster.configuration.schema import ShotDetectionConfig, SourceWindowOptimizationConfig
+from cutmaster.configuration.schema import SourceWindowOptimizationConfig
 
 
 def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path) -> None:
@@ -183,16 +181,7 @@ def test_edge_constraint_is_enforced_without_audio_beats() -> None:
     )
 
 
-def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_detect(
-        _path: Path,
-        start: float,
-        end: float,
-        **_kwargs,
-    ) -> tuple[list[float], float]:
-        return [start + (end - start) / 2.0], 10.0
-
-    monkeypatch.setattr("cutmaster.production.source_windows.detect_source_cuts", fake_detect)
+def test_parallel_optimization_preserves_script_order() -> None:
     items = [
         {
             "_id": index,
@@ -202,16 +191,70 @@ def test_parallel_optimization_preserves_script_order(monkeypatch: pytest.Monkey
         }
         for index, (source, output) in enumerate(((10, 0), (20, 4), (30, 8)), start=1)
     ]
+    boundaries = [0.0, 12.0, 22.0, 32.0, 60.0]
+    video_description = {
+        "source": {"duration_sec": 60.0, "fps": 10.0},
+        "segments": [
+            {
+                "shots": [
+                    {
+                        "time_range": {
+                            "start_sec": start,
+                            "end_sec": end,
+                        }
+                    }
+                    for start, end in zip(
+                        boundaries,
+                        boundaries[1:],
+                        strict=False,
+                    )
+                ]
+            }
+        ],
+    }
 
     optimized = optimize_script_source_windows(
-        Path("source.mp4"),
         items,
         beat_times=[2.0, 6.0, 10.0],
-        source_duration_sec=60.0,
+        video_description=video_description,
         output_fps=10,
-        detection_config=ShotDetectionConfig(),
         optimization_config=SourceWindowOptimizationConfig(max_workers=3),
     )
 
     assert [item["_id"] for item in optimized] == [1, 2, 3]
     assert all(item["cut_optimization"]["max_beat_distance_sec"] == 0.0 for item in optimized)
+
+
+def test_cached_single_shot_video_preserves_source_window() -> None:
+    items = [
+        {
+            "timestamp": "00:00:10,000-00:00:14,000",
+            "output_frame_range": [0, 40],
+        }
+    ]
+    video_description = {
+        "source": {"duration_sec": 60.0, "fps": 10.0},
+        "segments": [
+            {
+                "shots": [
+                    {
+                        "time_range": {
+                            "start_sec": 0.0,
+                            "end_sec": 60.0,
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+
+    optimized = optimize_script_source_windows(
+        items,
+        beat_times=[1.0, 2.0, 3.0],
+        video_description=video_description,
+        output_fps=10,
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert optimized[0]["timestamp"] == "00:00:10,000-00:00:14,000"
+    assert optimized[0]["cut_optimization"]["num_internal_cuts"] == 0

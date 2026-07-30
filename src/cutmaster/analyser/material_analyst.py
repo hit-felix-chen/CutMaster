@@ -35,6 +35,10 @@ from cutmaster.configuration.schema import (
 )
 from cutmaster.runtime.observability import log_event
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.prompting.analyser import (
     DialogueSegmentationDetails,
     SegmentSummaryDetails,
@@ -797,6 +801,11 @@ def _annotate_segments(
                             ),
                         },
                     )
+                    failure = build_prompt_failure(
+                        PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
+                        operation="shot_visual_annotation",
+                        error_message=str(exc),
+                    )
                     log_event(
                         "WARNING",
                         "analyser",
@@ -807,7 +816,7 @@ def _annotate_segments(
                         visual_annotation_status=(
                             VisualAnnotationStatus.PROVIDER_REJECTED
                         ),
-                        reason="data_inspection_failed",
+                        **failure,
                     )
                 else:
                     _write_json_checkpoint(

@@ -8,6 +8,10 @@ from cutmaster.planners.story_editor import StoryEditorAgent
 from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import RunRequest
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planners.revision_editor import RevisionEditorAgent
@@ -76,6 +80,10 @@ class ASTERTeam:
         if not missing:
             return
         preview_limit = 20
+        failure = build_prompt_failure(
+            PromptFailureCode.PROVIDER_DATA_INSPECTION_FAILED,
+            missing_shot_count=len(missing),
+        )
         log_event(
             "WARNING",
             "aster.arrangement",
@@ -91,7 +99,7 @@ class ASTERTeam:
                 shot_id for _, shot_id in missing[:preview_limit]
             ],
             omitted_shot_ids=max(0, len(missing) - preview_limit),
-            reason="data_inspection_failed",
+            **failure,
         )
 
     def arrange(

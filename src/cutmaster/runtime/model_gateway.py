@@ -8,6 +8,10 @@ from openai import OpenAI
 
 from cutmaster.runtime.json_codec import parse_json_object
 from cutmaster.configuration.schema import ModelConfig
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.runtime.observability import error_summary, log_event
 
 
@@ -74,29 +78,37 @@ def request_json_with_retries(
             if "data_inspection_failed" in str(exc).lower():
                 # Repeating the same rejected image payload cannot make it pass provider-side
                 # inspection. Let the visual caller split or resample the payload instead.
+                failure = build_prompt_failure(
+                    PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
+                    operation=operation,
+                    error_message=error_summary(exc),
+                )
                 log_event(
                     "ERROR",
                     "model",
                     "model.fail",
                     "Model request rejected by provider inspection",
-                    operation=operation,
                     attempt=attempt,
                     max_attempts=attempts,
                     error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **failure,
                 )
                 raise
             if attempt >= attempts:
+                failure = build_prompt_failure(
+                    PromptFailureCode.MODEL_RETRY_EXHAUSTED,
+                    operation=operation,
+                    max_attempts=attempts,
+                    error_type=type(exc).__name__,
+                    error_message=error_summary(exc),
+                )
                 log_event(
                     "ERROR",
                     "model",
                     "model.fail",
                     "Model transaction exhausted its retries",
-                    operation=operation,
                     attempt=attempt,
-                    max_attempts=attempts,
-                    error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **failure,
                 )
                 raise RuntimeError(
                     f"{operation} failed after {attempts} attempts: {exc}"
@@ -104,17 +116,21 @@ def request_json_with_retries(
             delay = min(2 ** (attempt - 1), 8)
             if on_retry is not None:
                 on_retry(exc, attempt)
+            failure = build_prompt_failure(
+                PromptFailureCode.MODEL_RETRY_SCHEDULED,
+                operation=operation,
+                attempt=attempt,
+                max_attempts=attempts,
+                error_type=type(exc).__name__,
+                error_message=error_summary(exc),
+            )
             log_event(
                 "WARNING",
                 "model",
                 "model.retry",
                 "Model transaction failed; retrying",
-                operation=operation,
-                attempt=attempt,
-                max_attempts=attempts,
                 backoff_sec=delay,
-                error_type=type(exc).__name__,
-                reason=error_summary(exc),
+                **failure,
             )
             time.sleep(delay)
     raise AssertionError("unreachable")

@@ -9,6 +9,10 @@ from typing import Any, Callable, TypeVar
 
 from cutmaster.runtime.model_gateway import generate_text, request_json_with_retries
 from cutmaster.configuration.schema import ModelConfig
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.prompting import PromptPackage
 
@@ -178,7 +182,12 @@ class WorkflowContext:
             if error is not None:
                 attempt["error"] = {
                     "type": type(error).__name__,
-                    "reason": error_summary(error),
+                    **build_prompt_failure(
+                        PromptFailureCode.MODEL_CALL_FAILED,
+                        task="model_attempt",
+                        error_type=type(error).__name__,
+                        error_message=error_summary(error),
+                    ),
                 }
 
     def _finish_model_call(
@@ -196,7 +205,12 @@ class WorkflowContext:
             if error is not None:
                 call["error"] = {
                     "type": type(error).__name__,
-                    "reason": error_summary(error),
+                    **build_prompt_failure(
+                        PromptFailureCode.MODEL_CALL_FAILED,
+                        task=str(call["task"]),
+                        error_type=type(error).__name__,
+                        error_message=error_summary(error),
+                    ),
                 }
 
     def save_model_call_tree(self, *, status: str = "complete") -> Path | None:
@@ -321,6 +335,12 @@ class WorkflowContext:
                     image_data_urls=image_data_urls,
                 )
             except Exception as exc:
+                failure = build_prompt_failure(
+                    PromptFailureCode.MODEL_REQUEST_FAILED,
+                    operation=active_package.operation,
+                    error_type=type(exc).__name__,
+                    error_message=error_summary(exc),
+                )
                 log_event(
                     "WARNING",
                     "model",
@@ -331,8 +351,7 @@ class WorkflowContext:
                     model=config.model,
                     modality=modality,
                     elapsed_sec=time.monotonic() - request_started,
-                    error_type=type(exc).__name__,
-                    reason=error_summary(exc),
+                    **failure,
                 )
                 self._finish_model_attempt(
                     current_attempt,

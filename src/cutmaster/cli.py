@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 from cutmaster import CutMaster
 from cutmaster.configuration.loader import load_config
 from cutmaster.contracts.workflow import RunRequest
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.runtime.observability import configure_logging, error_summary, log_event
 
 
@@ -65,13 +69,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = CutMaster(config).run(request)
     except Exception as exc:
+        failure = build_prompt_failure(
+            PromptFailureCode.WORKFLOW_FAILED,
+            error_type=type(exc).__name__,
+            error_message=error_summary(exc),
+        )
         log_event(
             "ERROR",
             "cutmaster",
             "workflow.fail",
             "CutMaster workflow failed",
-            error_type=type(exc).__name__,
-            reason=error_summary(exc),
+            **failure,
         )
         raise
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))

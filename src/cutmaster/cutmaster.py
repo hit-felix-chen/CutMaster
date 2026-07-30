@@ -8,6 +8,10 @@ from cutmaster.production.source_windows import optimize_script_source_windows
 from cutmaster.production.dialogue_audio import prepare_dialogue_audio
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.workflow import OrchestrationResult, RunRequest
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.runtime.observability import error_summary, log_event
 from cutmaster.planners import ASTERTeam, NoFeasiblePathError
 from cutmaster.runtime.workflow_context import WorkflowContext
@@ -301,12 +305,19 @@ def _run_cutmaster(
                 selection_seconds += elapsed
             if not isinstance(exc, NoFeasiblePathError) and attempt_stage != "retrieval":
                 raise
+            attempt_failure = build_prompt_failure(
+                PromptFailureCode.PLANNING_ATTEMPT_INFEASIBLE,
+                attempt=planning_attempt,
+                stage=attempt_stage,
+                error_type=type(exc).__name__,
+                error_message=error_summary(exc),
+            )
             diagnostics = (
                 exc.diagnostics
                 if isinstance(exc, NoFeasiblePathError)
                 else planning_context.get_artifact(
                     "retrieval_failure",
-                    {"reason": str(exc)},
+                    attempt_failure,
                 )
             )
             shortages = diagnostics.get("shortages") or {}
@@ -338,11 +349,8 @@ def _run_cutmaster(
                 "aster.composition",
                 "validation.reject",
                 "Planning attempt was infeasible; replanning with diagnostics",
-                stage=attempt_stage,
-                attempt=planning_attempt,
-                error_type=type(exc).__name__,
-                reason=error_summary(exc),
                 failed_slots=sorted(failed_slot_ids),
+                **attempt_failure,
             )
     else:
         raise RuntimeError("Planning loop ended without a feasible path")
@@ -430,12 +438,10 @@ def _run_cutmaster(
         clips=len(adapted_script),
     )
     adapted_script = optimize_script_source_windows(
-        request.video_path,
         adapted_script,
         music_profile["beats_sec"],
-        source_duration,
+        material.video_description,
         output_fps=config.render.fps,
-        detection_config=config.shot_detection,
         optimization_config=config.source_window_optimization,
     )
     write_script(adapted_script_path, adapted_script)

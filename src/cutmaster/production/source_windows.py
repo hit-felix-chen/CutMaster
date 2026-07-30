@@ -3,13 +3,11 @@ from __future__ import annotations
 import bisect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import ShotDetectionConfig, SourceWindowOptimizationConfig
+from cutmaster.configuration.schema import SourceWindowOptimizationConfig
 from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.progress import progress_bar
-from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.timecode import format_range, parse_range
 
 
@@ -22,6 +20,26 @@ class SourceWindowOptimization:
     max_beat_distance_sec: float
     effective_min_boundary_distance_sec: float
     fallback_level: int
+
+
+def _cached_source_cuts(
+    video_description: dict[str, Any],
+) -> tuple[tuple[float, ...], float, float]:
+    source = video_description["source"]
+    source_duration_sec = float(source["duration_sec"])
+    frame_rate = float(source["fps"])
+    if source_duration_sec <= 0.0:
+        raise ValueError("Cached video description has an invalid source duration")
+    if frame_rate <= 0.0:
+        raise ValueError("Cached video description has an invalid source frame rate")
+
+    cuts = {
+        round(float(shot["time_range"]["end_sec"]), 6)
+        for segment in video_description["segments"]
+        for shot in segment["shots"]
+        if 0.0 < float(shot["time_range"]["end_sec"]) < source_duration_sec
+    }
+    return tuple(sorted(cuts)), frame_rate, source_duration_sec
 
 
 def _nearest_beat_distance(time_sec: float, beat_times: list[float]) -> float:
@@ -156,12 +174,12 @@ def choose_source_window(
 
 
 def _optimize_item(
-    video_path: Path,
     item: dict[str, Any],
     beat_times: list[float],
+    source_cuts: tuple[float, ...],
     source_duration_sec: float,
+    frame_rate: float,
     output_fps: int,
-    detection_config: ShotDetectionConfig,
     optimization_config: SourceWindowOptimizationConfig,
 ) -> dict[str, Any]:
     if item.get("dialogue_anchor") is not None:
@@ -185,16 +203,12 @@ def _optimize_item(
         source_duration_sec,
         source_end + optimization_config.search_margin_sec,
     )
-    source_cuts, frame_rate = detect_source_cuts(
-        video_path,
-        detection_start,
-        detection_end,
-        adaptive_threshold=detection_config.adaptive_threshold,
-        adaptive_min_content_val=detection_config.adaptive_min_content_val,
-        adaptive_min_scene_len_sec=detection_config.adaptive_min_scene_len_sec,
-        duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
-    )
-    internal_cuts = [cut for cut in source_cuts if source_start < cut < source_end]
+    first_cut = bisect.bisect_right(source_cuts, detection_start)
+    last_cut = bisect.bisect_left(source_cuts, detection_end)
+    candidate_cuts = list(source_cuts[first_cut:last_cut])
+    internal_cuts = [
+        cut for cut in candidate_cuts if source_start < cut < source_end
+    ]
     initial_output_cuts = [output_start + cut - source_start for cut in internal_cuts]
     initial_max_distance = max(
         (_nearest_beat_distance(cut, sorted(beat_times)) for cut in initial_output_cuts),
@@ -205,7 +219,7 @@ def _optimize_item(
         clip_duration_sec=clip_duration,
         output_start_sec=output_start,
         internal_source_cuts_sec=internal_cuts,
-        candidate_source_cuts_sec=source_cuts,
+        candidate_source_cuts_sec=candidate_cuts,
         beat_times=beat_times,
         source_duration_sec=source_duration_sec,
         frame_rate=frame_rate,
@@ -246,18 +260,28 @@ def _optimize_item(
 
 
 def optimize_script_source_windows(
-    video_path: Path,
     items: list[dict[str, Any]],
     beat_times: list[float],
-    source_duration_sec: float,
+    video_description: dict[str, Any],
     *,
     output_fps: int,
-    detection_config: ShotDetectionConfig,
     optimization_config: SourceWindowOptimizationConfig,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
 
+    source_cuts, frame_rate, source_duration_sec = _cached_source_cuts(
+        video_description
+    )
+    log_event(
+        "INFO",
+        "source_window",
+        "cache.hit",
+        "Reusable analysed Shot boundaries loaded",
+        artifact="shot_boundaries",
+        cuts=len(source_cuts),
+        frame_rate=frame_rate,
+    )
     optimized: list[dict[str, Any] | None] = [None] * len(items)
     worker_count = max(
         1,
@@ -267,12 +291,12 @@ def optimize_script_source_windows(
         futures = {
             executor.submit(
                 _optimize_item,
-                video_path,
                 item,
                 beat_times,
+                source_cuts,
                 source_duration_sec,
+                frame_rate,
                 output_fps,
-                detection_config,
                 optimization_config,
             ): index
             for index, item in enumerate(items)

@@ -6,6 +6,10 @@ from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, LLMConfig
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.prompting.planners import ScriptReviewDetails
 from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planners.edit_composer import _score_candidate_path, path_to_script
@@ -55,13 +59,13 @@ def _script_sequence_issue(script: list[dict[str, Any]]) -> dict[str, Any] | Non
     for item in script:
         start, end = parse_range(item["timestamp"])
         if start < previous_end:
-            return {
-                "reason": "source_chronology_or_overlap",
-                "previous_slot_id": previous_slot,
-                "slot_id": item["slot_id"],
-                "previous_end_sec": previous_end,
-                "current_start_sec": start,
-            }
+            return build_prompt_failure(
+                PromptFailureCode.SOURCE_CHRONOLOGY_OR_OVERLAP,
+                previous_slot_id=previous_slot,
+                slot_id=item["slot_id"],
+                previous_end_sec=previous_end,
+                current_start_sec=start,
+            )
         previous_end = end
         previous_slot = item["slot_id"]
     return None
@@ -164,22 +168,25 @@ def review_and_patch(
             if issue is None
             else None
         )
+        rejection = (
+            issue
+            if issue is not None
+            else build_prompt_failure(
+                (
+                    PromptFailureCode.PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH
+                    if (
+                        trial_score is not None
+                        and trial_score + 1e-9 < baseline_score
+                    )
+                    else PromptFailureCode.PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET
+                ),
+                slot_id=patch["slot_id"],
+            )
+        )
         rejected_patches.append(
             {
                 **patch,
-                "rejection_reason": (
-                    issue["reason"]
-                    if issue
-                    else (
-                        "degrades_or_requires_unscored_hard_cut_path"
-                        if (
-                            trial_score is not None
-                            and trial_score + 1e-9 < baseline_score
-                        )
-                        else "excluded_by_maximal_feasible_patch_subset"
-                    )
-                ),
-                "conflict": issue,
+                "rejection": rejection,
                 "trial_path_score": (
                     round(trial_score, 6) if trial_score is not None else None
                 ),

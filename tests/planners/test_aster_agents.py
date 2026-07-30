@@ -10,6 +10,10 @@ from cutmaster.configuration.schema import (
     LLMConfig,
     VLMConfig,
 )
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 from cutmaster.planners.timeline_scout import (
     _candidate_segment_video_descriptions,
     _retrieval_segment_context,
@@ -109,16 +113,13 @@ def test_planner_warns_when_visual_shot_annotations_are_missing(
 
     planner._warn_about_missing_shot_annotations()
 
-    assert events == [
-        {
-            "missing_shots": 1,
-            "total_shots": 3,
-            "affected_segments": 1,
-            "missing_shot_ids_preview": ["shot_00001"],
-            "omitted_shot_ids": 0,
-            "reason": "data_inspection_failed",
-        }
-    ]
+    assert len(events) == 1
+    assert events[0]["reason_code"] == "provider_data_inspection_failed"
+    assert events[0]["diagnosis"]
+    assert events[0]["repair_requirement"]
+    assert events[0]["missing_shots"] == 1
+    assert events[0]["missing_shot_count"] == 1
+    assert events[0]["missing_shot_ids_preview"] == ["shot_00001"]
 
 
 def test_slot_planning_story_context_excludes_shot_descriptions() -> None:
@@ -1604,26 +1605,16 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
         for event in log_events
         if event["message"] == "Candidate rejected after visual diagnostics"
     ]
-    assert rejection_logs == [
-        {
-            "level": "WARNING",
-            "component": "aster.timeline",
-            "event": "validation.reject",
-            "message": "Candidate rejected after visual diagnostics",
-            "round": 1,
-            "scope": "planned_segments",
-            "scope_round": 1,
-            "slot_id": "slot_01",
-            "candidate_id": "slot_01_round_01_candidate_02",
-            "timestamp": "00:00:14,000-00:00:18,000",
-            "reason": "required_subject_not_visually_confirmed",
-            "required_visible_subjects": ["focal subject"],
-            "protagonist_visibility_likert": 1,
-            "protagonist_visibility_likert_threshold": 3,
-            "kinetic_energy": 0.5,
-            "visual_evidence": "different identity",
-        }
-    ]
+    assert len(rejection_logs) == 1
+    rejection = rejection_logs[0]
+    assert rejection["reason_code"] == "required_subject_not_visually_confirmed"
+    assert rejection["diagnosis"]
+    assert rejection["repair_requirement"]
+    assert rejection["slot_id"] == "slot_01"
+    assert rejection["candidate_id"] == "slot_01_round_01_candidate_02"
+    assert rejection["required_visible_subjects"] == ["focal subject"]
+    assert rejection["visible_subjects"] == []
+    assert rejection["protagonist_visibility_likert"] == 1
 
 
 def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
@@ -1716,12 +1707,12 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
             "slot_02",
         }
         assert all(
-            failure["reason"] == "no_candidate_passed_visual_diagnostics"
+            failure["reason_code"] == "no_candidate_passed_visual_diagnostics"
             for failure in failures
         )
         assert all(failure["candidate_rejections"] for failure in failures)
         rejection_reasons = {
-            failure["slot_id"]: failure["candidate_rejections"][0]["reason"]
+            failure["slot_id"]: failure["candidate_rejections"][0]["reason_code"]
             for failure in failures
         }
         assert rejection_reasons == {
@@ -1807,17 +1798,20 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
     def replan_slots(current_slots, failures):
         replan_calls.append(failures)
         assert failures == [
-            {
-                "slot_id": "slot_01",
-                "reason": "insufficient_non_overlapping_capacity",
-                "round": 1,
-                "scope": "planned_segments",
-                "scope_round": 1,
-                "available_capacity": 1,
-                "candidates_needed": 2,
-                "excluded_ranges": [],
-                "source_segment_ids": ["segment_0001"],
-            }
+            build_prompt_failure(
+                PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+                slot_id="slot_01",
+                round=1,
+                scope="planned_segments",
+                scope_round=1,
+                available_capacity=1,
+                candidates_needed=2,
+                candidate_deficit=1,
+                planned_duration_sec=6.0,
+                minimum_usable_source_duration_sec=12.0,
+                excluded_ranges=[],
+                source_segment_ids=["segment_0001"],
+            )
         ]
         redesigned = [
             {
@@ -2078,12 +2072,12 @@ def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
     )
 
     assert len(pool["slot_01"]) == 1
-    assert context.get_artifact("retrieval_failure") == {
-        "reason": "insufficient_visually_grounded_candidates",
-        "shortages": {"slot_01": 2},
-        "planned_segment_rounds": 2,
-        "adjacent_expansion_rounds": 1,
-    }
+    assert context.get_artifact("retrieval_failure") == build_prompt_failure(
+        PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
+        shortages={"slot_01": 2},
+        planned_segment_rounds=2,
+        adjacent_expansion_rounds=1,
+    )
 
 
 def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(
@@ -2408,6 +2402,6 @@ def test_review_rejects_patch_that_degrades_lazy_hard_cut(
     assert accepted == []
     assert patched[1]["candidate_id"] == "b"
     rejected = context.data["script_versions"][-1]["rejected_patches"]
-    assert rejected[0]["rejection_reason"] == (
-        "degrades_or_requires_unscored_hard_cut_path"
+    assert rejected[0]["rejection"]["reason_code"] == (
+        "patch_degrades_or_requires_unscored_path"
     )

@@ -6,6 +6,10 @@ from dataclasses import replace
 from typing import Any
 
 from cutmaster.prompting.core import PromptPackage, PromptStage, PromptTask
+from cutmaster.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
 
 
 PromptBuilder = Callable[[Any], PromptPackage]
@@ -13,7 +17,11 @@ PromptBuilder = Callable[[Any], PromptPackage]
 
 def _failure_feedback(failure_reasons: tuple[str, ...]) -> str:
     failures = [
-        {"attempt": attempt, "reason": reason}
+        build_prompt_failure(
+            PromptFailureCode.RESPONSE_VALIDATION_FAILED,
+            attempt=attempt,
+            error_message=reason,
+        )
         for attempt, reason in enumerate(failure_reasons, 1)
     ]
     return (
