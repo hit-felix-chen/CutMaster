@@ -13,7 +13,7 @@ CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它�
 > CutMaster employs a MASTER team of specialized agents that progressively transforms long-form footage into a narrative-aligned, emotionally paced, and visually coherent montage.
 
 <p align="center">
-  <img src="assets/master_editing_team.png" alt="CutMaster MASTER 多智能体剪辑架构示意图" width="100%">
+  <img src="assets/framework.png" alt="CutMaster MASTER 多智能体剪辑架构示意图" width="100%">
 </p>
 
 <p align="center"><em>CutMaster 从长视频素材与用户意图出发，由 MASTER 团队协同完成素材理解、剪辑规划、序列优化与最终渲染。</em></p>
