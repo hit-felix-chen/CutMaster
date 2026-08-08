@@ -15,6 +15,7 @@ from cutmaster.configuration.schema import (
     MaterialAnalysisConfig,
     RenderConfig,
     ScriptReviewConfig,
+    SceneSegmentationConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
     SlotPlanningConfig,
@@ -55,6 +56,11 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "poll_interval_sec",
         "max_chars",
         "max_subtitle_duration_sec",
+    },
+    "scene_segmentation": {
+        "context_shots",
+        "focus_shots",
+        "frames_per_shot",
     },
     "shot_annotation": {"shot_sample_frames"},
     "slot_planning": {
@@ -219,6 +225,13 @@ def _validate_values(config: AppConfig) -> None:
         "asr.poll_interval_sec": config.asr.poll_interval_sec,
         "asr.max_chars": config.asr.max_chars,
         "asr.max_subtitle_duration_sec": config.asr.max_subtitle_duration_sec,
+        "scene_segmentation.context_shots": (
+            config.scene_segmentation.context_shots
+        ),
+        "scene_segmentation.focus_shots": config.scene_segmentation.focus_shots,
+        "scene_segmentation.frames_per_shot": (
+            config.scene_segmentation.frames_per_shot
+        ),
         "slot_planning.target_clip_duration_sec": (
             config.slot_planning.target_clip_duration_sec
         ),
@@ -308,6 +321,12 @@ def _validate_values(config: AppConfig) -> None:
         )
     if config.shot_annotation.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must equal 5")
+    if config.scene_segmentation.context_shots != 20:
+        raise ValueError("scene_segmentation.context_shots must equal 20")
+    if config.scene_segmentation.focus_shots != 10:
+        raise ValueError("scene_segmentation.focus_shots must equal 10")
+    if config.scene_segmentation.frames_per_shot != 3:
+        raise ValueError("scene_segmentation.frames_per_shot must equal 3")
     threshold = (
         config.candidate_retrieval.protagonist_visibility_likert_threshold
     )
@@ -355,6 +374,7 @@ def load_config(path: Path) -> AppConfig:
     material_analysis = _section(data, "material_analysis")
     shot_detection = _section(data, "shot_detection")
     asr = _section(data, "asr")
+    scene_segmentation = _section(data, "scene_segmentation")
     shot_annotation = _section(data, "shot_annotation")
     slot_planning = _section(data, "slot_planning")
     dialogue_anchors = _section(data, "dialogue_anchors")
@@ -409,6 +429,13 @@ def load_config(path: Path) -> AppConfig:
             poll_interval_sec=float(asr.get("poll_interval_sec", 2.0)),
             max_chars=int(asr.get("max_chars", 20)),
             max_subtitle_duration_sec=float(asr.get("max_subtitle_duration_sec", 3.5)),
+        ),
+        scene_segmentation=SceneSegmentationConfig(
+            context_shots=int(scene_segmentation.get("context_shots", 20)),
+            focus_shots=int(scene_segmentation.get("focus_shots", 10)),
+            frames_per_shot=int(
+                scene_segmentation.get("frames_per_shot", 3)
+            ),
         ),
         shot_annotation=ShotAnnotationConfig(
             shot_sample_frames=int(shot_annotation.get("shot_sample_frames", 5)),

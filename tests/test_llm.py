@@ -59,6 +59,42 @@ def test_model_thinking_config_reaches_api_request(
     assert captured["extra_body"] == {"enable_thinking": expected}
 
 
+def test_multimodal_labels_are_interleaved_with_images(monkeypatch) -> None:
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self.create)
+            )
+
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.OpenAI", FakeOpenAI)
+    generate_text(
+        "prompt",
+        VLMConfig(model="vision", base_url="", api_key="test"),
+        "system",
+        image_data_urls=["data:image/jpeg;base64,a", "data:image/jpeg;base64,b"],
+        image_labels=["shot_1 frame_1", "shot_1 frame_2"],
+    )
+
+    content = captured["messages"][1]["content"]
+    assert [item["type"] for item in content] == [
+        "text",
+        "text",
+        "image_url",
+        "text",
+        "image_url",
+    ]
+    assert content[1]["text"] == "shot_1 frame_1"
+    assert content[3]["text"] == "shot_1 frame_2"
+
+
 def test_json_request_retries_validation_failure(monkeypatch) -> None:
     responses = iter(['{"items": []}', '{"items": [1]}'])
     monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)

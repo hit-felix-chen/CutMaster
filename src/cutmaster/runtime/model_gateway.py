@@ -24,6 +24,7 @@ def generate_text(
     system_prompt: str,
     enable_thinking: bool | None = None,
     image_data_urls: list[str] | None = None,
+    image_labels: list[str] | None = None,
 ) -> str:
     client = OpenAI(
         api_key=config.api_key,
@@ -37,14 +38,20 @@ def generate_text(
     extra_body = {"enable_thinking": thinking}
     user_content: str | list[dict[str, Any]] = prompt
     if image_data_urls:
+        if image_labels is not None and len(image_labels) != len(image_data_urls):
+            raise ValueError("image_labels must match image_data_urls")
         user_content = [{"type": "text", "text": prompt}]
-        user_content.extend(
-            {
-                "type": "image_url",
-                "image_url": {"url": data_url},
-            }
-            for data_url in image_data_urls
-        )
+        for index, data_url in enumerate(image_data_urls):
+            if image_labels is not None:
+                user_content.append(
+                    {"type": "text", "text": image_labels[index]}
+                )
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
+                }
+            )
     response = client.chat.completions.create(
         model=config.model,
         messages=[

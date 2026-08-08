@@ -177,10 +177,6 @@ def test_candidate_visual_context_includes_segment_and_overlapping_shots() -> No
             "identity_evidence": "A readable name is visible.",
         }
     ]
-    segment["dialogue_context"] = {
-        "topic": "The focal subject enters",
-        "summary": "The speaker introduces the focal subject.",
-    }
     segment["shots"][0]["dialogue"] = [
         {
             "dialogue_id": 1,
@@ -209,7 +205,6 @@ def test_candidate_visual_context_includes_segment_and_overlapping_shots() -> No
 
     assert contexts[0]["segment_summary"] == "The focal subject enters the arena."
     assert contexts[0]["appearing_characters"] == [{"name": "focal subject"}]
-    assert contexts[0]["dialogue_context"]["topic"] == "The focal subject enters"
     assert [item["dialogue_id"] for item in contexts[0]["candidate_dialogue"]] == [1]
     assert [shot["shot_id"] for shot in contexts[0]["overlapping_shots"]] == [
         "shot_00001"

@@ -677,7 +677,7 @@ Use those structured visual annotations as supporting evidence for visible ident
 group membership, objects, and actions. In particular, character identity_evidence, readable
 jersey names or numbers, and Shot visual_evidence may corroborate a sampled frame.
 
-The Segment dialogue_context and candidate_dialogue contain ASR dialogue associated with the
+The Segment dialogue_items and candidate_dialogue contain ASR dialogue associated with the
 source. Dialogue may provide supporting evidence about the named speaker, player, action, or
 event when its timestamp overlaps the candidate and agrees with the visual evidence. It is not,
 by itself, proof that a mentioned person is visible: commentary may describe off-screen action,

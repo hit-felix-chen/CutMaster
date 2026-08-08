@@ -104,8 +104,6 @@ class DialogueOccurrence:
     time_range: TimeRange
     speaker: str
     text: str
-    dialogue_group_id: str
-    speech_mode: SpeechMode
 
 
 @dataclass(frozen=True)
@@ -220,17 +218,6 @@ class ShotDescription:
 
 
 @dataclass(frozen=True)
-class DialogueContext:
-    dialogue_group_id: str
-    speech_mode: SpeechMode
-    dialogue_ids: list[int]
-    participants: list[str]
-    topic: str
-    summary: str
-    grouping_reason: str
-
-
-@dataclass(frozen=True)
 class SegmentDescription:
     segment_id: str
     time_range: TimeRange
@@ -240,7 +227,7 @@ class SegmentDescription:
     content_type: SegmentContentType | None
     timeline_role: TimelineRole
     shots: list[ShotDescription]
-    dialogue_context: DialogueContext | None
+    dialogue_items: list[DialogueOccurrence]
     segment_summary: str | None
     narrative_function: str | None
     emotional_tone: str | None
@@ -258,23 +245,41 @@ class SegmentDescription:
             if previous.time_range.end_sec != current.time_range.start_sec:
                 raise ValueError(f"{self.segment_id} contains non-contiguous Shots")
 
-        expected_dialogue = any(shot.dialogue for shot in self.shots)
+        dialogue_by_id = {
+            occurrence.dialogue_id: occurrence
+            for shot in self.shots
+            for occurrence in shot.dialogue
+        }
+        if len(dialogue_by_id) != len(self.dialogue_items):
+            raise ValueError(f"{self.segment_id} has inconsistent dialogue items")
+        if [item.dialogue_id for item in self.dialogue_items] != sorted(dialogue_by_id):
+            raise ValueError(
+                f"{self.segment_id} dialogue_items must be unique and source ordered"
+            )
+        expected_dialogue = bool(dialogue_by_id)
         if self.has_dialogue != expected_dialogue:
             raise ValueError(f"{self.segment_id} has inconsistent dialogue metadata")
+        expected_speech_mode = (
+            SpeechMode.NONE
+            if not self.dialogue_items
+            else (
+                SpeechMode.MONOLOGUE
+                if len({item.speaker for item in self.dialogue_items}) == 1
+                else SpeechMode.DIALOGUE
+            )
+        )
+        if self.speech_mode != expected_speech_mode:
+            raise ValueError(f"{self.segment_id} has inconsistent speech_mode")
         if self.has_dialogue:
             if self.speech_mode == SpeechMode.NONE:
                 raise ValueError("Narrative Segment must specify dialogue or monologue")
             if self.content_type != SegmentContentType.NARRATIVE:
                 raise ValueError("A Segment with spoken content must be narrative")
-            if self.dialogue_context is None:
-                raise ValueError("A Segment with spoken content needs dialogue_context")
         else:
             if self.speech_mode != SpeechMode.NONE:
                 raise ValueError("A silent Segment must use speech_mode=none")
             if self.content_type == SegmentContentType.NARRATIVE:
                 raise ValueError("A silent Segment cannot be narrative")
-            if self.dialogue_context is not None:
-                raise ValueError("A silent Segment cannot have dialogue_context")
         completed_shots = [
             shot
             for shot in self.shots
@@ -323,7 +328,7 @@ class VideoDescription:
     scene_detection: SceneDetectionConfig
     segments: list[SegmentDescription]
     asr_model: str
-    dialogue_grouping_model: str
+    scene_boundary_model: str
     visual_description_model: str
 
     def validate(self) -> None:

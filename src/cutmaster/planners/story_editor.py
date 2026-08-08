@@ -138,7 +138,6 @@ def _eligible_source_segments(
             "emotional_tone": segment["emotional_tone"],
             "emotional_intensity": segment["emotional_intensity"],
             "appearing_characters": segment["appearing_characters"],
-            "dialogue_context": segment["dialogue_context"],
             "dialogue_items": [
                 {
                     "dialogue_id": dialogue["dialogue_id"],

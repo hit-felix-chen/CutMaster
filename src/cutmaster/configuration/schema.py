@@ -52,6 +52,13 @@ class ShotDetectionConfig:
 
 
 @dataclass(frozen=True)
+class SceneSegmentationConfig:
+    context_shots: int = 20
+    focus_shots: int = 10
+    frames_per_shot: int = 3
+
+
+@dataclass(frozen=True)
 class ShotAnnotationConfig:
     shot_sample_frames: int = 5
 
@@ -125,6 +132,7 @@ class AppConfig:
     material_analysis: MaterialAnalysisConfig
     shot_detection: ShotDetectionConfig
     asr: ASRConfig
+    scene_segmentation: SceneSegmentationConfig
     shot_annotation: ShotAnnotationConfig
     slot_planning: SlotPlanningConfig
     dialogue_anchors: DialogueAnchorConfig

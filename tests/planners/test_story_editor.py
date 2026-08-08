@@ -29,10 +29,7 @@ def _video_description() -> dict:
                 "emotional_tone": "uncertain",
                 "emotional_intensity": 0.7,
                 "appearing_characters": ["Mia", "Sebastian"],
-                "dialogue_context": {
-                    "topic": "Mia's doubt",
-                    "summary": "Sebastian encourages Mia.",
-                },
+                "dialogue_items": [],
                 "shots": [
                     {
                         "shot_id": "shot_00001",
@@ -148,7 +145,7 @@ def test_anchor_rerun_removes_stale_binding_when_new_segment_has_no_dialogue(
         "segment_id": "segment_0002",
         "has_dialogue": False,
         "speech_mode": "none",
-        "dialogue_context": None,
+        "dialogue_items": [],
         "shots": [
             {
                 **video_description["segments"][0]["shots"][0],

@@ -94,7 +94,7 @@ CLI
 
 ### 1. Reusable Material Memory
 
-The Material Analyst performs full-source shot detection, per-Shot visual annotation, Segment aggregation, ASR, dialogue reconstruction, and story summarization. Results are cached under `.cutmaster/materials/` by source material and analysis configuration, so the same video can support different prompts and BGM tracks.
+The Material Analyst first detects the complete PySceneDetect Shot partition and binds ASR dialogue to Shots. It then applies a Scene-VLM context-focus pass: 20 consecutive Shots provide context, the central 10 receive sequential boundary decisions, and every Shot contributes three labelled frames. After semantic Segments are created, the analyser performs per-Shot visual annotation, Segment aggregation, and story summarization. Results are cached under `.cutmaster/materials/` by source material and analysis configuration, so the same video can support different prompts and BGM tracks.
 
 Material Memory is independent of any single edit plan, avoiding repeated full-video understanding on every run.
 

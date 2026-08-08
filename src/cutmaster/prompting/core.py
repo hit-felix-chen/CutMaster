@@ -18,7 +18,7 @@ class PromptStage(StrEnum):
 
 class PromptTask(StrEnum):
     DIALOGUE_RECONSTRUCTION = "dialogue_reconstruction"
-    DIALOGUE_SEGMENTATION = "dialogue_segmentation"
+    SCENE_BOUNDARY_DETECTION = "scene_boundary_detection"
     SHOT_ANNOTATION = "shot_annotation"
     SEGMENT_SUMMARY = "segment_summary"
     VIDEO_SUMMARY = "video_summary"

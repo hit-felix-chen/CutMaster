@@ -68,6 +68,15 @@ poll_interval_sec = 2.0
 max_chars = 20
 max_subtitle_duration_sec = 3.5
 
+# Scene-VLM 语义 Scene 划分。
+# context_shots: 单次 VLM 请求可见的连续 Shot 数，按论文固定为 20。
+# focus_shots: 在上下文中央顺序判断边界的 Shot 数，按论文固定为 10。
+# frames_per_shot: 每个 Shot 的均匀采样帧数，按论文固定为 3。
+[scene_segmentation]
+context_shots = 20
+focus_shots = 10
+frames_per_shot = 3
+
 # shot_sample_frames: 每个 Shot 送给 VLM 标注的均匀采样帧数；当前固定要求为 5。
 [shot_annotation]
 shot_sample_frames = 5

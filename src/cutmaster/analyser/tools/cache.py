@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from cutmaster.configuration.schema import (
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
+    SceneSegmentationConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
     VLMConfig,
@@ -18,7 +20,7 @@ from cutmaster.configuration.schema import (
 from cutmaster.runtime.observability import log_event
 
 
-ANALYSIS_SCHEMA_VERSION = "1.0"
+ANALYSIS_SCHEMA_VERSION = "2.0"
 
 
 def file_signature(path: Path) -> dict[str, Any]:
@@ -47,6 +49,7 @@ def material_directory(
     material_config: MaterialAnalysisConfig,
     detection_config: ShotDetectionConfig,
     asr_config: ASRConfig,
+    scene_config: SceneSegmentationConfig,
     annotation_config: ShotAnnotationConfig,
     llm_config: LLMConfig,
     vlm_config: VLMConfig,
@@ -81,6 +84,11 @@ def material_directory(
             "max_tokens": vlm_config.max_tokens,
         },
         "shot_sample_frames": annotation_config.shot_sample_frames,
+        "scene_segmentation": {
+            "context_shots": scene_config.context_shots,
+            "focus_shots": scene_config.focus_shots,
+            "frames_per_shot": scene_config.frames_per_shot,
+        },
         "scene_detection": {
             "adaptive_threshold": detection_config.adaptive_threshold,
             "adaptive_min_content_val": detection_config.adaptive_min_content_val,
@@ -115,6 +123,80 @@ def write_json_checkpoint(path: Path, value: Any) -> None:
         "Analysis checkpoint written",
         path=path,
     )
+
+
+def reuse_compatible_stage_checkpoints(
+    material_directory: Path,
+    analysis_signature: dict[str, Any],
+    duration_sec: float,
+) -> None:
+    """Reuse deterministic upstream stages from an older analysis schema."""
+    if not material_directory.parent.is_dir():
+        return
+    candidates = sorted(
+        (
+            path.parent
+            for path in material_directory.parent.glob(
+                "analysis-*/analysis_manifest.json"
+            )
+            if path.parent != material_directory
+        ),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    shots_path = material_directory / "shots.json"
+    needs_shots = valid_shot_checkpoint(
+        read_json_checkpoint(shots_path),
+        duration_sec,
+    ) is None
+    needs_dialogue = dialogue_checkpoint(material_directory) is None
+    for candidate in candidates:
+        manifest = read_json_checkpoint(candidate / "analysis_manifest.json")
+        if not isinstance(manifest, dict):
+            continue
+        if manifest.get("source") != analysis_signature.get("source"):
+            continue
+        if (
+            needs_shots
+            and manifest.get("scene_detection")
+            == analysis_signature.get("scene_detection")
+        ):
+            candidate_shots = valid_shot_checkpoint(
+                read_json_checkpoint(candidate / "shots.json"),
+                duration_sec,
+            )
+            if candidate_shots is not None:
+                write_json_checkpoint(shots_path, candidate_shots)
+                needs_shots = False
+                log_event(
+                    "INFO",
+                    "analyser",
+                    "cache.hit",
+                    "Compatible Shot detection checkpoint reused",
+                    source_directory=candidate,
+                    target_directory=material_directory,
+                    shots=len(candidate_shots),
+                )
+        if (
+            needs_dialogue
+            and manifest.get("subtitle") == analysis_signature.get("subtitle")
+            and manifest.get("llm") == analysis_signature.get("llm")
+            and dialogue_checkpoint(candidate) is not None
+            and (candidate / "source.srt").is_file()
+        ):
+            for name in ("source.srt", "dialogue_merged.srt", "dialogues.json"):
+                shutil.copy2(candidate / name, material_directory / name)
+            needs_dialogue = False
+            log_event(
+                "INFO",
+                "analyser",
+                "cache.hit",
+                "Compatible dialogue checkpoints reused",
+                source_directory=candidate,
+                target_directory=material_directory,
+            )
+        if not needs_shots and not needs_dialogue:
+            return
 
 
 def read_json_checkpoint(path: Path) -> Any | None:

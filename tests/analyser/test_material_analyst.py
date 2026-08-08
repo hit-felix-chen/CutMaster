@@ -1,5 +1,6 @@
 import threading
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ from cutmaster.configuration.schema import (
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
+    SceneSegmentationConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
     VLMConfig,
@@ -15,17 +17,24 @@ from cutmaster.configuration.schema import (
 from cutmaster.analyser.material_analyst import (
     _annotate_segments,
     _detect_full_video_shots,
-    _group_dialogue,
-    _raw_segments,
     _sample_shot_frames,
     _summarize_segments,
     _video_summary_context,
-    _validate_dialogue_segments,
     _validate_shot_annotation,
     _analyse_video_material,
 )
+from cutmaster.analyser.scene_segmenter import (
+    _validate_window_decisions,
+    build_scene_windows,
+    build_segments_from_scene_boundaries,
+    detect_scene_boundaries,
+)
+from cutmaster.analyser.tools.cache import reuse_compatible_stage_checkpoints
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.analyser import ShotAnnotationDetails
+from cutmaster.prompting.analyser import (
+    SceneBoundaryDetectionDetails,
+    ShotAnnotationDetails,
+)
 from cutmaster.contracts.video import (
     CameraAngle,
     CameraMovement,
@@ -141,22 +150,6 @@ def test_shot_sampling_repeats_last_decodable_frame(monkeypatch, tmp_path) -> No
     assert capture.released
 
 
-def _group(index: int, dialogue_id: int, shot_index: int):
-    return {
-        "dialogue_group_id": f"dialogue_group_{index:04d}",
-        "first_dialogue_id": dialogue_id,
-        "last_dialogue_id": dialogue_id,
-        "dialogue_ids": [dialogue_id],
-        "speech_mode": "monologue",
-        "participants": [f"Speaker {dialogue_id}"],
-        "topic": f"topic {dialogue_id}",
-        "summary": f"summary {dialogue_id}",
-        "grouping_reason": "continuous passage",
-        "first_shot_index": shot_index,
-        "last_shot_index": shot_index,
-    }
-
-
 def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
     shot = _shots(1)[0]
     shot["dialogue"] = []
@@ -164,7 +157,6 @@ def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
         "segment_id": "segment_0001",
         "has_dialogue": False,
         "speech_mode": "none",
-        "dialogue_context": None,
     }
 
     package = prompt_registry.build(
@@ -214,36 +206,28 @@ def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
     assert "medium_close_up is not an allowed value" in prompt
 
 
-def test_dialogue_prompt_contract_lists_every_allowed_speech_mode() -> None:
-    captured = {}
-
-    class Context:
-        def call_prompt(self, **kwargs):
-            package = kwargs["package"]
-            captured["prompt"] = package.user_prompt
-            parsed = {
-                "segments": [
-                    {
-                        "first_dialogue_id": 1,
-                        "last_dialogue_id": 1,
-                        "speech_mode": "monologue",
-                        "topic": "introduction",
-                        "summary": "The speaker introduces the topic",
-                    }
-                ]
-            }
-            package.response_contract.validate_structure(parsed)
-            return kwargs["validate_business"](parsed)
-
-    _group_dialogue(
-        Context(),
-        LLMConfig(model="test", base_url="", api_key="test"),
-        [_dialogue(1, 0.1, 0.2)],
-        _shots(1),
+def test_scene_boundary_prompt_targets_only_focus_shots() -> None:
+    shots = _shots(20)
+    for shot in shots:
+        shot["dialogue"] = []
+    focus_ids = [shot["shot_id"] for shot in shots[5:15]]
+    package = prompt_registry.build(
+        PromptStage.ANALYSER,
+        PromptTask.SCENE_BOUNDARY_DETECTION,
+        SceneBoundaryDetectionDetails(
+            window_id="scene_window_00001",
+            shots=shots,
+            focus_shot_ids=focus_ids,
+        ),
     )
 
-    assert '"dialogue"' in captured["prompt"]
-    assert '"monologue"' in captured["prompt"]
+    decision_schema = package.response_contract.schema["properties"]["decisions"]
+    assert decision_schema["minItems"] == 10
+    assert decision_schema["maxItems"] == 10
+    assert decision_schema["items"]["properties"]["shot_id"]["enum"] == focus_ids
+    assert package.context_keys == ()
+    assert package.modality == "text_and_images"
+    assert "full transcript" not in package.user_prompt.lower()
 
 
 def test_shot_annotation_normalization_preserves_shot_id() -> None:
@@ -300,138 +284,149 @@ def test_full_video_shot_detection_builds_complete_boundary_partition(monkeypatc
     assert shots[-1]["end_boundary"] == "video_end"
 
 
-def test_dialogue_segmentation_merges_adjacent_groups_sharing_one_shot() -> None:
-    shots = _shots(2)
-    dialogue = [
-        _dialogue(1, 0.1, 0.2),
-        _dialogue(2, 0.3, 0.4),
-        _dialogue(3, 0.5, 0.6),
-    ]
-    parsed = {
-        "segments": [
-            {
-                "first_dialogue_id": 1,
-                "last_dialogue_id": 1,
-                "speech_mode": "monologue",
-                "participants": ["Speaker 1"],
-                "topic": "first",
-                "summary": "first",
-                "grouping_reason": "first passage",
-            },
-            {
-                "first_dialogue_id": 2,
-                "last_dialogue_id": 2,
-                "speech_mode": "monologue",
-                "participants": ["Speaker 2"],
-                "topic": "second",
-                "summary": "second",
-                "grouping_reason": "second passage",
-            },
-            {
-                "first_dialogue_id": 3,
-                "last_dialogue_id": 3,
-                "speech_mode": "monologue",
-                "participants": ["Speaker 3"],
-                "topic": "third",
-                "summary": "third",
-                "grouping_reason": "third passage",
-            },
-        ]
-    }
-    groups = _validate_dialogue_segments(parsed, dialogue, shots)
-
-    assert len(groups) == 1
-    assert groups[0]["dialogue_ids"] == [1, 2, 3]
-    assert groups[0]["first_shot_index"] == 0
-    assert groups[0]["last_shot_index"] == 0
-    assert groups[0]["speech_mode"] == "dialogue"
-    assert "share a PySceneDetect Shot" in groups[0]["grouping_reason"]
-
-
-def test_dialogue_segmentation_rejects_overlapping_dialogue_ranges() -> None:
-    shots = _shots(3)
-    dialogue = [
-        _dialogue(1, 0.1, 0.2),
-        _dialogue(2, 1.1, 1.2),
-        _dialogue(3, 2.1, 2.2),
-    ]
-    parsed = {
-        "segments": [
-            {
-                "first_dialogue_id": 1,
-                "last_dialogue_id": 2,
-                "speech_mode": "dialogue",
-                "topic": "first",
-                "summary": "first",
-            },
-            {
-                "first_dialogue_id": 2,
-                "last_dialogue_id": 3,
-                "speech_mode": "dialogue",
-                "topic": "second",
-                "summary": "second",
-            },
-        ]
-    }
-
-    with pytest.raises(ValueError, match="overlapping dialogue IDs"):
-        _validate_dialogue_segments(parsed, dialogue, shots)
-
-
-def test_dialogue_segmentation_rejects_missing_dialogue_ids() -> None:
-    shots = _shots(3)
-    dialogue = [
-        _dialogue(1, 0.1, 0.2),
-        _dialogue(2, 1.1, 1.2),
-        _dialogue(3, 2.1, 2.2),
-    ]
-    parsed = {
-        "segments": [
-            {
-                "first_dialogue_id": 1,
-                "last_dialogue_id": 1,
-                "speech_mode": "monologue",
-                "topic": "first",
-                "summary": "first",
-            },
-            {
-                "first_dialogue_id": 3,
-                "last_dialogue_id": 3,
-                "speech_mode": "monologue",
-                "topic": "third",
-                "summary": "third",
-            },
-        ]
-    }
-
-    with pytest.raises(ValueError, match="omit one or more dialogue IDs"):
-        _validate_dialogue_segments(parsed, dialogue, shots)
-
-
-def test_silent_shots_between_dialogue_groups_become_independent_segments() -> None:
-    shots = _shots()
-    dialogue = [_dialogue(1, 1.2, 1.8), _dialogue(2, 4.2, 4.8)]
-    segments = _raw_segments(
-        shots,
-        dialogue,
-        [_group(1, 1, 1), _group(2, 2, 4)],
+@pytest.mark.parametrize("shot_count", [1, 5, 20, 21, 37])
+def test_scene_windows_cover_every_non_final_shot_once(shot_count: int) -> None:
+    windows = build_scene_windows(shot_count, SceneSegmentationConfig())
+    focus_indexes = [index for window in windows for index in window.focus_indexes]
+    assert focus_indexes == list(range(max(0, shot_count - 1)))
+    assert all(len(window.context_indexes) <= 20 for window in windows)
+    assert all(
+        set(window.focus_indexes).issubset(window.context_indexes)
+        for window in windows
     )
-    assert [
-        (
-            segment["time_range"]["start_sec"],
-            segment["time_range"]["end_sec"],
-            segment["has_dialogue"],
+
+
+def test_scene_boundary_validation_rejects_wrong_focus_order() -> None:
+    with pytest.raises(ValueError, match="exact focus Shot order"):
+        _validate_window_decisions(
+            {
+                "decisions": [
+                    {
+                        "shot_id": "shot_00002",
+                        "is_scene_end": False,
+                        "confidence_likert": 4,
+                    },
+                    {
+                        "shot_id": "shot_00001",
+                        "is_scene_end": True,
+                        "confidence_likert": 5,
+                    },
+                ]
+            },
+            ["shot_00001", "shot_00002"],
         )
-        for segment in segments
-    ] == [
-        (0.0, 1.0, False),
-        (1.0, 2.0, True),
-        (2.0, 4.0, False),
-        (4.0, 5.0, True),
-        (5.0, 6.0, False),
+
+
+def test_scene_boundaries_build_complete_segment_partition() -> None:
+    shots = _shots(6)
+    dialogue = [
+        {
+            **_dialogue(1, 1.2, 1.8),
+            "covering_shot_ids": ["shot_00002"],
+        },
+        {
+            **_dialogue(2, 4.2, 4.8),
+            "covering_shot_ids": ["shot_00005"],
+        },
     ]
-    assert segments[0]["timeline_role"] == "opening"
-    assert segments[-1]["timeline_role"] == "ending"
+    decisions = [
+        {
+            "shot_id": shot["shot_id"],
+            "is_scene_end": shot["shot_id"] in {"shot_00002", "shot_00004"},
+            "confidence_likert": 4,
+        }
+        for shot in shots[:-1]
+    ]
+    segments = build_segments_from_scene_boundaries(shots, dialogue, decisions)
+
+    assert [segment["time_range"] for segment in segments] == [
+        {"start_sec": 0.0, "end_sec": 2.0},
+        {"start_sec": 2.0, "end_sec": 4.0},
+        {"start_sec": 4.0, "end_sec": 6.0},
+    ]
+    assert [segment["has_dialogue"] for segment in segments] == [True, False, True]
+    assert {segment["timeline_role"] for segment in segments} == {"body"}
+    assert [
+        shot["shot_id"] for segment in segments for shot in segment["shots"]
+    ] == [shot["shot_id"] for shot in shots]
+
+
+def test_scene_boundary_windows_are_checkpointed_independently(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    shots = _shots(21)
+    stub = tmp_path / "frame.jpg"
+    stub.write_bytes(b"jpeg")
+    frame_map = {
+        shot["shot_id"]: [
+            {"path": str(stub), "time_sec": float(index)}
+            for index in range(3)
+        ]
+        for shot in shots
+    }
+    monkeypatch.setattr(
+        "cutmaster.analyser.scene_segmenter.prepare_scene_frames",
+        lambda *_args, **_kwargs: frame_map,
+    )
+
+    class Context:
+        calls = 0
+
+        def call_prompt(self, **kwargs):
+            self.calls += 1
+            focus_ids = kwargs["package"].response_contract.schema["properties"][
+                "decisions"
+            ]["items"]["properties"]["shot_id"]["enum"]
+            parsed = {
+                "decisions": [
+                    {
+                        "shot_id": shot_id,
+                        "is_scene_end": False,
+                        "confidence_likert": 4,
+                    }
+                    for shot_id in focus_ids
+                ]
+            }
+            assert len(kwargs["image_data_urls"]) == 60
+            return kwargs["validate_business"](parsed)
+
+    context = Context()
+    decisions = detect_scene_boundaries(
+        Path("source.mp4"),
+        shots,
+        [],
+        context,
+        VLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_concurrency=2,
+        ),
+        SceneSegmentationConfig(),
+        tmp_path / "frames",
+        tmp_path / "windows",
+    )
+    assert context.calls == 2
+    assert [item["shot_id"] for item in decisions] == [
+        shot["shot_id"] for shot in shots[:-1]
+    ]
+
+    class UnexpectedContext:
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("Scene boundary window checkpoint should be reused")
+
+    cached = detect_scene_boundaries(
+        Path("source.mp4"),
+        shots,
+        [],
+        UnexpectedContext(),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        SceneSegmentationConfig(),
+        tmp_path / "frames",
+        tmp_path / "windows",
+    )
+    assert cached == decisions
 
 
 def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
@@ -457,7 +452,7 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
                 "has_dialogue": False,
                 "speech_mode": "none",
                 "timeline_role": "opening" if segment_index == 0 else "ending",
-                "dialogue_context": None,
+                "dialogue_items": [],
                 "shots": segment_shots,
             }
         )
@@ -534,6 +529,7 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
             return {
                 "segment_id": segment_id,
                 "segment_summary": f"Concise summary for {segment_id}.",
+                "timeline_role": "body",
             }
 
     summary_context = SummaryContext()
@@ -594,7 +590,7 @@ def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
         "has_dialogue": False,
         "speech_mode": "none",
         "timeline_role": "opening",
-        "dialogue_context": None,
+        "dialogue_items": [],
         "shots": [shot],
     }
     monkeypatch.setattr(
@@ -688,6 +684,7 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
         "material_config": MaterialAnalysisConfig(tmp_path / "materials"),
         "detection_config": ShotDetectionConfig(),
         "asr_config": ASRConfig(backend="bailian", api_key="test"),
+        "scene_config": SceneSegmentationConfig(),
         "annotation_config": ShotAnnotationConfig(),
         "llm_config": LLMConfig(model="test", base_url="", api_key="test"),
         "vlm_config": VLMConfig(model="test", base_url="", api_key="test"),
@@ -700,3 +697,37 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
 
     assert detection_calls == 1
     assert list((tmp_path / "materials").glob("**/shots.json"))
+
+
+def test_new_analysis_schema_reuses_compatible_upstream_stages(tmp_path) -> None:
+    asset_directory = tmp_path / "asset"
+    previous = asset_directory / "analysis-old"
+    current = asset_directory / "analysis-new"
+    previous.mkdir(parents=True)
+    current.mkdir(parents=True)
+    signature = {
+        "source": {"path": "/source.mp4", "size": 1, "mtime_ns": 2},
+        "scene_detection": {"adaptive_threshold": 2.0},
+        "subtitle": {"backend": "bailian"},
+        "llm": {"model": "test"},
+    }
+    (previous / "analysis_manifest.json").write_text(
+        json.dumps(signature),
+        encoding="utf-8",
+    )
+    (previous / "shots.json").write_text(
+        json.dumps(_shots(2)),
+        encoding="utf-8",
+    )
+    (previous / "source.srt").write_text("source", encoding="utf-8")
+    (previous / "dialogue_merged.srt").write_text("merged", encoding="utf-8")
+    (previous / "dialogues.json").write_text(
+        json.dumps({"sentences": []}),
+        encoding="utf-8",
+    )
+
+    reuse_compatible_stage_checkpoints(current, signature, 2.0)
+
+    assert (current / "shots.json").is_file()
+    assert (current / "source.srt").read_text(encoding="utf-8") == "source"
+    assert (current / "dialogue_merged.srt").read_text(encoding="utf-8") == "merged"

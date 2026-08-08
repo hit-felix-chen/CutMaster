@@ -20,9 +20,12 @@ from cutmaster.contracts.video import (
     InteriorExterior,
     SegmentContentType,
     ShotScale,
-    SpeechMode,
     TimeOfDay,
+    TimelineRole,
 )
+
+
+SCENE_BOUNDARY_PROMPT_VERSION = "1.0"
 
 
 def _enum_values(enum_type: type[StrEnum]) -> list[str]:
@@ -36,8 +39,10 @@ class DialogueReconstructionDetails:
 
 
 @dataclass(frozen=True)
-class DialogueSegmentationDetails:
-    dialogue_ids: list[int]
+class SceneBoundaryDetectionDetails:
+    window_id: str
+    shots: list[dict[str, Any]]
+    focus_shot_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -116,91 +121,111 @@ Rules:
     )
 
 
-def _dialogue_segmentation(
-    details: DialogueSegmentationDetails,
+def _scene_boundary_detection(
+    details: SceneBoundaryDetectionDetails,
 ) -> PromptPackage:
-    if not details.dialogue_ids:
-        raise ValueError("Dialogue segmentation requires dialogue IDs")
-    speech_modes = [
-        value
-        for value in _enum_values(SpeechMode)
-        if value != SpeechMode.NONE.value
-    ]
+    if not details.shots or not details.focus_shot_ids:
+        raise ValueError("Scene boundary detection requires context and focus Shots")
+    context_shot_ids = [str(shot["shot_id"]) for shot in details.shots]
+    if not set(details.focus_shot_ids).issubset(context_shot_ids):
+        raise ValueError("Every focus Shot must belong to the context window")
     contract = ResponseContract(
         version="1.0",
         schema={
             "type": "object",
             "additionalProperties": False,
-            "required": ["segments"],
+            "required": ["decisions"],
             "properties": {
-                "segments": {
+                "decisions": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": len(details.focus_shot_ids),
+                    "maxItems": len(details.focus_shot_ids),
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
                         "required": [
-                            "first_dialogue_id",
-                            "last_dialogue_id",
-                            "speech_mode",
-                            "topic",
-                            "summary",
+                            "shot_id",
+                            "is_scene_end",
+                            "confidence_likert",
                         ],
                         "properties": {
-                            "first_dialogue_id": {
-                                "type": "integer",
-                                "enum": details.dialogue_ids,
-                            },
-                            "last_dialogue_id": {
-                                "type": "integer",
-                                "enum": details.dialogue_ids,
-                            },
-                            "speech_mode": {
+                            "shot_id": {
                                 "type": "string",
-                                "enum": speech_modes,
+                                "enum": details.focus_shot_ids,
                             },
-                            "topic": {"type": "string", "minLength": 1},
-                            "summary": {"type": "string", "minLength": 1},
+                            "is_scene_end": {"type": "boolean"},
+                            "confidence_likert": {
+                                "type": "integer",
+                                "enum": [1, 2, 3, 4, 5],
+                            },
                         },
                     },
                 }
             },
         },
     )
-    instructions = """Divide the complete transcript in the maintained context into contiguous
-spoken-content Segments.
+    textual_shots = [
+        {
+            "shot_id": str(shot["shot_id"]),
+            "timestamp": str(shot["timestamp"]),
+            "dialogue": [
+                {
+                    "dialogue_id": int(item["dialogue_id"]),
+                    "speaker": str(item["speaker"]),
+                    "text": str(item["text"]),
+                    "timestamp": str(item["timestamp"]),
+                }
+                for item in shot.get("dialogue") or []
+            ],
+        }
+        for shot in details.shots
+    ]
+    instructions = f"""# Scene-VLM sequential Scene-boundary detection
+
+A Scene is a consecutive sequence of Shots that remains semantically coherent in location,
+time, characters, action, dialogue, or narrative purpose. Decide whether each focus Shot is the
+final Shot of its current Scene. A camera cut alone is not necessarily a Scene boundary.
+
+The context contains {len(details.shots)} chronological Shots. The attached images are ordered
+exactly like <context_shots>, with three chronological images per Shot. Every image has its Shot
+ID visibly overlaid in the top-left corner. Dialogue is synchronized context, but it is not visual
+evidence.
 
 Rules:
-1. Assign every dialogue_id exactly once and preserve source order.
-2. A Segment contains one continuous conversation or one continuous monologue.
-3. Return only inclusive first_dialogue_id/last_dialogue_id ranges.
-4. Do not split adjacent lines when their covering_shot_ids overlap. A Segment boundary must
-   fall between two PySceneDetect Shots.
-5. Do not group unrelated dialogue across a narrative, speaker, topic, location, or large time
-   break merely to reduce the number of Segments.
-6. If a passage contains interaction between speakers, classify it as dialogue.
-7. Topic and summary must be concise and grounded only in the supplied transcript. Participants
-   are derived locally and must not be returned."""
+1. Return one decision for every focus Shot, in the exact supplied focus order.
+2. is_scene_end=true means the next Shot begins a semantically different Scene.
+3. Consider visual continuity, time and location, recurring people, ongoing action, dialogue
+   continuity, and narrative purpose together.
+4. A change of camera angle, shot scale, or speaker inside one continuous event is not a Scene
+   boundary.
+5. A cross-cut may remain part of one Scene when it continues the same narrative event.
+6. Do not return decisions for context-only Shots.
+7. confidence_likert measures confidence in the selected Yes/No decision: 1 is very uncertain,
+   3 is moderately confident, and 5 is unmistakable.
+8. Return no rationale, summary, invented label, timestamp, or additional field.
+
+<window_id>{details.window_id}</window_id>
+<context_shots>
+{json.dumps(textual_shots, ensure_ascii=False)}
+</context_shots>
+<focus_shot_ids>
+{json.dumps(details.focus_shot_ids, ensure_ascii=False)}
+</focus_shot_ids>"""
     return PromptPackage(
         stage=PromptStage.ANALYSER,
-        task=PromptTask.DIALOGUE_SEGMENTATION,
-        prompt_version="1.0",
-        operation="Full-transcript dialogue segmentation",
+        task=PromptTask.SCENE_BOUNDARY_DETECTION,
+        prompt_version=SCENE_BOUNDARY_PROMPT_VERSION,
+        operation=f"Scene boundary detection {details.window_id}",
         system_prompt=(
-            "You divide the complete source transcript into contiguous spoken-content Segments. "
-            "Every dialogue line must be assigned exactly once and returned in source order. "
-            "Segment boundaries must be compatible with supplied Shot memberships. Return "
-            "strict JSON only."
+            "You perform sequential movie Scene-boundary classification over consecutive Shots. "
+            "Use the attached frames and synchronized dialogue together. Return strict JSON "
+            "containing only the requested focus-Shot decisions."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=(
-            "source_metadata",
-            "shot_boundaries",
-            "full_dialogue",
-        ),
-        modality=PromptModality.TEXT,
-        output_artifact="dialogue_segments",
+        context_keys=(),
+        modality=PromptModality.TEXT_AND_IMAGES,
+        output_artifact="scene_boundary_decisions",
     )
 
 
@@ -376,7 +401,6 @@ medium_close_up is not an allowed value. Describe locations concretely from visi
     "segment_id": segment["segment_id"],
     "has_dialogue": segment["has_dialogue"],
     "speech_mode": segment["speech_mode"],
-    "dialogue_context": segment["dialogue_context"],
 }, ensure_ascii=False)}
 </segment>
 
@@ -410,11 +434,11 @@ medium_close_up is not an allowed value. Describe locations concretely from visi
 def _segment_summary(details: SegmentSummaryDetails) -> PromptPackage:
     segment_id = str(details.segment["segment_id"])
     contract = ResponseContract(
-        version="1.0",
+        version="2.0",
         schema={
             "type": "object",
             "additionalProperties": False,
-            "required": ["segment_id", "segment_summary"],
+            "required": ["segment_id", "segment_summary", "timeline_role"],
             "properties": {
                 "segment_id": {
                     "type": "string",
@@ -425,13 +449,17 @@ def _segment_summary(details: SegmentSummaryDetails) -> PromptPackage:
                     "minLength": 1,
                     "maxLength": 600,
                 },
+                "timeline_role": {
+                    "type": "string",
+                    "enum": _enum_values(TimelineRole),
+                },
             },
         },
     )
     instructions = f"""Summarize exactly one source-video Segment as a concise reusable event
 description for later editing decisions.
 
-Integrate the supplied dialogue context, exact dialogue occurrences, and Shot annotations into
+Integrate the supplied exact dialogue occurrences and Shot annotations into
 one to three sentences. State who does what, the meaningful interaction or change, and the
 immediate narrative significance when supported. Preserve source chronology.
 
@@ -440,17 +468,23 @@ ASR, prompts, or editing. Do not infer events from dialogue when the visual anno
 them. Shots marked provider_rejected have no visual evidence and must not be described as if they
 were visually annotated.
 
+Classify timeline_role from the Segment's actual narrative function, not from its ordinal source
+position. opening introduces a story situation, body develops or continues it, and ending provides
+closure or aftermath. These are reusable semantic labels rather than a mandatory three-part
+template: every label may appear multiple times or not appear at all.
+
 <segment>
 {json.dumps(details.segment, ensure_ascii=False)}
 </segment>"""
     return PromptPackage(
         stage=PromptStage.ANALYSER,
         task=PromptTask.SEGMENT_SUMMARY,
-        prompt_version="1.0",
+        prompt_version="2.0",
         operation=f"Segment summary {segment_id}",
         system_prompt=(
-            "You create a concise, factual Segment-level summary from structured dialogue and "
-            "Shot annotations. Return strict JSON only."
+            "You create a concise, factual Segment-level summary and classify its semantic "
+            "timeline role from structured dialogue and Shot annotations. Return strict JSON "
+            "only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
@@ -588,8 +622,8 @@ prompt_registry.register(
 )
 prompt_registry.register(
     PromptStage.ANALYSER,
-    PromptTask.DIALOGUE_SEGMENTATION,
-    _dialogue_segmentation,
+    PromptTask.SCENE_BOUNDARY_DETECTION,
+    _scene_boundary_detection,
 )
 prompt_registry.register(
     PromptStage.ANALYSER,

@@ -333,6 +333,7 @@ class WorkflowContext:
                     config,
                     system_prompt=active_package.system_prompt,
                     image_data_urls=image_data_urls,
+                    image_labels=image_labels,
                 )
             except Exception as exc:
                 failure = build_prompt_failure(

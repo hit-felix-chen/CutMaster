@@ -95,6 +95,9 @@ threads = 2
     assert config.vlm.max_concurrency == 3
     assert config.material_analysis.material_cache_dir == tmp_path / "materials"
     assert config.shot_detection.adaptive_threshold == 2.5
+    assert config.scene_segmentation.context_shots == 20
+    assert config.scene_segmentation.focus_shots == 10
+    assert config.scene_segmentation.frames_per_shot == 3
     assert config.shot_annotation.shot_sample_frames == 5
     assert config.slot_planning.target_clip_duration_sec == 4.5
     assert config.slot_planning.replan_max_rounds == 2

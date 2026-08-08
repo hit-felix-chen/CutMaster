@@ -31,7 +31,6 @@ def _shot_package():
                 "segment_id": "segment_0001",
                 "has_dialogue": False,
                 "speech_mode": "none",
-                "dialogue_context": None,
             },
             shot={
                 "shot_id": "shot_00001",
@@ -46,7 +45,7 @@ def _shot_package():
 def test_registry_exposes_every_model_task() -> None:
     assert set(prompt_registry.registered_keys()) == {
         (PromptStage.ANALYSER, PromptTask.DIALOGUE_RECONSTRUCTION),
-        (PromptStage.ANALYSER, PromptTask.DIALOGUE_SEGMENTATION),
+        (PromptStage.ANALYSER, PromptTask.SCENE_BOUNDARY_DETECTION),
         (PromptStage.ANALYSER, PromptTask.SHOT_ANNOTATION),
         (PromptStage.ANALYSER, PromptTask.SEGMENT_SUMMARY),
         (PromptStage.ANALYSER, PromptTask.VIDEO_SUMMARY),
@@ -78,7 +77,6 @@ def test_segment_summary_prompt_requires_one_concise_summary() -> None:
             segment={
                 "segment_id": "segment_0001",
                 "time_range": {"start_sec": 0.0, "end_sec": 4.0},
-                "dialogue_context": None,
                 "dialogue_items": [],
                 "shots": [
                     {
@@ -93,9 +91,10 @@ def test_segment_summary_prompt_requires_one_concise_summary() -> None:
         "segment_summary"
     ]
 
-    assert package.response_contract.version == "1.0"
+    assert package.response_contract.version == "2.0"
     assert summary_schema["maxLength"] == 600
     assert "one to three sentences" in package.user_prompt
+    assert "every label may appear multiple times or not appear at all" in package.user_prompt
     assert package.context_keys == ()
 
 

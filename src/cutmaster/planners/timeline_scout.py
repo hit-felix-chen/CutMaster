@@ -294,7 +294,6 @@ def _candidate_segment_video_descriptions(
                 "time_range",
                 "content_type",
                 "timeline_role",
-                "dialogue_context",
                 "segment_summary",
                 "narrative_function",
                 "emotional_tone",
@@ -538,7 +537,7 @@ def _retrieval_segment_context(
                 **{
                     key: value
                     for key, value in segments[position].items()
-                    if key not in {"clip_path", "dialogue_context"}
+                    if key != "clip_path"
                 },
                 "shots": [
                     {

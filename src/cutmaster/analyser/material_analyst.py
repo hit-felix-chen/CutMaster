@@ -17,6 +17,7 @@ from cutmaster.analyser.tools.cache import (
     dialogue_checkpoint as _dialogue_checkpoint,
     material_directory as _material_directory,
     read_json_checkpoint as _read_json_checkpoint,
+    reuse_compatible_stage_checkpoints as _reuse_compatible_stage_checkpoints,
     valid_segment_checkpoint as _valid_segment_checkpoint,
     valid_shot_checkpoint as _valid_shot_checkpoint,
     write_json_checkpoint as _write_json_checkpoint,
@@ -24,11 +25,17 @@ from cutmaster.analyser.tools.cache import (
 from cutmaster.contracts.material import MaterialAnalysisResult
 from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.analyser.tools.dialogue import postprocess_dialogues
+from cutmaster.analyser.scene_segmenter import (
+    SCENE_SEGMENTATION_VERSION,
+    build_segments_from_scene_boundaries,
+    detect_scene_boundaries,
+)
 from cutmaster.configuration.schema import (
     AppConfig,
     ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
+    SceneSegmentationConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
     VLMConfig,
@@ -40,7 +47,6 @@ from cutmaster.prompting.failure_catalog import (
     build_prompt_failure,
 )
 from cutmaster.prompting.analyser import (
-    DialogueSegmentationDetails,
     SegmentSummaryDetails,
     ShotAnnotationDetails,
     VideoSummaryDetails,
@@ -54,7 +60,6 @@ from cutmaster.contracts.video import (
     CameraAngle,
     CameraMovement,
     CharacterAppearance,
-    DialogueContext,
     DialogueOccurrence,
     InteriorExterior,
     SceneDescription,
@@ -183,260 +188,6 @@ def _dialogue_with_shot_membership(
         }
         for line in dialogue
     ]
-
-
-def _validate_dialogue_segments(
-    parsed: dict[str, Any],
-    dialogue: list[dict[str, Any]],
-    shots: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    raw_segments = parsed.get("segments")
-    if not isinstance(raw_segments, list) or not raw_segments:
-        raise ValueError("Dialogue segmentation must return a non-empty segments array")
-    expected_ids = [int(line["dialogue_id"]) for line in dialogue]
-    by_id = {int(line["dialogue_id"]): line for line in dialogue}
-    assigned: list[int] = []
-    normalized: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_segments, 1):
-        if not isinstance(raw, dict):
-            raise ValueError("Every dialogue Segment must be an object")
-        first_id = int(raw["first_dialogue_id"])
-        last_id = int(raw["last_dialogue_id"])
-        if first_id not in by_id or last_id not in by_id or last_id < first_id:
-            raise ValueError("Dialogue Segment contains an invalid dialogue ID range")
-        dialogue_ids = [
-            dialogue_id
-            for dialogue_id in expected_ids
-            if first_id <= dialogue_id <= last_id
-        ]
-        if dialogue_ids != list(range(first_id, last_id + 1)):
-            raise ValueError("Dialogue IDs must be contiguous integers")
-        expected_slice = expected_ids[len(assigned) : len(assigned) + len(dialogue_ids)]
-        if dialogue_ids != expected_slice:
-            next_expected = (
-                expected_ids[len(assigned)]
-                if len(assigned) < len(expected_ids)
-                else None
-            )
-            if next_expected is not None and first_id < next_expected:
-                raise ValueError("Dialogue Segments contain overlapping dialogue IDs")
-            if next_expected is not None and first_id > next_expected:
-                raise ValueError("Dialogue Segments omit one or more dialogue IDs")
-            raise ValueError("Dialogue Segments must preserve dialogue source order")
-        mode = SpeechMode(str(raw["speech_mode"]))
-        if mode == SpeechMode.NONE:
-            raise ValueError("Spoken-content Segment cannot use speech_mode=none")
-        shot_indexes = sorted(
-            {
-                shot_index
-                for dialogue_id in dialogue_ids
-                for shot_index in _covering_shot_indexes(
-                    shots,
-                    float(by_id[dialogue_id]["start_sec"]),
-                    float(by_id[dialogue_id]["end_sec"]),
-                )
-            }
-        )
-        participants = list(
-            dict.fromkeys(
-                str(by_id[dialogue_id]["speaker"])
-                for dialogue_id in dialogue_ids
-            )
-        )
-        topic = str(raw.get("topic") or "").strip()
-        summary = str(raw.get("summary") or "").strip()
-        if not participants or not topic or not summary:
-            raise ValueError("Dialogue Segment semantic fields must not be empty")
-        normalized.append(
-            {
-                "dialogue_group_id": f"dialogue_group_{index:04d}",
-                "first_dialogue_id": first_id,
-                "last_dialogue_id": last_id,
-                "dialogue_ids": dialogue_ids,
-                "speech_mode": mode,
-                "participants": participants,
-                "topic": topic,
-                "summary": summary,
-                "grouping_reason": (
-                    f"LLM grouped contiguous dialogue IDs {first_id}-{last_id} "
-                    "as one spoken passage"
-                ),
-                "first_shot_index": shot_indexes[0],
-                "last_shot_index": shot_indexes[-1],
-            }
-        )
-        assigned.extend(dialogue_ids)
-    if assigned != expected_ids:
-        raise ValueError("Dialogue Segments omit one or more dialogue IDs")
-
-    merged: list[dict[str, Any]] = []
-    for segment in normalized:
-        if (
-            merged
-            and int(segment["first_shot_index"])
-            <= int(merged[-1]["last_shot_index"])
-        ):
-            previous = merged[-1]
-            participants = list(
-                dict.fromkeys(
-                    [
-                        *previous["participants"],
-                        *segment["participants"],
-                    ]
-                )
-            )
-            previous["last_dialogue_id"] = segment["last_dialogue_id"]
-            previous["dialogue_ids"].extend(segment["dialogue_ids"])
-            previous["speech_mode"] = (
-                SpeechMode.DIALOGUE
-                if (
-                    len(participants) > 1
-                    or previous["speech_mode"] == SpeechMode.DIALOGUE
-                    or segment["speech_mode"] == SpeechMode.DIALOGUE
-                )
-                else SpeechMode.MONOLOGUE
-            )
-            previous["participants"] = participants
-            previous["topic"] = " / ".join(
-                dict.fromkeys([previous["topic"], segment["topic"]])
-            )
-            previous["summary"] = " ".join(
-                dict.fromkeys([previous["summary"], segment["summary"]])
-            )
-            previous["grouping_reason"] = (
-                "Merged adjacent LLM dialogue groups because their dialogue "
-                "ranges share a PySceneDetect Shot"
-            )
-            previous["last_shot_index"] = max(
-                int(previous["last_shot_index"]),
-                int(segment["last_shot_index"]),
-            )
-        else:
-            merged.append(dict(segment))
-
-    for index, segment in enumerate(merged, 1):
-        segment["dialogue_group_id"] = f"dialogue_group_{index:04d}"
-    return merged
-
-
-def _group_dialogue(
-    context: WorkflowContext,
-    config: LLMConfig,
-    dialogue: list[dict[str, Any]],
-    shots: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if not dialogue:
-        return []
-
-    def validate(parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        return _validate_dialogue_segments(parsed, dialogue, shots)
-
-    package = prompt_registry.build(
-        PromptStage.ANALYSER,
-        PromptTask.DIALOGUE_SEGMENTATION,
-        DialogueSegmentationDetails(
-            dialogue_ids=[int(item["dialogue_id"]) for item in dialogue],
-        ),
-    )
-    return context.call_prompt(
-        package=package,
-        config=config,
-        validate_business=validate,
-    )
-
-
-def _raw_segments(
-    shots: list[dict[str, Any]],
-    dialogue: list[dict[str, Any]],
-    dialogue_groups: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    group_by_dialogue_id = {
-        dialogue_id: group
-        for group in dialogue_groups
-        for dialogue_id in group["dialogue_ids"]
-    }
-    ranges: list[tuple[int, int, dict[str, Any] | None]] = []
-    cursor = 0
-    for group in dialogue_groups:
-        first = int(group["first_shot_index"])
-        last = int(group["last_shot_index"])
-        if cursor < first:
-            ranges.append((cursor, first - 1, None))
-        ranges.append((first, last, group))
-        cursor = last + 1
-    if cursor < len(shots):
-        ranges.append((cursor, len(shots) - 1, None))
-    if not ranges:
-        ranges = [(0, len(shots) - 1, None)]
-
-    segments: list[dict[str, Any]] = []
-    for index, (first, last, group) in enumerate(ranges, 1):
-        segment_shots = []
-        for shot in shots[first : last + 1]:
-            shot_start = float(shot["time_range"]["start_sec"])
-            shot_end = float(shot["time_range"]["end_sec"])
-            occurrences = []
-            for line in dialogue:
-                line_start = float(line["start_sec"])
-                line_end = float(line["end_sec"])
-                if line_start >= shot_end or line_end <= shot_start:
-                    continue
-                owning_group = group_by_dialogue_id[int(line["dialogue_id"])]
-                if group is None or owning_group["dialogue_group_id"] != group["dialogue_group_id"]:
-                    continue
-                occurrences.append(
-                    {
-                        "dialogue_id": int(line["dialogue_id"]),
-                        "time_range": {
-                            "start_sec": line_start,
-                            "end_sec": line_end,
-                        },
-                        "speaker": line["speaker"],
-                        "text": line["text"],
-                        "dialogue_group_id": group["dialogue_group_id"],
-                        "speech_mode": group["speech_mode"],
-                    }
-                )
-            segment_shots.append({**shot, "dialogue": occurrences})
-        start = float(segment_shots[0]["time_range"]["start_sec"])
-        end = float(segment_shots[-1]["time_range"]["end_sec"])
-        dialogue_context = None
-        if group is not None:
-            dialogue_context = {
-                "dialogue_group_id": group["dialogue_group_id"],
-                "speech_mode": group["speech_mode"],
-                "dialogue_ids": group["dialogue_ids"],
-                "participants": group["participants"],
-                "topic": group["topic"],
-                "summary": group["summary"],
-                "grouping_reason": group["grouping_reason"],
-            }
-        segments.append(
-            {
-                "segment_id": f"segment_{index:04d}",
-                "time_range": {"start_sec": start, "end_sec": end},
-                "has_dialogue": group is not None,
-                "speech_mode": (
-                    group["speech_mode"] if group is not None else SpeechMode.NONE
-                ),
-                "shots": segment_shots,
-                "dialogue_context": dialogue_context,
-            }
-        )
-
-    for index, segment in enumerate(segments):
-        segment["timeline_role"] = (
-            TimelineRole.BODY
-            if len(segments) == 1
-            else (
-                TimelineRole.OPENING
-                if index == 0
-                else TimelineRole.ENDING
-                if index == len(segments) - 1
-                else TimelineRole.BODY
-            )
-        )
-    return segments
 
 
 def _split_segment_clips(
@@ -839,8 +590,6 @@ def _annotate_segments(
                     time_range=TimeRange(**item["time_range"]),
                     speaker=str(item["speaker"]),
                     text=str(item["text"]),
-                    dialogue_group_id=str(item["dialogue_group_id"]),
-                    speech_mode=SpeechMode(str(item["speech_mode"])),
                 )
                 for item in shot["dialogue"]
             ]
@@ -917,19 +666,15 @@ def _annotate_segments(
                 for character in shot.characters
             )
         )
-        dialogue_context = (
-            DialogueContext(
-                dialogue_group_id=segment["dialogue_context"]["dialogue_group_id"],
-                speech_mode=SpeechMode(segment["dialogue_context"]["speech_mode"]),
-                dialogue_ids=segment["dialogue_context"]["dialogue_ids"],
-                participants=segment["dialogue_context"]["participants"],
-                topic=segment["dialogue_context"]["topic"],
-                summary=segment["dialogue_context"]["summary"],
-                grouping_reason=segment["dialogue_context"]["grouping_reason"],
+        segment_dialogue = [
+            DialogueOccurrence(
+                dialogue_id=int(item["dialogue_id"]),
+                time_range=TimeRange(**item["time_range"]),
+                speaker=str(item["speaker"]),
+                text=str(item["text"]),
             )
-            if segment["dialogue_context"] is not None
-            else None
-        )
+            for item in segment["dialogue_items"]
+        ]
         description = SegmentDescription(
             segment_id=segment["segment_id"],
             time_range=TimeRange(**segment["time_range"]),
@@ -939,21 +684,17 @@ def _annotate_segments(
             content_type=content_type,
             timeline_role=TimelineRole(segment["timeline_role"]),
             shots=annotated_shots,
-            dialogue_context=dialogue_context,
+            dialogue_items=segment_dialogue,
             segment_summary=None,
             narrative_function=(
-                dialogue_context.summary
-                if dialogue_context is not None
-                else (
-                    " ".join(
-                        dict.fromkeys(
-                            shot.narrative_function
-                            for shot in visually_annotated_shots
-                            if shot.narrative_function is not None
-                        )
+                " ".join(
+                    dict.fromkeys(
+                        shot.narrative_function
+                        for shot in visually_annotated_shots
+                        if shot.narrative_function is not None
                     )
-                    or None
                 )
+                or None
             ),
             emotional_tone=(
                 representative.emotional_tone
@@ -1008,7 +749,6 @@ def _segment_summary_input(
                     "time_range": asdict(dialogue.time_range),
                     "speaker": dialogue.speaker,
                     "text": dialogue.text,
-                    "speech_mode": dialogue.speech_mode,
                 },
             )
         shots.append(
@@ -1035,11 +775,6 @@ def _segment_summary_input(
         "time_range": asdict(segment.time_range),
         "has_dialogue": segment.has_dialogue,
         "speech_mode": segment.speech_mode,
-        "dialogue_context": (
-            asdict(segment.dialogue_context)
-            if segment.dialogue_context is not None
-            else None
-        ),
         "dialogue_items": sorted(
             dialogues.values(),
             key=lambda item: (
@@ -1085,6 +820,7 @@ def _summarize_segments(
         checkpoint_path = summary_directory / f"{segment.segment_id}.json"
         checkpoint = _read_json_checkpoint(checkpoint_path)
         summary: str | None = None
+        timeline_role: TimelineRole | None = None
         if (
             isinstance(checkpoint, dict)
             and checkpoint.get("prompt_fingerprint") == package.fingerprint
@@ -1097,14 +833,17 @@ def _summarize_segments(
                     checkpoint["summary"]
                 )
                 summary = str(structured["segment_summary"]).strip()
+                timeline_role = TimelineRole(str(structured["timeline_role"]))
             except ValueError:
                 summary = None
-        if summary is None:
+                timeline_role = None
+        if summary is None or timeline_role is None:
             result = context.call_prompt(
                 package=package,
                 config=config,
             )
             summary = str(result["segment_summary"]).strip()
+            timeline_role = TimelineRole(str(result["timeline_role"]))
             _write_json_checkpoint(
                 checkpoint_path,
                 {
@@ -1119,7 +858,11 @@ def _summarize_segments(
                     "summary": result,
                 },
             )
-        summarized = replace(segment, segment_summary=summary)
+        summarized = replace(
+            segment,
+            segment_summary=summary,
+            timeline_role=timeline_role,
+        )
         summarized.validate()
         summary_progress.update()
         return summarized
@@ -1184,7 +927,9 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
     manifest = _read_json_checkpoint(manifest_path)
     if (
         not isinstance(manifest, dict)
-        or manifest.get("segment_summary_prompt_version") != "1.0"
+        or manifest.get("scene_segmentation_version")
+        != SCENE_SEGMENTATION_VERSION
+        or manifest.get("segment_summary_prompt_version") != "2.0"
         or not description_path.is_file()
         or not summary_path.is_file()
     ):
@@ -1239,6 +984,7 @@ def _analyse_video_material(
     material_config: MaterialAnalysisConfig,
     detection_config: ShotDetectionConfig,
     asr_config: ASRConfig,
+    scene_config: SceneSegmentationConfig,
     annotation_config: ShotAnnotationConfig,
     llm_config: LLMConfig,
     vlm_config: VLMConfig,
@@ -1252,6 +998,7 @@ def _analyse_video_material(
         material_config,
         detection_config,
         asr_config,
+        scene_config,
         annotation_config,
         llm_config,
         vlm_config,
@@ -1273,6 +1020,11 @@ def _analyse_video_material(
 
     media = probe_media(video_path)
     duration_sec = float(media["duration"])
+    _reuse_compatible_stage_checkpoints(
+        material_directory,
+        analysis_signature,
+        duration_sec,
+    )
     shots_path = material_directory / "shots.json"
     shots = _valid_shot_checkpoint(
         _read_json_checkpoint(shots_path),
@@ -1385,10 +1137,18 @@ def _analyse_video_material(
     if context.get_artifact("full_dialogue") != dialogue:
         context.set_artifact("full_dialogue", dialogue)
 
-    segment_boundaries_path = material_directory / "segment_boundaries.json"
-    segments = _valid_segment_checkpoint(
-        _read_json_checkpoint(segment_boundaries_path),
-        shots,
+    segments_path = material_directory / "segments.json"
+    scene_manifest_path = material_directory / "scene_segmentation_manifest.json"
+    scene_manifest = _read_json_checkpoint(scene_manifest_path)
+    segments = (
+        _valid_segment_checkpoint(
+            _read_json_checkpoint(segments_path),
+            shots,
+        )
+        if isinstance(scene_manifest, dict)
+        and scene_manifest.get("method") == "scene_vlm"
+        and scene_manifest.get("version") == SCENE_SEGMENTATION_VERSION
+        else None
     )
     if segments is None:
         stage_started = time.monotonic()
@@ -1396,21 +1156,49 @@ def _analyse_video_material(
             "INFO",
             "analyser",
             "stage.start",
-            "Dialogue grouping and Segment construction started",
-            stage="segment_construction",
+            "Scene-VLM segmentation started",
+            stage="scene_segmentation",
             stage_index=3,
             stage_count=7,
         )
-        dialogue_groups = _group_dialogue(context, llm_config, dialogue, shots)
-        segments = _raw_segments(shots, dialogue, dialogue_groups)
-        _write_json_checkpoint(segment_boundaries_path, segments)
-        context.set_artifact("segment_boundaries", segments)
+        scene_boundaries = detect_scene_boundaries(
+            video_path,
+            shots,
+            dialogue,
+            context,
+            vlm_config,
+            scene_config,
+            material_directory / "scene_frames",
+            material_directory / "scene_boundary_windows",
+        )
+        _write_json_checkpoint(
+            material_directory / "scene_boundaries.json",
+            scene_boundaries,
+        )
+        segments = build_segments_from_scene_boundaries(
+            shots,
+            dialogue,
+            scene_boundaries,
+        )
+        _write_json_checkpoint(segments_path, segments)
+        _write_json_checkpoint(
+            scene_manifest_path,
+            {
+                "method": "scene_vlm",
+                "version": SCENE_SEGMENTATION_VERSION,
+                "context_shots": scene_config.context_shots,
+                "focus_shots": scene_config.focus_shots,
+                "frames_per_shot": scene_config.frames_per_shot,
+                "model": vlm_config.model,
+            },
+        )
+        context.set_artifact("segments", segments)
         log_event(
             "INFO",
             "analyser",
             "stage.complete",
-            "Dialogue grouping and Segment construction completed",
-            stage="segment_construction",
+            "Scene-VLM segmentation completed",
+            stage="scene_segmentation",
             stage_index=3,
             stage_count=7,
             segments=len(segments),
@@ -1421,15 +1209,15 @@ def _analyse_video_material(
             "INFO",
             "analyser",
             "checkpoint.resume",
-            "Segment-boundary checkpoint resumed",
-            stage="segment_construction",
+            "Scene-VLM Segment checkpoint resumed",
+            stage="scene_segmentation",
             stage_index=3,
             stage_count=7,
             segments=len(segments),
         )
-        if not segment_boundaries_path.is_file():
-            _write_json_checkpoint(segment_boundaries_path, segments)
-        context.set_artifact("segment_boundaries", segments)
+        if not segments_path.is_file():
+            _write_json_checkpoint(segments_path, segments)
+        context.set_artifact("segments", segments)
 
     stage_started = time.monotonic()
     log_event(
@@ -1525,7 +1313,7 @@ def _analyse_video_material(
         ),
         segments=annotated_segments,
         asr_model=asr_config.backend,
-        dialogue_grouping_model=llm_config.model,
+        scene_boundary_model=vlm_config.model,
         visual_description_model=vlm_config.model,
     )
     description_dict = video_description.to_dict()
@@ -1599,7 +1387,12 @@ def _analyse_video_material(
         material_directory / "analysis_manifest.json",
         {
             **analysis_signature,
-            "segment_summary_prompt_version": "1.0",
+            "scene_segmentation_method": "scene_vlm",
+            "scene_segmentation_version": SCENE_SEGMENTATION_VERSION,
+            "scene_boundaries": str(
+                (material_directory / "scene_boundaries.json").resolve()
+            ),
+            "segment_summary_prompt_version": "2.0",
             "material_directory": str(material_directory.resolve()),
             "video_description": str(description_path.resolve()),
             "video_summary": str(summary_path.resolve()),
@@ -1637,6 +1430,7 @@ class MaterialAnalystAgent:
             self.config.material_analysis,
             self.config.shot_detection,
             self.config.asr,
+            self.config.scene_segmentation,
             self.config.shot_annotation,
             self.config.llm,
             self.config.vlm,
