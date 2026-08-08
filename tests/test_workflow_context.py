@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from cutmaster.configuration.schema import LLMConfig
 from cutmaster.prompting import (
     PromptModality,
@@ -191,3 +193,74 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     assert call["attempts"][0]["prompt"]["prompt_id"] == (
         "planner.candidate_retrieval"
     )
+
+
+def test_request_failure_logging_does_not_duplicate_operation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package = PromptPackage(
+        stage=PromptStage.PLANNER,
+        task=PromptTask.SLOT_PLANNING,
+        prompt_version="test",
+        operation="plan",
+        system_prompt="Return JSON",
+        user_prompt="Create slots",
+        response_contract=ResponseContract(
+            version="test",
+            schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+        ),
+        context_keys=(),
+        modality=PromptModality.TEXT,
+    )
+    events: list[dict[str, object]] = []
+
+    def fail_request(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    def capture_event(level, component, event, message, **fields):
+        events.append(
+            {
+                "level": level,
+                "component": component,
+                "event": event,
+                "message": message,
+                **fields,
+            }
+        )
+
+    monkeypatch.setattr(
+        "cutmaster.runtime.workflow_context.generate_text",
+        fail_request,
+    )
+    monkeypatch.setattr(
+        "cutmaster.runtime.workflow_context.log_event",
+        capture_event,
+    )
+
+    context = WorkflowContext(tmp_path / "history.json")
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        context.call_prompt(
+            package=package,
+            config=LLMConfig(
+                model="test",
+                base_url="",
+                api_key="test",
+                max_retries=0,
+            ),
+        )
+
+    request_failure = next(
+        item
+        for item in events
+        if item["component"] == "model"
+        and item["event"] == "model.fail"
+        and item["message"] == "Model request failed"
+    )
+    assert request_failure["operation"] == "plan"
+    assert request_failure["reason_code"] == "model_request_failed"

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
 from cutmaster.analyser.tools.asr import prepare_subtitles
 from cutmaster.analyser.tools.cache import (
@@ -48,7 +49,7 @@ from cutmaster.prompting.failure_catalog import (
 )
 from cutmaster.prompting.analyser import (
     SegmentSummaryDetails,
-    ShotAnnotationDetails,
+    SegmentShotAnnotationDetails,
     VideoSummaryDetails,
 )
 from cutmaster.runtime.workflow_context import WorkflowContext
@@ -321,6 +322,64 @@ def _sample_shot_frames(
         capture.release()
 
 
+def _shot_frame_contact_sheet(image_data_urls: list[str]) -> str:
+    if len(image_data_urls) != 5:
+        raise ValueError("Shot contact sheet requires exactly five frames")
+    frames: list[np.ndarray] = []
+    for index, data_url in enumerate(image_data_urls, 1):
+        _, separator, payload = data_url.partition(",")
+        if not separator:
+            raise ValueError("Shot frame must be an encoded data URI")
+        encoded = np.frombuffer(base64.b64decode(payload), dtype=np.uint8)
+        frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Could not decode sampled Shot frame")
+        height, width = frame.shape[:2]
+        scale = min(1.0, 640.0 / max(1, width))
+        resized = cv2.resize(
+            frame,
+            (
+                max(1, round(width * scale)),
+                max(1, round(height * scale)),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+        cv2.rectangle(resized, (0, 0), (72, 42), (0, 0, 0), -1)
+        cv2.putText(
+            resized,
+            str(index),
+            (18, 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        frames.append(resized)
+
+    cell_width = max(frame.shape[1] for frame in frames)
+    cell_height = max(frame.shape[0] for frame in frames)
+    canvas = np.zeros((cell_height * 2, cell_width * 3, 3), dtype=np.uint8)
+    for index, frame in enumerate(frames):
+        row, column = divmod(index, 3)
+        height, width = frame.shape[:2]
+        canvas[
+            row * cell_height : row * cell_height + height,
+            column * cell_width : column * cell_width + width,
+        ] = frame
+    ok, encoded_sheet = cv2.imencode(
+        ".jpg",
+        canvas,
+        [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+    )
+    if not ok:
+        raise RuntimeError("Could not encode Shot frame contact sheet")
+    return (
+        "data:image/jpeg;base64,"
+        + base64.b64encode(encoded_sheet.tobytes()).decode("ascii")
+    )
+
+
 def _validate_shot_annotation(
     parsed: dict[str, Any],
     shot_id: str,
@@ -411,12 +470,18 @@ def _annotate_segments(
     config: VLMConfig,
     sample_frames: int,
     annotation_directory: Path,
+    max_images_per_request: int = 250,
+    max_shots_per_request: int = 20,
 ) -> list[SegmentDescription]:
+    if max_images_per_request <= 0:
+        raise ValueError("max_images_per_request must be positive")
+    if max_shots_per_request <= 0:
+        raise ValueError("max_shots_per_request must be positive")
     annotation_directory.mkdir(parents=True, exist_ok=True)
     annotation_progress = progress_bar(
-        total=sum(len(segment["shots"]) for segment in segments),
-        description="Shot VLM annotation",
-        unit="shot",
+        total=len(segments),
+        description="Segment Shot VLM annotation",
+        unit="segment",
     )
 
     def unavailable_annotation(
@@ -445,145 +510,446 @@ def _annotate_segments(
     def annotate_segment(segment: dict[str, Any]) -> SegmentDescription:
         clip_path = Path(segment["clip_path"])
         segment_start = float(segment["time_range"]["start_sec"])
+        source_shots = segment["shots"]
+        shot_ids = [str(shot["shot_id"]) for shot in source_shots]
+        whole_request_uses_contact_sheets = (
+            len(source_shots) * sample_frames > max_images_per_request
+        )
+
+        def nominal_sample_times(
+            shots: list[dict[str, Any]],
+        ) -> dict[str, list[float]]:
+            result: dict[str, list[float]] = {}
+            for shot in shots:
+                global_start = float(shot["time_range"]["start_sec"])
+                global_end = float(shot["time_range"]["end_sec"])
+                result[str(shot["shot_id"])] = [
+                    round(
+                        global_start
+                        + (global_end - global_start)
+                        * (index + 0.5)
+                        / sample_frames,
+                        6,
+                    )
+                    for index in range(sample_frames)
+                ]
+            return result
+
+        def valid_sample_times(value: Any, expected_ids: list[str]) -> bool:
+            return (
+                isinstance(value, dict)
+                and set(value) == set(expected_ids)
+                and all(
+                    isinstance(value[shot_id], list)
+                    and len(value[shot_id]) == sample_frames
+                    and all(
+                        isinstance(time_sec, (int, float))
+                        for time_sec in value[shot_id]
+                    )
+                    for shot_id in expected_ids
+                )
+            )
+
+        def build_package(
+            sampled_times_by_shot: dict[str, list[float]],
+            request_segment: dict[str, Any],
+            frame_delivery: str,
+            batch_index: int = 1,
+            batch_count: int = 1,
+        ):
+            return prompt_registry.build(
+                PromptStage.ANALYSER,
+                PromptTask.SHOT_ANNOTATION,
+                SegmentShotAnnotationDetails(
+                    segment=request_segment,
+                    sampled_frame_times_by_shot=sampled_times_by_shot,
+                    frame_delivery=frame_delivery,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    total_segment_shots=len(source_shots),
+                ),
+            )
+
+        def validate_annotations(
+            parsed: dict[str, Any],
+            expected_shots: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            expected_ids = [str(shot["shot_id"]) for shot in expected_shots]
+            raw_annotations = parsed.get("shots")
+            if not isinstance(raw_annotations, list):
+                raise ValueError("Segment Shot annotation must return a shots array")
+            if len(raw_annotations) != len(expected_shots):
+                raise ValueError(
+                    "Segment Shot annotation returned "
+                    f"{len(raw_annotations)} Shots; expected {len(expected_shots)}"
+                )
+            returned_ids = [
+                str(annotation.get("shot_id"))
+                if isinstance(annotation, dict)
+                else ""
+                for annotation in raw_annotations
+            ]
+            if returned_ids != expected_ids:
+                raise ValueError(
+                    "Segment Shot annotation must preserve exact source order: "
+                    f"expected {expected_ids}, got {returned_ids}"
+                )
+            return [
+                _validate_shot_annotation(
+                    annotation,
+                    shot_id,
+                    bool(shot["dialogue"]),
+                )
+                for shot, shot_id, annotation in zip(
+                    expected_shots,
+                    expected_ids,
+                    raw_annotations,
+                    strict=True,
+                )
+            ]
+
+        checkpoint_path = annotation_directory / f"{segment['segment_id']}.json"
+        checkpoint = _read_json_checkpoint(checkpoint_path)
+        checkpoint_sample_times = (
+            checkpoint.get("sampled_frame_times_by_shot")
+            if isinstance(checkpoint, dict)
+            else None
+        )
+        sampled_times_by_shot = (
+            checkpoint_sample_times
+            if valid_sample_times(checkpoint_sample_times, shot_ids)
+            else nominal_sample_times(source_shots)
+        )
+        package = build_package(
+            sampled_times_by_shot,
+            segment,
+            (
+                "contact_sheet"
+                if whole_request_uses_contact_sheets
+                else "individual"
+            ),
+        )
+        checkpoint_matches = (
+            isinstance(checkpoint, dict)
+            and checkpoint.get("prompt_fingerprint") == package.fingerprint
+            and checkpoint.get("contract_fingerprint")
+            == package.response_contract.fingerprint
+        )
+        annotations: list[dict[str, Any]] | None = None
+        if checkpoint_matches and isinstance(checkpoint.get("response"), dict):
+            try:
+                structured = package.response_contract.validate_structure(
+                    checkpoint["response"]
+                )
+                annotations = validate_annotations(structured, source_shots)
+            except ValueError:
+                annotations = None
+        elif (
+            checkpoint_matches
+            and checkpoint.get("visual_annotation_status")
+            == VisualAnnotationStatus.PROVIDER_REJECTED
+            and checkpoint.get("visual_annotation_failure")
+            == "data_inspection_failed"
+        ):
+            annotations = [
+                unavailable_annotation(shot_id, bool(shot["dialogue"]))
+                for shot, shot_id in zip(source_shots, shot_ids, strict=True)
+            ]
+
+        if annotations is None:
+            request_shot_limit = min(
+                max_shots_per_request,
+                max_images_per_request,
+            )
+            request_batches = [
+                source_shots[index : index + request_shot_limit]
+                for index in range(0, len(source_shots), request_shot_limit)
+            ]
+            batch_count = len(request_batches)
+            use_request_batches = batch_count > 1
+            if use_request_batches:
+                log_event(
+                    "INFO",
+                    "analyser",
+                    "stage.progress",
+                    "Long Segment Shot annotation split into checkpointed requests",
+                    segment_id=segment["segment_id"],
+                    shots=len(source_shots),
+                    request_batches=batch_count,
+                    max_shots_per_request=max_shots_per_request,
+                )
+            batch_directory = annotation_directory / str(segment["segment_id"])
+            if use_request_batches:
+                batch_directory.mkdir(parents=True, exist_ok=True)
+
+            merged_annotations: list[dict[str, Any]] = []
+            sampled_times_by_shot = {}
+            contains_provider_rejection = False
+            for batch_index, batch_shots in enumerate(request_batches, 1):
+                batch_ids = [str(shot["shot_id"]) for shot in batch_shots]
+                batch_segment = {**segment, "shots": batch_shots}
+                frame_delivery = (
+                    "contact_sheet"
+                    if (
+                        use_request_batches
+                        or len(batch_shots) * sample_frames
+                        > max_images_per_request
+                    )
+                    else "individual"
+                )
+                batch_checkpoint_path = (
+                    batch_directory / f"batch_{batch_index:03d}.json"
+                    if use_request_batches
+                    else checkpoint_path
+                )
+                batch_checkpoint = _read_json_checkpoint(batch_checkpoint_path)
+                checkpoint_batch_times = (
+                    batch_checkpoint.get("sampled_frame_times_by_shot")
+                    if isinstance(batch_checkpoint, dict)
+                    else None
+                )
+                batch_sample_times = (
+                    checkpoint_batch_times
+                    if valid_sample_times(checkpoint_batch_times, batch_ids)
+                    else nominal_sample_times(batch_shots)
+                )
+                batch_package = build_package(
+                    batch_sample_times,
+                    batch_segment,
+                    frame_delivery,
+                    batch_index,
+                    batch_count,
+                )
+                batch_checkpoint_matches = (
+                    isinstance(batch_checkpoint, dict)
+                    and batch_checkpoint.get("prompt_fingerprint")
+                    == batch_package.fingerprint
+                    and batch_checkpoint.get("contract_fingerprint")
+                    == batch_package.response_contract.fingerprint
+                )
+                batch_annotations: list[dict[str, Any]] | None = None
+                batch_rejected = False
+                if (
+                    batch_checkpoint_matches
+                    and isinstance(batch_checkpoint.get("response"), dict)
+                ):
+                    try:
+                        structured = (
+                            batch_package.response_contract.validate_structure(
+                                batch_checkpoint["response"]
+                            )
+                        )
+                        batch_annotations = validate_annotations(
+                            structured,
+                            batch_shots,
+                        )
+                    except ValueError:
+                        batch_annotations = None
+                elif (
+                    batch_checkpoint_matches
+                    and batch_checkpoint.get("visual_annotation_status")
+                    == VisualAnnotationStatus.PROVIDER_REJECTED
+                    and batch_checkpoint.get("visual_annotation_failure")
+                    == "data_inspection_failed"
+                ):
+                    batch_annotations = [
+                        unavailable_annotation(
+                            shot_id,
+                            bool(shot["dialogue"]),
+                        )
+                        for shot, shot_id in zip(
+                            batch_shots,
+                            batch_ids,
+                            strict=True,
+                        )
+                    ]
+                    batch_rejected = True
+
+                if batch_annotations is None:
+                    image_data_urls: list[str] = []
+                    image_labels: list[str] = []
+                    batch_sample_times = {}
+                    for shot, shot_id in zip(
+                        batch_shots,
+                        batch_ids,
+                        strict=True,
+                    ):
+                        global_start = float(shot["time_range"]["start_sec"])
+                        global_end = float(shot["time_range"]["end_sec"])
+                        images, sampled_times = _sample_shot_frames(
+                            clip_path,
+                            global_start - segment_start,
+                            global_end - segment_start,
+                            global_start,
+                            sample_frames,
+                        )
+                        batch_sample_times[shot_id] = sampled_times
+                        if frame_delivery == "contact_sheet":
+                            image_data_urls.append(
+                                _shot_frame_contact_sheet(images)
+                            )
+                            image_labels.append(
+                                f"{shot_id} contact sheet; "
+                                f"frames 1-{sample_frames} at "
+                                + ", ".join(
+                                    f"{time_sec:.3f}s"
+                                    for time_sec in sampled_times
+                                )
+                            )
+                        else:
+                            image_data_urls.extend(images)
+                            image_labels.extend(
+                                f"{shot_id} frame {index}/{sample_frames} "
+                                f"at {time_sec:.3f}s"
+                                for index, time_sec in enumerate(
+                                    sampled_times,
+                                    1,
+                                )
+                            )
+                    batch_package = build_package(
+                        batch_sample_times,
+                        batch_segment,
+                        frame_delivery,
+                        batch_index,
+                        batch_count,
+                    )
+                    if frame_delivery == "contact_sheet":
+                        log_event(
+                            "INFO",
+                            "analyser",
+                            "fallback.apply",
+                            "Shot frames packed into per-Shot contact sheets",
+                            segment_id=segment["segment_id"],
+                            batch_index=batch_index,
+                            batch_count=batch_count,
+                            shots=len(batch_shots),
+                            sampled_frames=len(batch_shots) * sample_frames,
+                            request_images=len(image_data_urls),
+                            max_images_per_request=max_images_per_request,
+                        )
+                    try:
+                        batch_annotations = context.call_prompt(
+                            package=batch_package,
+                            config=config,
+                            validate_business=lambda parsed, expected=batch_shots: (
+                                validate_annotations(parsed, expected)
+                            ),
+                            image_data_urls=image_data_urls,
+                            image_labels=image_labels,
+                        )
+                    except Exception as exc:
+                        if "data_inspection_failed" not in str(exc).lower():
+                            raise
+                        batch_annotations = [
+                            unavailable_annotation(
+                                shot_id,
+                                bool(shot["dialogue"]),
+                            )
+                            for shot, shot_id in zip(
+                                batch_shots,
+                                batch_ids,
+                                strict=True,
+                            )
+                        ]
+                        batch_rejected = True
+                        failure = build_prompt_failure(
+                            PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
+                            operation="segment_shot_visual_annotation",
+                            error_message=str(exc),
+                        )
+                        log_event(
+                            "WARNING",
+                            "analyser",
+                            "fallback.apply",
+                            "Segment Shot annotation batch skipped after provider content inspection",
+                            segment_id=segment["segment_id"],
+                            batch_index=batch_index,
+                            batch_count=batch_count,
+                            shots=len(batch_shots),
+                            visual_annotation_status=(
+                                VisualAnnotationStatus.PROVIDER_REJECTED
+                            ),
+                            **failure,
+                        )
+
+                    batch_checkpoint_payload: dict[str, Any] = {
+                        "schema_version": "1.0",
+                        "segment_id": segment["segment_id"],
+                        "batch_index": batch_index,
+                        "batch_count": batch_count,
+                        "shot_ids": batch_ids,
+                        "prompt_id": batch_package.prompt_id,
+                        "prompt_version": batch_package.prompt_version,
+                        "prompt_fingerprint": batch_package.fingerprint,
+                        "contract_fingerprint": (
+                            batch_package.response_contract.fingerprint
+                        ),
+                        "sampled_frame_times_by_shot": batch_sample_times,
+                    }
+                    if batch_rejected:
+                        batch_checkpoint_payload.update(
+                            {
+                                "visual_annotation_status": (
+                                    VisualAnnotationStatus.PROVIDER_REJECTED
+                                ),
+                                "visual_annotation_failure": (
+                                    "data_inspection_failed"
+                                ),
+                            }
+                        )
+                    else:
+                        batch_checkpoint_payload["response"] = {
+                            "shots": batch_annotations
+                        }
+                    _write_json_checkpoint(
+                        batch_checkpoint_path,
+                        batch_checkpoint_payload,
+                    )
+
+                sampled_times_by_shot.update(batch_sample_times)
+                merged_annotations.extend(batch_annotations)
+                contains_provider_rejection = (
+                    contains_provider_rejection or batch_rejected
+                )
+            annotations = merged_annotations
+            package = build_package(
+                sampled_times_by_shot,
+                segment,
+                (
+                    "contact_sheet"
+                    if whole_request_uses_contact_sheets
+                    else "individual"
+                ),
+            )
+            if not contains_provider_rejection:
+                _write_json_checkpoint(
+                    checkpoint_path,
+                    {
+                        "schema_version": "1.0",
+                        "segment_id": segment["segment_id"],
+                        "shot_ids": shot_ids,
+                        "prompt_id": package.prompt_id,
+                        "prompt_version": package.prompt_version,
+                        "prompt_fingerprint": package.fingerprint,
+                        "contract_fingerprint": (
+                            package.response_contract.fingerprint
+                        ),
+                        "sampled_frame_times_by_shot": sampled_times_by_shot,
+                        "response": {"shots": annotations},
+                    },
+                )
+
         annotated_shots: list[ShotDescription] = []
-        for shot in segment["shots"]:
+        for shot, shot_id, annotation in zip(
+            source_shots,
+            shot_ids,
+            annotations,
+            strict=True,
+        ):
             global_start = float(shot["time_range"]["start_sec"])
             global_end = float(shot["time_range"]["end_sec"])
             local_start = global_start - segment_start
             local_end = global_end - segment_start
-            sampled_times = [
-                round(
-                    global_start
-                    + (global_end - global_start) * (index + 0.5) / sample_frames,
-                    6,
-                )
-                for index in range(sample_frames)
-            ]
-            package = prompt_registry.build(
-                PromptStage.ANALYSER,
-                PromptTask.SHOT_ANNOTATION,
-                ShotAnnotationDetails(
-                    segment=segment,
-                    shot=shot,
-                    sampled_frame_times_sec=sampled_times,
-                ),
-            )
-
-            def validate_annotation(parsed: dict[str, Any]) -> dict[str, Any]:
-                return _validate_shot_annotation(
-                    parsed,
-                    shot["shot_id"],
-                    bool(shot["dialogue"]),
-                )
-
-            checkpoint_path = annotation_directory / f"{shot['shot_id']}.json"
-            checkpoint = _read_json_checkpoint(checkpoint_path)
-            annotation = None
-            checkpoint_matches = (
-                isinstance(checkpoint, dict)
-                and checkpoint.get("prompt_fingerprint") == package.fingerprint
-                and checkpoint.get("contract_fingerprint")
-                == package.response_contract.fingerprint
-            )
-            if (
-                checkpoint_matches
-                and isinstance(checkpoint.get("annotation"), dict)
-            ):
-                try:
-                    structured = package.response_contract.validate_structure(
-                        checkpoint["annotation"]
-                    )
-                    annotation = validate_annotation(structured)
-                except ValueError:
-                    annotation = None
-            elif (
-                checkpoint_matches
-                and checkpoint.get("visual_annotation_status")
-                == VisualAnnotationStatus.PROVIDER_REJECTED
-                and checkpoint.get("visual_annotation_failure")
-                == "data_inspection_failed"
-            ):
-                annotation = unavailable_annotation(
-                    str(shot["shot_id"]),
-                    bool(shot["dialogue"]),
-                )
-            if annotation is None:
-                images, sampled_times = _sample_shot_frames(
-                    clip_path,
-                    local_start,
-                    local_end,
-                    global_start,
-                    sample_frames,
-                )
-                try:
-                    annotation = context.call_prompt(
-                        package=package,
-                        config=config,
-                        validate_business=validate_annotation,
-                        image_data_urls=images,
-                        image_labels=[
-                            f"{shot['shot_id']} frame {index}/5 at {time_sec:.3f}s"
-                            for index, time_sec in enumerate(sampled_times, 1)
-                        ],
-                    )
-                except Exception as exc:
-                    if "data_inspection_failed" not in str(exc).lower():
-                        raise
-                    annotation = unavailable_annotation(
-                        str(shot["shot_id"]),
-                        bool(shot["dialogue"]),
-                    )
-                    _write_json_checkpoint(
-                        checkpoint_path,
-                        {
-                            "schema_version": "1.0",
-                            "shot_id": shot["shot_id"],
-                            "prompt_id": package.prompt_id,
-                            "prompt_version": package.prompt_version,
-                            "prompt_fingerprint": package.fingerprint,
-                            "contract_fingerprint": (
-                                package.response_contract.fingerprint
-                            ),
-                            "visual_annotation_status": (
-                                VisualAnnotationStatus.PROVIDER_REJECTED
-                            ),
-                            "visual_annotation_failure": (
-                                "data_inspection_failed"
-                            ),
-                        },
-                    )
-                    failure = build_prompt_failure(
-                        PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
-                        operation="shot_visual_annotation",
-                        error_message=str(exc),
-                    )
-                    log_event(
-                        "WARNING",
-                        "analyser",
-                        "fallback.apply",
-                        "Shot visual annotation was skipped after provider content inspection",
-                        shot_id=shot["shot_id"],
-                        segment_id=segment["segment_id"],
-                        visual_annotation_status=(
-                            VisualAnnotationStatus.PROVIDER_REJECTED
-                        ),
-                        **failure,
-                    )
-                else:
-                    _write_json_checkpoint(
-                        checkpoint_path,
-                        {
-                            "schema_version": "1.0",
-                            "shot_id": shot["shot_id"],
-                            "prompt_id": package.prompt_id,
-                            "prompt_version": package.prompt_version,
-                            "prompt_fingerprint": package.fingerprint,
-                            "contract_fingerprint": (
-                                package.response_contract.fingerprint
-                            ),
-                            "annotation": annotation,
-                        },
-                    )
             dialogue_occurrences = [
                 DialogueOccurrence(
                     dialogue_id=int(item["dialogue_id"]),
@@ -604,7 +970,7 @@ def _annotate_segments(
                     start_boundary=BoundarySource(str(shot["start_boundary"])),
                     end_boundary=BoundarySource(str(shot["end_boundary"])),
                     dialogue=dialogue_occurrences,
-                    sampled_frame_times_sec=sampled_times,
+                    sampled_frame_times_sec=sampled_times_by_shot[shot_id],
                     scene=(
                         SceneDescription(**annotation["scene"])
                         if annotation["scene"] is not None
@@ -626,7 +992,6 @@ def _annotate_segments(
                     },
                 )
             )
-            annotation_progress.update()
 
         visually_annotated_shots = [
             shot
@@ -713,6 +1078,7 @@ def _annotate_segments(
             appearing_characters=appearing_characters,
         )
         description.validate()
+        annotation_progress.update()
         return description
 
     worker_count = max(1, min(config.max_concurrency, len(segments)))
@@ -720,10 +1086,11 @@ def _annotate_segments(
         "INFO",
         "analyser",
         "stage.progress",
-        "Segment annotation concurrency configured",
+        "Segment Shot annotation concurrency configured",
         segments=len(segments),
         workers=worker_count,
-        shots_within_segment="serial",
+        request_policy="bounded_shot_batches_serial_per_segment",
+        max_shots_per_request=max_shots_per_request,
     )
     try:
         with ThreadPoolExecutor(
@@ -1260,6 +1627,8 @@ def _analyse_video_material(
         vlm_config,
         annotation_config.shot_sample_frames,
         material_directory / "shot_annotations",
+        annotation_config.max_images_per_request,
+        annotation_config.max_shots_per_request,
     )
     log_event(
         "INFO",

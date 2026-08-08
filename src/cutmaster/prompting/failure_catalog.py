@@ -39,6 +39,7 @@ class PromptFailureCode(StrEnum):
     )
     PROVIDER_IMAGE_INSPECTION_FAILED = "provider_image_inspection_failed"
     PROVIDER_DATA_INSPECTION_FAILED = "provider_data_inspection_failed"
+    PROVIDER_REQUEST_LIMIT_EXCEEDED = "provider_request_limit_exceeded"
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,16 @@ PROMPT_FAILURE_CATALOG: dict[
             "Include all prior failure diagnostics in the next prompt, wait for the "
             "configured backoff, and retry the complete request and validation "
             "transaction."
+        ),
+    ),
+    PromptFailureCode.PROVIDER_REQUEST_LIMIT_EXCEEDED: PromptFailureDefinition(
+        diagnosis=(
+            "Provider request {operation} exceeds a deterministic payload limit: "
+            "{error_message}"
+        ),
+        repair_requirement=(
+            "Do not retry the unchanged request. Reduce or pack the supplied media "
+            "payload so it fits the provider limit, then submit it again."
         ),
     ),
     PromptFailureCode.PLANNING_ATTEMPT_INFEASIBLE: PromptFailureDefinition(

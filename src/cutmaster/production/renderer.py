@@ -191,6 +191,8 @@ def render_montage(
     output_dir: Path,
     config: RenderConfig,
     dialogue_config: DialogueAnchorConfig | None = None,
+    *,
+    include_dialogue_audio: bool = True,
 ) -> tuple[Path, Path]:
     check_media_tools()
     if config.original_volume > 0:
@@ -267,7 +269,7 @@ def render_montage(
         config,
         expected_duration,
         source_video=video_path,
-        script=script,
+        script=script if include_dialogue_audio else None,
         dialogue_config=dialogue_config,
     )
     return montage_path, output_path

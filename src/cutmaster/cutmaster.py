@@ -465,19 +465,20 @@ def _run_cutmaster(
         "stage.start",
         "Dialogue audio preparation started",
         stage="dialogue_audio_preparation",
-        enabled=config.dialogue_anchors.enable_vocal_separation,
+        enabled=request.include_dialogue_audio,
         anchors=sum(
             item.get("dialogue_anchor") is not None
             for item in adapted_script
-        ),
+        ) if request.include_dialogue_audio else 0,
     )
-    adapted_script = prepare_dialogue_audio(
-        request.video_path,
-        adapted_script,
-        output_dir,
-        config.dialogue_anchors,
-    )
-    write_script(adapted_script_path, adapted_script)
+    if request.include_dialogue_audio:
+        adapted_script = prepare_dialogue_audio(
+            request.video_path,
+            adapted_script,
+            output_dir,
+            config.dialogue_anchors,
+        )
+        write_script(adapted_script_path, adapted_script)
     timings["dialogue_audio_preparation"] = time.monotonic() - stage_started
     log_event(
         "INFO",
@@ -485,7 +486,7 @@ def _run_cutmaster(
         "stage.complete",
         "Dialogue audio preparation completed",
         stage="dialogue_audio_preparation",
-        enabled=config.dialogue_anchors.enable_vocal_separation,
+        enabled=request.include_dialogue_audio,
         elapsed_sec=timings["dialogue_audio_preparation"],
     )
 
@@ -505,6 +506,7 @@ def _run_cutmaster(
         output_dir,
         config.render,
         config.dialogue_anchors,
+        include_dialogue_audio=request.include_dialogue_audio,
     )
     timings["rendering"] = time.monotonic() - stage_started
     log_event(

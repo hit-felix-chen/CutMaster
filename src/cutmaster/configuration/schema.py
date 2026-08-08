@@ -61,6 +61,8 @@ class SceneSegmentationConfig:
 @dataclass(frozen=True)
 class ShotAnnotationConfig:
     shot_sample_frames: int = 5
+    max_images_per_request: int = 250
+    max_shots_per_request: int = 20
 
 
 @dataclass(frozen=True)

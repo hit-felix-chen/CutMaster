@@ -39,6 +39,8 @@ api_key_env = "CUTMASTER_TEST_KEY"
 
 [shot_annotation]
 shot_sample_frames = 5
+max_images_per_request = 200
+max_shots_per_request = 16
 
 [slot_planning]
 target_clip_duration_sec = 4.5
@@ -99,6 +101,8 @@ threads = 2
     assert config.scene_segmentation.focus_shots == 10
     assert config.scene_segmentation.frames_per_shot == 3
     assert config.shot_annotation.shot_sample_frames == 5
+    assert config.shot_annotation.max_images_per_request == 200
+    assert config.shot_annotation.max_shots_per_request == 16
     assert config.slot_planning.target_clip_duration_sec == 4.5
     assert config.slot_planning.replan_max_rounds == 2
     assert (

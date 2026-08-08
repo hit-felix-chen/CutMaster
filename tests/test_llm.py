@@ -27,6 +27,15 @@ from cutmaster.configuration.schema import LLMConfig, VLMConfig
             ),
             True,
         ),
+        (
+            LLMConfig(
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com",
+                api_key="test",
+                enable_thinking=True,
+            ),
+            {"thinking": {"type": "enabled"}},
+        ),
     ],
 )
 def test_model_thinking_config_reaches_api_request(
@@ -56,7 +65,12 @@ def test_model_thinking_config_reaches_api_request(
 
     assert generate_text("test", config, "Return JSON") == '{"ok":true}'
     assert captured["model"] == config.model
-    assert captured["extra_body"] == {"enable_thinking": expected}
+    expected_body = (
+        expected
+        if isinstance(expected, dict)
+        else {"enable_thinking": expected}
+    )
+    assert captured["extra_body"] == expected_body
 
 
 def test_multimodal_labels_are_interleaved_with_images(monkeypatch) -> None:
@@ -137,6 +151,27 @@ def test_json_request_does_not_repeat_provider_image_inspection_rejection(
         raise RuntimeError("data_inspection_failed")
 
     with pytest.raises(RuntimeError, match="data_inspection_failed"):
+        request_json_with_retries(
+            rejected_request,
+            LLMConfig(model="test", base_url="", api_key="test", max_retries=3),
+            operation="visual operation",
+        )
+
+    assert attempts == 1
+
+
+def test_json_request_does_not_repeat_provider_data_uri_limit_rejection(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
+    attempts = 0
+
+    def rejected_request():
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("Exceeded limit on max data-uri per request: 250")
+
+    with pytest.raises(RuntimeError, match="Exceeded limit"):
         request_json_with_retries(
             rejected_request,
             LLMConfig(model="test", base_url="", api_key="test", max_retries=3),

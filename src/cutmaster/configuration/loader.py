@@ -62,7 +62,11 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "focus_shots",
         "frames_per_shot",
     },
-    "shot_annotation": {"shot_sample_frames"},
+    "shot_annotation": {
+        "shot_sample_frames",
+        "max_images_per_request",
+        "max_shots_per_request",
+    },
     "slot_planning": {
         "target_clip_duration_sec",
         "replan_max_rounds",
@@ -321,6 +325,14 @@ def _validate_values(config: AppConfig) -> None:
         )
     if config.shot_annotation.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must equal 5")
+    if config.shot_annotation.max_images_per_request <= 0:
+        raise ValueError(
+            "shot_annotation.max_images_per_request must be positive"
+        )
+    if config.shot_annotation.max_shots_per_request <= 0:
+        raise ValueError(
+            "shot_annotation.max_shots_per_request must be positive"
+        )
     if config.scene_segmentation.context_shots != 20:
         raise ValueError("scene_segmentation.context_shots must equal 20")
     if config.scene_segmentation.focus_shots != 10:
@@ -439,6 +451,12 @@ def load_config(path: Path) -> AppConfig:
         ),
         shot_annotation=ShotAnnotationConfig(
             shot_sample_frames=int(shot_annotation.get("shot_sample_frames", 5)),
+            max_images_per_request=int(
+                shot_annotation.get("max_images_per_request", 250)
+            ),
+            max_shots_per_request=int(
+                shot_annotation.get("max_shots_per_request", 20)
+            ),
         ),
         slot_planning=SlotPlanningConfig(
             target_clip_duration_sec=float(

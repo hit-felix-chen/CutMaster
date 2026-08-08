@@ -8,10 +8,9 @@ CutMaster 的所有 LLM/VLM 任务通过 `cutmaster.prompting` 构造。业务�
 package = prompt_registry.build(
     stage=PromptStage.ANALYSER,
     task=PromptTask.SHOT_ANNOTATION,
-    details=ShotAnnotationDetails(
+    details=SegmentShotAnnotationDetails(
         segment=segment,
-        shot=shot,
-        sampled_frame_times_sec=sampled_times,
+        sampled_frame_times_by_shot=sampled_times_by_shot,
     ),
 )
 ```
@@ -31,7 +30,7 @@ package = prompt_registry.build(
 result = workflow_context.call_prompt(
     package=package,
     config=vlm_config,
-    validate_business=validate_shot_annotation,
+    validate_business=validate_shot_annotations,
     image_data_urls=images,
     image_labels=image_labels,
 )
@@ -96,10 +95,10 @@ src/cutmaster/prompting/planners/tasks.py
 模型调用不写入持久化历史：完整 Prompt、注入上下文、原始响应、图片标签及模型调用
 状态都只存在于当前请求的内存中。
 
-需要断点复用的业务产物必须由所属阶段独立保存。例如 Shot 标注写入
-`shot_annotations/<shot_id>.json`，其中只包含最终结构化标注及 Prompt/契约
-fingerprint，不包含模型调用内容。Prompt 或契约变化时，对应 Shot 检查点失效并重新
-请求模型。
+需要断点复用的业务产物必须由所属阶段独立保存。例如 Shot 标注以 Segment 为请求和
+缓存单位，写入 `shot_annotations/<segment_id>.json`；其中保存该 Segment 的有序
+`shots` 标注数组、采样时间及 Prompt/契约 fingerprint，不包含模型调用内容。Prompt
+或契约变化时，对应 Segment 检查点失效并重新请求模型。
 - 旧式、没有 Prompt/契约 fingerprint 的历史调用不会复用。
 
 ## 开发约束

@@ -9,9 +9,9 @@
 # max_retries: 首次请求失败后的完整重试次数。
 # max_concurrency: LLM 请求的最大并发数，供台词、规划、检索和复核阶段共用。
 [llm]
-model = "qwen3.7-max"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key_env = "DASHSCOPE_API_KEY"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
 enable_thinking = true
 temperature = 0.1
 max_tokens = 40000
@@ -24,7 +24,7 @@ max_concurrency = 10
 # model/base_url/api_key_env: 视觉语言模型及其服务和密钥来源。
 # enable_thinking/temperature/max_tokens: 控制视觉请求的推理与输出。
 # timeout_sec/max_retries: 控制单次视觉请求及其失败重试。
-# max_concurrency: VLM 最大并发数，逐 Shot 标注、候选核验和片段对评分共用。
+# max_concurrency: VLM 最大并发数，Segment 批量 Shot 标注、候选核验和片段对评分共用。
 [vlm]
 model = "qwen3.7-plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -78,8 +78,13 @@ focus_shots = 10
 frames_per_shot = 3
 
 # shot_sample_frames: 每个 Shot 送给 VLM 标注的均匀采样帧数；当前固定要求为 5。
+# max_images_per_request: VLM 单次请求允许的最大图片数。
+# max_shots_per_request: 长 Segment 内单次 VLM 请求最多标注的 Shot 数；批次会逐个
+# 保存 checkpoint，最后仍合并为一个 Segment。批量模式下每个 Shot 的 5 帧组成联系表。
 [shot_annotation]
 shot_sample_frames = 5
+max_images_per_request = 250
+max_shots_per_request = 20
 
 # Stage 2: music analysis currently has no user-tunable parameters.
 # 本阶段由 librosa 自动生成能量、onset、beat、重音和音乐段落画像。

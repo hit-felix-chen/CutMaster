@@ -5,7 +5,7 @@ from cutmaster.prompting.analyser.tasks import (
     DialogueReconstructionDetails,
     SceneBoundaryDetectionDetails,
     SegmentSummaryDetails,
-    ShotAnnotationDetails,
+    SegmentShotAnnotationDetails,
     VideoSummaryDetails,
 )
 
@@ -14,6 +14,6 @@ __all__ = [
     "DialogueReconstructionDetails",
     "SceneBoundaryDetectionDetails",
     "SegmentSummaryDetails",
-    "ShotAnnotationDetails",
+    "SegmentShotAnnotationDetails",
     "VideoSummaryDetails",
 ]

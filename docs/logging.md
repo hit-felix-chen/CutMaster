@@ -129,7 +129,7 @@ prompt_chars
 - benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，因此可以包含日志与进度条。
 - `analysis_history.json`、`planning_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
 - `planning_calls.json`：按任务和调用组织规划阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
-- `shot_annotations/`：保存可断点复用的单-Shot最终结构化标注。
+- `shot_annotations/`：按 Segment 保存可断点复用的有序 Shot 结构化标注数组。
 
 ## 代码约束
 

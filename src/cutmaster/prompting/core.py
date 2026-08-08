@@ -74,6 +74,12 @@ def response_template_from_schema(schema: dict[str, Any]) -> Any:
             for key in schema.get("required") or []
         }
     if schema_type == "array":
+        prefix_items = schema.get("prefixItems")
+        if prefix_items:
+            return [
+                response_template_from_schema(item)
+                for item in prefix_items
+            ]
         return [response_template_from_schema(schema.get("items") or {})]
     if schema_type == "string":
         return "<non-empty string>" if schema.get("minLength", 0) > 0 else "<string>"

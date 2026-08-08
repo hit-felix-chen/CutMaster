@@ -7,7 +7,7 @@ import pytest
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import (
     SegmentSummaryDetails,
-    ShotAnnotationDetails,
+    SegmentShotAnnotationDetails,
     VideoSummaryDetails,
 )
 from cutmaster.prompting.core import response_template_from_schema
@@ -26,18 +26,22 @@ def _shot_package():
     return prompt_registry.build(
         PromptStage.ANALYSER,
         PromptTask.SHOT_ANNOTATION,
-        ShotAnnotationDetails(
+        SegmentShotAnnotationDetails(
             segment={
                 "segment_id": "segment_0001",
                 "has_dialogue": False,
                 "speech_mode": "none",
+                "shots": [
+                    {
+                        "shot_id": "shot_00001",
+                        "timestamp": "00:00:00,000-00:00:01,000",
+                        "dialogue": [],
+                    }
+                ],
             },
-            shot={
-                "shot_id": "shot_00001",
-                "timestamp": "00:00:00,000-00:00:01,000",
-                "dialogue": [],
+            sampled_frame_times_by_shot={
+                "shot_00001": [0.1, 0.3, 0.5, 0.7, 0.9]
             },
-            sampled_frame_times_sec=[0.1, 0.3, 0.5, 0.7, 0.9],
         ),
     )
 
@@ -382,7 +386,7 @@ def test_prompt_failure_requires_template_details() -> None:
 
 def test_same_contract_rejects_unlisted_enum_and_extra_fields() -> None:
     package = _shot_package()
-    valid = {
+    valid_shot = {
         "shot_id": "shot_00001",
         "visual_description": "A woman crosses a room",
         "dominant_action": "Walking",
@@ -409,13 +413,14 @@ def test_same_contract_rejects_unlisted_enum_and_extra_fields() -> None:
         "visual_evidence": "The five frames show the same subject",
     }
 
+    valid = {"shots": [valid_shot]}
     assert package.response_contract.validate_structure(valid) is valid
 
-    with pytest.raises(ValueError, match=r"\$\.shot_scale"):
+    with pytest.raises(ValueError, match=r"\$\.shots\[0\]\.shot_scale"):
         package.response_contract.validate_structure(
-            {**valid, "shot_scale": "medium_close_up"}
+            {"shots": [{**valid_shot, "shot_scale": "medium_close_up"}]}
         )
     with pytest.raises(ValueError, match="Additional properties"):
         package.response_contract.validate_structure(
-            {**valid, "unexpected": True}
+            {"shots": [{**valid_shot, "unexpected": True}]}
         )

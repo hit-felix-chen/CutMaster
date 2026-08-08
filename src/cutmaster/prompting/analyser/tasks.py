@@ -46,10 +46,13 @@ class SceneBoundaryDetectionDetails:
 
 
 @dataclass(frozen=True)
-class ShotAnnotationDetails:
+class SegmentShotAnnotationDetails:
     segment: dict[str, Any]
-    shot: dict[str, Any]
-    sampled_frame_times_sec: list[float]
+    sampled_frame_times_by_shot: dict[str, list[float]]
+    frame_delivery: str = "individual"
+    batch_index: int = 1
+    batch_count: int = 1
+    total_segment_shots: int | None = None
 
 
 @dataclass(frozen=True)
@@ -229,10 +232,10 @@ Rules:
     )
 
 
-def _shot_contract(
+def _shot_schema(
     shot_id: str,
     has_dialogue: bool,
-) -> ResponseContract:
+) -> dict[str, Any]:
     content_types = (
         [SegmentContentType.NARRATIVE.value]
         if has_dialogue
@@ -312,78 +315,141 @@ def _shot_contract(
             "atmosphere": {"type": "string", "minLength": 1},
         },
     }
-    return ResponseContract(
-        version="2.0",
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "shot_id",
+            "visual_description",
+            "dominant_action",
+            "content_type",
+            "narrative_function",
+            "emotional_tone",
+            "emotional_intensity",
+            "scene",
+            "characters",
+            "shot_scale",
+            "camera_angle",
+            "camera_movement",
+            "composition",
+            "visual_evidence",
+        ],
+        "properties": {
+            "shot_id": {"type": "string", "const": shot_id},
+            "visual_description": {"type": "string", "minLength": 1},
+            "dominant_action": {"type": "string", "minLength": 1},
+            "content_type": {"type": "string", "enum": content_types},
+            "narrative_function": {"type": "string", "minLength": 1},
+            "emotional_tone": {"type": "string", "minLength": 1},
+            "emotional_intensity": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "scene": scene_schema,
+            "characters": {
+                "type": "array",
+                "items": character_schema,
+            },
+            "shot_scale": {
+                "type": "string",
+                "enum": _enum_values(ShotScale),
+            },
+            "camera_angle": {
+                "type": "string",
+                "enum": _enum_values(CameraAngle),
+            },
+            "camera_movement": {
+                "type": "string",
+                "enum": _enum_values(CameraMovement),
+            },
+            "composition": {"type": "string", "minLength": 1},
+            "visual_evidence": {"type": "string", "minLength": 1},
+        },
+    }
+
+
+def _shot_annotation(details: SegmentShotAnnotationDetails) -> PromptPackage:
+    segment = details.segment
+    shots = segment["shots"]
+    if not shots:
+        raise ValueError("Segment Shot annotation requires at least one Shot")
+    if details.frame_delivery not in {"individual", "contact_sheet"}:
+        raise ValueError(
+            "Segment Shot annotation frame_delivery must be individual or "
+            "contact_sheet"
+        )
+    if not 1 <= details.batch_index <= details.batch_count:
+        raise ValueError("Segment Shot annotation batch position is invalid")
+    if details.batch_count > 1 and details.total_segment_shots is None:
+        raise ValueError(
+            "Batched Segment Shot annotation requires total_segment_shots"
+        )
+    contract = ResponseContract(
+        version="3.0",
         schema={
             "type": "object",
             "additionalProperties": False,
-            "required": [
-                "shot_id",
-                "visual_description",
-                "dominant_action",
-                "content_type",
-                "narrative_function",
-                "emotional_tone",
-                "emotional_intensity",
-                "scene",
-                "characters",
-                "shot_scale",
-                "camera_angle",
-                "camera_movement",
-                "composition",
-                "visual_evidence",
-            ],
+            "required": ["shots"],
             "properties": {
-                "shot_id": {"type": "string", "const": shot_id},
-                "visual_description": {"type": "string", "minLength": 1},
-                "dominant_action": {"type": "string", "minLength": 1},
-                "content_type": {"type": "string", "enum": content_types},
-                "narrative_function": {"type": "string", "minLength": 1},
-                "emotional_tone": {"type": "string", "minLength": 1},
-                "emotional_intensity": {
-                    "type": "number",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                },
-                "scene": scene_schema,
-                "characters": {
+                "shots": {
                     "type": "array",
-                    "items": character_schema,
-                },
-                "shot_scale": {
-                    "type": "string",
-                    "enum": _enum_values(ShotScale),
-                },
-                "camera_angle": {
-                    "type": "string",
-                    "enum": _enum_values(CameraAngle),
-                },
-                "camera_movement": {
-                    "type": "string",
-                    "enum": _enum_values(CameraMovement),
-                },
-                "composition": {"type": "string", "minLength": 1},
-                "visual_evidence": {"type": "string", "minLength": 1},
+                    "minItems": len(shots),
+                    "maxItems": len(shots),
+                    "prefixItems": [
+                        _shot_schema(
+                            str(shot["shot_id"]),
+                            bool(shot["dialogue"]),
+                        )
+                        for shot in shots
+                    ],
+                    "items": False,
+                }
             },
         },
     )
+    shot_context = [
+        {
+            "shot_id": shot["shot_id"],
+            "timestamp": shot["timestamp"],
+            "has_dialogue": bool(shot["dialogue"]),
+            "dialogue": shot["dialogue"],
+            "sampled_frame_times_sec": details.sampled_frame_times_by_shot[
+                str(shot["shot_id"])
+            ],
+        }
+        for shot in shots
+    ]
+    image_delivery = (
+        "The attached\n"
+        "images are in chronological Shot-major order, with exactly five uniformly sampled frames for\n"
+        "each Shot. Frame labels identify their Shot and position."
+        if details.frame_delivery == "individual"
+        else (
+            "The attached images are in chronological Shot order, with one contact sheet "
+            "per Shot. Each contact sheet contains exactly five uniformly sampled frames "
+            "numbered 1 through 5. Image labels identify the corresponding Shot."
+        )
+    )
+    batch_note = ""
+    if details.batch_count > 1:
+        batch_note = f"""
 
-
-def _shot_annotation(details: ShotAnnotationDetails) -> PromptPackage:
-    shot = details.shot
-    segment = details.segment
-    has_dialogue = bool(shot["dialogue"])
-    contract = _shot_contract(str(shot["shot_id"]), has_dialogue)
-    instructions = f"""Annotate exactly one Shot from the five attached frames, shown in
-chronological order and sampled uniformly inside the Shot.
+This is request batch {details.batch_index} of {details.batch_count} for the same semantic
+Segment, which contains {details.total_segment_shots} Shots in total. Annotate only the supplied
+chronological subset. The caller will merge all batches into the original Segment and preserve
+the complete source Shot order."""
+    instructions = f"""Annotate every Shot in exactly one source-video Segment. {image_delivery}{batch_note}
 
 The maintained full transcript is global context for names and narrative position only. It is
 not evidence that a person, action, object, location, or emotion is visible. Pixel evidence
 always wins. If a visible person's identity cannot be established, assign a stable generic name
 such as person_01 instead of guessing a cast identity.
 
-This Shot has_dialogue={str(has_dialogue).lower()}. Therefore content_type must be narrative when
-has_dialogue is true; otherwise choose landscape, emotional, or pantomime.
+Return one annotation for every supplied Shot in the exact source order. For each Shot,
+content_type must be narrative when has_dialogue is true; otherwise choose landscape, emotional,
+or pantomime. When the same visible identity recurs across Shots, keep its character_id and name
+consistent within this Segment.
 
 Identity Likert:
 1 = identity cannot be established from these frames;
@@ -404,25 +470,28 @@ medium_close_up is not an allowed value. Describe locations concretely from visi
 }, ensure_ascii=False)}
 </segment>
 
-<shot>
-{json.dumps({
-    "shot_id": shot["shot_id"],
-    "timestamp": shot["timestamp"],
-    "dialogue": shot["dialogue"],
-    "sampled_frame_times_sec": details.sampled_frame_times_sec,
-}, ensure_ascii=False)}
-</shot>"""
+<shots>
+{json.dumps(shot_context, ensure_ascii=False)}
+</shots>"""
     return PromptPackage(
         stage=PromptStage.ANALYSER,
         task=PromptTask.SHOT_ANNOTATION,
-        prompt_version="2.0",
-        operation=f"Shot visual annotation {shot['shot_id']}",
+        prompt_version="3.0",
+        operation=(
+            f"Segment Shot visual annotation {segment['segment_id']}"
+            if details.batch_count == 1
+            else (
+                f"Segment Shot visual annotation {segment['segment_id']} "
+                f"batch {details.batch_index}/{details.batch_count}"
+            )
+        ),
         system_prompt=(
-            "You annotate exactly one source-video Shot from five uniformly sampled frames. "
+            "You annotate every source-video Shot in one Segment from five uniformly sampled "
+            "frames per Shot. "
             "The complete transcript is global narrative context, never visual evidence. "
             "Describe only visible people, actions, locations, lighting, colors, objects, and "
-            "camera properties. Every categorical value must exactly match the response "
-            "contract. Return strict JSON only."
+            "camera properties. Preserve Shot order and return a strict JSON shots array whose "
+            "categorical values exactly match the response contract."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,

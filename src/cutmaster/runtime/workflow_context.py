@@ -347,7 +347,6 @@ class WorkflowContext:
                     "model",
                     "model.fail",
                     "Model request failed",
-                    operation=active_package.operation,
                     prompt_id=active_package.prompt_id,
                     model=config.model,
                     modality=modality,

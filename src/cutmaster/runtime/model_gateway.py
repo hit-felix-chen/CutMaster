@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 from openai import OpenAI
 
@@ -16,6 +17,20 @@ from cutmaster.runtime.observability import error_summary, log_event
 
 
 T = TypeVar("T")
+
+
+def _thinking_request_body(
+    config: ModelConfig,
+    enabled: bool,
+) -> dict[str, Any]:
+    hostname = (urlparse(config.base_url).hostname or "").lower()
+    if hostname == "api.deepseek.com":
+        return {
+            "thinking": {
+                "type": "enabled" if enabled else "disabled",
+            }
+        }
+    return {"enable_thinking": enabled}
 
 
 def generate_text(
@@ -35,7 +50,7 @@ def generate_text(
         max_retries=0,
     )
     thinking = config.enable_thinking if enable_thinking is None else enable_thinking
-    extra_body = {"enable_thinking": thinking}
+    extra_body = _thinking_request_body(config, thinking)
     user_content: str | list[dict[str, Any]] = prompt
     if image_data_urls:
         if image_labels is not None and len(image_labels) != len(image_data_urls):
@@ -82,7 +97,25 @@ def request_json_with_retries(
             parsed = parse_json_object(request())
             return validate(parsed) if validate is not None else parsed
         except Exception as exc:
-            if "data_inspection_failed" in str(exc).lower():
+            error_text = str(exc).lower()
+            if "exceeded limit on max data-uri per request" in error_text:
+                failure = build_prompt_failure(
+                    PromptFailureCode.PROVIDER_REQUEST_LIMIT_EXCEEDED,
+                    operation=operation,
+                    error_message=error_summary(exc),
+                )
+                log_event(
+                    "ERROR",
+                    "model",
+                    "model.fail",
+                    "Model request exceeded a provider payload limit",
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error_type=type(exc).__name__,
+                    **failure,
+                )
+                raise
+            if "data_inspection_failed" in error_text:
                 # Repeating the same rejected image payload cannot make it pass provider-side
                 # inspection. Let the visual caller split or resample the payload instead.
                 failure = build_prompt_failure(

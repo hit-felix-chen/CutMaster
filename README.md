@@ -94,7 +94,7 @@ CLI
 
 ### 1. 可复用的 Material Memory
 
-Material Analyst 先用 PySceneDetect 提取完整 Shot 边界并把 ASR 台词绑定到 Shot，再按 Scene-VLM 的 context-focus 方法，以 20 个连续 Shot 为上下文、中央 10 个 Shot 为判断目标、每个 Shot 三帧，顺序判断语义 Scene 边界。生成 Segment 后再执行逐 Shot 视觉标注、Segment 聚合和故事摘要。结果按素材与分析配置缓存在 `.cutmaster/materials/`，同一原片可被不同提示词和 BGM 复用。
+Material Analyst 先用 PySceneDetect 提取完整 Shot 边界并把 ASR 台词绑定到 Shot，再按 Scene-VLM 的 context-focus 方法，以 20 个连续 Shot 为上下文、中央 10 个 Shot 为判断目标、每个 Shot 三帧，顺序判断语义 Scene 边界。生成 Segment 后，以 Segment 为 VLM 调用单位，一次返回其中全部 Shot 的逐镜头视觉标注，再执行 Segment 聚合和故事摘要。结果按素材与分析配置缓存在 `.cutmaster/materials/`，同一原片可被不同提示词和 BGM 复用。
 
 Material Memory 独立于某一次剪辑方案，避免每次运行都重新理解整部视频。
 

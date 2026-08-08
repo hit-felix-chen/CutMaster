@@ -149,6 +149,11 @@ def reuse_compatible_stage_checkpoints(
         read_json_checkpoint(shots_path),
         duration_sec,
     ) is None
+    source_subtitle_path = material_directory / "source.srt"
+    needs_source_subtitle = not (
+        source_subtitle_path.is_file()
+        and source_subtitle_path.stat().st_size > 0
+    )
     needs_dialogue = dialogue_checkpoint(material_directory) is None
     for candidate in candidates:
         manifest = read_json_checkpoint(candidate / "analysis_manifest.json")
@@ -177,15 +182,36 @@ def reuse_compatible_stage_checkpoints(
                     target_directory=material_directory,
                     shots=len(candidate_shots),
                 )
+        subtitle_matches = (
+            manifest.get("subtitle") == analysis_signature.get("subtitle")
+        )
+        candidate_source_subtitle = candidate / "source.srt"
+        if (
+            needs_source_subtitle
+            and subtitle_matches
+            and candidate_source_subtitle.is_file()
+            and candidate_source_subtitle.stat().st_size > 0
+        ):
+            shutil.copy2(candidate_source_subtitle, source_subtitle_path)
+            needs_source_subtitle = False
+            log_event(
+                "INFO",
+                "analyser",
+                "cache.hit",
+                "Compatible ASR subtitle checkpoint reused",
+                source_directory=candidate,
+                target_directory=material_directory,
+            )
         if (
             needs_dialogue
-            and manifest.get("subtitle") == analysis_signature.get("subtitle")
+            and subtitle_matches
             and manifest.get("llm") == analysis_signature.get("llm")
             and dialogue_checkpoint(candidate) is not None
-            and (candidate / "source.srt").is_file()
+            and candidate_source_subtitle.is_file()
         ):
             for name in ("source.srt", "dialogue_merged.srt", "dialogues.json"):
                 shutil.copy2(candidate / name, material_directory / name)
+            needs_source_subtitle = False
             needs_dialogue = False
             log_event(
                 "INFO",
@@ -195,7 +221,7 @@ def reuse_compatible_stage_checkpoints(
                 source_directory=candidate,
                 target_directory=material_directory,
             )
-        if not needs_shots and not needs_dialogue:
+        if not needs_shots and not needs_source_subtitle and not needs_dialogue:
             return
 
 

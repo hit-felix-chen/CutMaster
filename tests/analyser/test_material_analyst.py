@@ -1,7 +1,9 @@
 import threading
+import base64
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -18,6 +20,7 @@ from cutmaster.analyser.material_analyst import (
     _annotate_segments,
     _detect_full_video_shots,
     _sample_shot_frames,
+    _shot_frame_contact_sheet,
     _summarize_segments,
     _video_summary_context,
     _validate_shot_annotation,
@@ -33,7 +36,7 @@ from cutmaster.analyser.tools.cache import reuse_compatible_stage_checkpoints
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.analyser import (
     SceneBoundaryDetectionDetails,
-    ShotAnnotationDetails,
+    SegmentShotAnnotationDetails,
 )
 from cutmaster.contracts.video import (
     CameraAngle,
@@ -150,6 +153,29 @@ def test_shot_sampling_repeats_last_decodable_frame(monkeypatch, tmp_path) -> No
     assert capture.released
 
 
+def test_shot_frame_contact_sheet_preserves_five_numbered_frames() -> None:
+    images = []
+    for index in range(5):
+        frame = np.full((24, 32, 3), index * 40, dtype=np.uint8)
+        ok, encoded = cv2.imencode(".jpg", frame)
+        assert ok
+        images.append(
+            "data:image/jpeg;base64,"
+            + base64.b64encode(encoded.tobytes()).decode("ascii")
+        )
+
+    contact_sheet = _shot_frame_contact_sheet(images)
+
+    assert contact_sheet.startswith("data:image/jpeg;base64,")
+    encoded_sheet = np.frombuffer(
+        base64.b64decode(contact_sheet.partition(",")[2]),
+        dtype=np.uint8,
+    )
+    decoded = cv2.imdecode(encoded_sheet, cv2.IMREAD_COLOR)
+    assert decoded is not None
+    assert decoded.shape[:2] == (48, 96)
+
+
 def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
     shot = _shots(1)[0]
     shot["dialogue"] = []
@@ -157,18 +183,22 @@ def test_shot_prompt_contract_lists_every_allowed_categorical_value() -> None:
         "segment_id": "segment_0001",
         "has_dialogue": False,
         "speech_mode": "none",
+        "shots": [shot],
     }
 
     package = prompt_registry.build(
         PromptStage.ANALYSER,
         PromptTask.SHOT_ANNOTATION,
-        ShotAnnotationDetails(
+        SegmentShotAnnotationDetails(
             segment=segment,
-            shot=shot,
-            sampled_frame_times_sec=[0.1, 0.3, 0.5, 0.7, 0.9],
+            sampled_frame_times_by_shot={
+                shot["shot_id"]: [0.1, 0.3, 0.5, 0.7, 0.9]
+            },
         ),
     )
-    properties = package.response_contract.schema["properties"]
+    properties = package.response_contract.schema["properties"]["shots"][
+        "prefixItems"
+    ][0]["properties"]
 
     assert properties["content_type"]["enum"] == [
         SegmentContentType.LANDSCAPE.value,
@@ -429,7 +459,7 @@ def test_scene_boundary_windows_are_checkpointed_independently(
     assert cached == decisions
 
 
-def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
+def test_segment_annotation_uses_one_parallel_vlm_call_per_segment(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -465,42 +495,50 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
         ),
     )
     barrier = threading.Barrier(2)
-    call_order: dict[str, list[str]] = {"0": [], "1": []}
+    call_order: list[str] = []
     lock = threading.Lock()
 
     class Context:
         def call_prompt(self, **kwargs):
-            shot_id = kwargs["package"].operation.split()[-1]
-            segment_id, shot_index = shot_id.removeprefix("shot_").split("_")
+            segment_id = kwargs["package"].operation.split()[-1]
             with lock:
-                call_order[segment_id].append(shot_index)
-            if shot_index == "0":
-                barrier.wait(timeout=2)
+                call_order.append(segment_id)
+            barrier.wait(timeout=2)
+            source_segment = next(
+                segment
+                for segment in segments
+                if segment["segment_id"] == segment_id
+            )
             parsed = {
-                "shot_id": shot_id,
-                "visual_description": "A visible landscape",
-                "dominant_action": "Clouds move",
-                "content_type": "landscape",
-                "narrative_function": "Establishes the location",
-                "emotional_tone": "calm",
-                "emotional_intensity": 0.2,
-                "scene": {
-                    "interior_exterior": "exterior",
-                    "location": "open hillside",
-                    "time_of_day": "day",
-                    "environment_lighting": ["sunlight"],
-                    "color_palette": ["green", "blue"],
-                    "color_tone": "natural",
-                    "set_details": ["grass", "sky"],
-                    "weather": "clear",
-                    "atmosphere": "quiet",
-                },
-                "characters": [],
-                "shot_scale": "wide",
-                "camera_angle": "eye_level",
-                "camera_movement": "static",
-                "composition": "horizon across the upper third",
-                "visual_evidence": "five frames show the same hillside",
+                "shots": [
+                    {
+                        "shot_id": shot["shot_id"],
+                        "visual_description": "A visible landscape",
+                        "dominant_action": "Clouds move",
+                        "content_type": "landscape",
+                        "narrative_function": "Establishes the location",
+                        "emotional_tone": "calm",
+                        "emotional_intensity": 0.2,
+                        "scene": {
+                            "interior_exterior": "exterior",
+                            "location": "open hillside",
+                            "time_of_day": "day",
+                            "environment_lighting": ["sunlight"],
+                            "color_palette": ["green", "blue"],
+                            "color_tone": "natural",
+                            "set_details": ["grass", "sky"],
+                            "weather": "clear",
+                            "atmosphere": "quiet",
+                        },
+                        "characters": [],
+                        "shot_scale": "wide",
+                        "camera_angle": "eye_level",
+                        "camera_movement": "static",
+                        "composition": "horizon across the upper third",
+                        "visual_evidence": "five frames show the same hillside",
+                    }
+                    for shot in source_segment["shots"]
+                ]
             }
             kwargs["package"].response_contract.validate_structure(parsed)
             return kwargs["validate_business"](parsed)
@@ -518,7 +556,8 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
         tmp_path / "shot_annotations",
     )
     assert len(descriptions) == 2
-    assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
+    assert set(call_order) == {"segment_0", "segment_1"}
+    assert len(call_order) == 2
 
     class SummaryContext:
         calls: list[str] = []
@@ -574,7 +613,180 @@ def test_segment_annotation_is_parallel_but_shots_are_serial_within_segment(
         tmp_path / "shot_annotations",
     )
     assert len(cached_descriptions) == 2
-    assert call_order == {"0": ["0", "1"], "1": ["0", "1"]}
+    assert len(call_order) == 2
+
+
+def test_segment_annotation_packs_frames_when_provider_image_limit_is_exceeded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    segment_shots = _shots(2)
+    for shot in segment_shots:
+        shot["dialogue"] = []
+    segment = {
+        "segment_id": "segment_oversized",
+        "time_range": {"start_sec": 0.0, "end_sec": 2.0},
+        "clip_path": str(tmp_path / "segment.mp4"),
+        "has_dialogue": False,
+        "speech_mode": "none",
+        "timeline_role": "body",
+        "dialogue_items": [],
+        "shots": segment_shots,
+    }
+    monkeypatch.setattr(
+        "cutmaster.analyser.material_analyst._sample_shot_frames",
+        lambda *_args: (
+            ["data:image/jpeg;base64,stub"] * 5,
+            [0.1, 0.3, 0.5, 0.7, 0.9],
+        ),
+    )
+    packed_calls = 0
+
+    def pack(images):
+        nonlocal packed_calls
+        packed_calls += 1
+        assert len(images) == 5
+        return "data:image/jpeg;base64,packed"
+
+    monkeypatch.setattr(
+        "cutmaster.analyser.material_analyst._shot_frame_contact_sheet",
+        pack,
+    )
+
+    class InspectContext:
+        def call_prompt(self, **kwargs):
+            assert len(kwargs["image_data_urls"]) == 2
+            assert all(
+                "contact sheet" in label
+                for label in kwargs["image_labels"]
+            )
+            assert "one contact sheet per Shot" in kwargs["package"].user_prompt
+            raise RuntimeError("inspection complete")
+
+    with pytest.raises(RuntimeError, match="inspection complete"):
+        _annotate_segments(
+            [segment],
+            InspectContext(),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            5,
+            tmp_path / "shot_annotations",
+            max_images_per_request=2,
+        )
+
+    assert packed_calls == 2
+
+
+def test_long_segment_annotation_uses_serial_twenty_shot_batches(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    segment_shots = _shots(21)
+    for shot in segment_shots:
+        shot["dialogue"] = []
+    segment = {
+        "segment_id": "segment_long",
+        "time_range": {"start_sec": 0.0, "end_sec": 21.0},
+        "clip_path": str(tmp_path / "segment.mp4"),
+        "has_dialogue": False,
+        "speech_mode": "none",
+        "timeline_role": "body",
+        "dialogue_items": [],
+        "shots": segment_shots,
+    }
+    monkeypatch.setattr(
+        "cutmaster.analyser.material_analyst._sample_shot_frames",
+        lambda *_args: (
+            ["data:image/jpeg;base64,stub"] * 5,
+            [0.1, 0.3, 0.5, 0.7, 0.9],
+        ),
+    )
+    monkeypatch.setattr(
+        "cutmaster.analyser.material_analyst._shot_frame_contact_sheet",
+        lambda _images: "data:image/jpeg;base64,packed",
+    )
+
+    class Context:
+        calls: list[tuple[str, int]] = []
+
+        def call_prompt(self, **kwargs):
+            package = kwargs["package"]
+            shot_schemas = package.response_contract.schema["properties"][
+                "shots"
+            ]["prefixItems"]
+            shot_ids = [
+                schema["properties"]["shot_id"]["const"]
+                for schema in shot_schemas
+            ]
+            self.calls.append((package.operation, len(shot_ids)))
+            parsed = {
+                "shots": [
+                    {
+                        "shot_id": shot_id,
+                        "visual_description": "A visible landscape",
+                        "dominant_action": "Clouds move",
+                        "content_type": "landscape",
+                        "narrative_function": "Establishes the location",
+                        "emotional_tone": "calm",
+                        "emotional_intensity": 0.2,
+                        "scene": {
+                            "interior_exterior": "exterior",
+                            "location": "open hillside",
+                            "time_of_day": "day",
+                            "environment_lighting": ["sunlight"],
+                            "color_palette": ["green", "blue"],
+                            "color_tone": "natural",
+                            "set_details": ["grass", "sky"],
+                            "weather": "clear",
+                            "atmosphere": "quiet",
+                        },
+                        "characters": [],
+                        "shot_scale": "wide",
+                        "camera_angle": "eye_level",
+                        "camera_movement": "static",
+                        "composition": "horizon across the upper third",
+                        "visual_evidence": "contact sheet shows a hillside",
+                    }
+                    for shot_id in shot_ids
+                ]
+            }
+            assert len(kwargs["image_data_urls"]) == len(shot_ids)
+            return kwargs["validate_business"](parsed)
+
+    annotation_directory = tmp_path / "shot_annotations"
+    context = Context()
+    descriptions = _annotate_segments(
+        [segment],
+        context,
+        VLMConfig(model="test", base_url="", api_key="test"),
+        5,
+        annotation_directory,
+        max_images_per_request=250,
+        max_shots_per_request=20,
+    )
+
+    assert len(descriptions[0].shots) == 21
+    assert context.calls == [
+        ("Segment Shot visual annotation segment_long batch 1/2", 20),
+        ("Segment Shot visual annotation segment_long batch 2/2", 1),
+    ]
+    assert (annotation_directory / "segment_long" / "batch_001.json").is_file()
+    assert (annotation_directory / "segment_long" / "batch_002.json").is_file()
+    assert (annotation_directory / "segment_long.json").is_file()
+
+    class UnexpectedContext:
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("Merged Segment checkpoint should be reused")
+
+    cached = _annotate_segments(
+        [segment],
+        UnexpectedContext(),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        5,
+        annotation_directory,
+        max_images_per_request=250,
+        max_shots_per_request=20,
+    )
+    assert len(cached[0].shots) == 21
 
 
 def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
@@ -623,7 +835,7 @@ def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
     assert rejected_shot.visual_annotation_status == "provider_rejected"
     assert rejected_shot.visual_annotation_failure == "data_inspection_failed"
     checkpoint = json.loads(
-        (annotation_directory / "shot_00001.json").read_text(encoding="utf-8")
+        (annotation_directory / "segment_0001.json").read_text(encoding="utf-8")
     )
     assert checkpoint["visual_annotation_status"] == "provider_rejected"
     assert checkpoint["visual_annotation_failure"] == "data_inspection_failed"
@@ -631,7 +843,7 @@ def test_shot_annotation_provider_rejection_is_checkpointed_and_nonfatal(
 
     class UnexpectedCallContext:
         def call_prompt(self, **_kwargs):
-            raise AssertionError("Rejected Shot checkpoint should be reused")
+            raise AssertionError("Rejected Segment checkpoint should be reused")
 
     cached_descriptions = _annotate_segments(
         [segment],
@@ -731,3 +943,43 @@ def test_new_analysis_schema_reuses_compatible_upstream_stages(tmp_path) -> None
     assert (current / "shots.json").is_file()
     assert (current / "source.srt").read_text(encoding="utf-8") == "source"
     assert (current / "dialogue_merged.srt").read_text(encoding="utf-8") == "merged"
+
+
+def test_llm_change_reuses_raw_asr_but_not_dialogue_reconstruction(tmp_path) -> None:
+    asset_directory = tmp_path / "asset"
+    previous = asset_directory / "analysis-old"
+    current = asset_directory / "analysis-new"
+    previous.mkdir(parents=True)
+    current.mkdir(parents=True)
+    source_signature = {"path": "/source.mp4", "size": 1, "mtime_ns": 2}
+    subtitle_signature = {"backend": "bailian"}
+    (previous / "analysis_manifest.json").write_text(
+        json.dumps(
+            {
+                "source": source_signature,
+                "subtitle": subtitle_signature,
+                "llm": {"model": "old"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (previous / "source.srt").write_text("raw ASR", encoding="utf-8")
+    (previous / "dialogue_merged.srt").write_text("old merge", encoding="utf-8")
+    (previous / "dialogues.json").write_text(
+        json.dumps({"sentences": []}),
+        encoding="utf-8",
+    )
+
+    reuse_compatible_stage_checkpoints(
+        current,
+        {
+            "source": source_signature,
+            "subtitle": subtitle_signature,
+            "llm": {"model": "new"},
+        },
+        2.0,
+    )
+
+    assert (current / "source.srt").read_text(encoding="utf-8") == "raw ASR"
+    assert not (current / "dialogue_merged.srt").exists()
+    assert not (current / "dialogues.json").exists()

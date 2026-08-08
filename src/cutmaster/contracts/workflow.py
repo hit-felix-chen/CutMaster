@@ -19,6 +19,7 @@ class RunRequest:
     video_title: str = ""
     subtitle_path: Path | None = None
     max_clip_duration_sec: float | None = None
+    include_dialogue_audio: bool = True
     overwrite: bool = False
 
 
