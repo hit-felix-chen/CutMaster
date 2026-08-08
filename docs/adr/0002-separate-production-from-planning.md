@@ -1,8 +1,13 @@
-# Keep Production separate from ASTER planning tools
+# Separate Planner compilation from deterministic rendering
 
-Music profiling is a request-specific tool owned through the Arrangement
-Architect, so it lives under `planners/tools/` and is reached through
-`ASTERTeam`. Post-planning script adaptation, audio preparation, and rendering
-remain a separate `production/` package because they realize an approved edit
-rather than make planning decisions; placing them under ASTER tools would blur
-the agent boundary and make `CutMaster` depend on a team's private tools.
+All decisions that change the edit belong to Planner. This includes Slot and
+candidate selection, output-frame allocation, Beat adjustment, and source-window
+optimization. Planner freezes those decisions in `render_plan.json`.
+
+Renderer is a separate top-level stage. It may encode the planned clips,
+prepare selected dialogue vocals, mix audio, and reuse a silent montage cache,
+but it must not change source ranges, output ranges, or Dialogue Anchor timing.
+Renderer never imports model access or planner implementations.
+
+This boundary allows one expensive plan to produce multiple BGM-only or
+dialogue renders without invoking LLM/VLM services again.

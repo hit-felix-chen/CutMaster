@@ -1,22 +1,34 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import DialogueAnchorConfig, RenderConfig
-from cutmaster.production.ffmpeg import (
+from cutmaster.configuration.schema import DialogueAudioConfig, RendererConfig
+from cutmaster.contracts.planning import RenderPlan
+from cutmaster.contracts.renderer import RenderRequest, RenderResult
+from cutmaster.renderer.dialogue_audio import prepare_dialogue_audio
+from cutmaster.renderer.ffmpeg import (
     RenderError,
     encoder_args,
     run_media_command,
     select_encoder,
 )
 from cutmaster.runtime.observability import log_event
-from cutmaster.runtime.media_probe import check_media_tools, media_duration, probe_media
+from cutmaster.runtime.media_probe import (
+    check_media_tools,
+    media_duration,
+    media_frame_count,
+    probe_media,
+)
 from cutmaster.runtime.progress import progress_bar
 from cutmaster.timecode import parse_range
 
 
-def _video_filter(config: RenderConfig) -> str:
+def _video_filter(config: RendererConfig) -> str:
     return (
         f"scale={config.width}:{config.height}:force_original_aspect_ratio=decrease,"
         f"pad={config.width}:{config.height}:(ow-iw)/2:(oh-ih)/2:black,"
@@ -29,7 +41,7 @@ def render_clip(
     output: Path,
     start: float,
     frame_count: int,
-    config: RenderConfig,
+    config: RendererConfig,
     encoder: str,
 ) -> None:
     if frame_count <= 0:
@@ -49,7 +61,7 @@ def render_clip(
     command.extend(encoder_args(encoder, config.threads))
     command.extend([
         "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
-        "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(output),
+        "-movflags", "+faststart", str(output),
     ])
     run_media_command(command)
 
@@ -71,13 +83,13 @@ def concatenate_clips(clips: list[Path], output: Path) -> None:
 
 
 def build_final_audio_filter(
-    config: RenderConfig,
+    config: RendererConfig,
     duration: float,
     dialogue_anchors: list[dict[str, Any]] | None = None,
-    dialogue_config: DialogueAnchorConfig | None = None,
+    dialogue_config: DialogueAudioConfig | None = None,
 ) -> str:
     dialogue_anchors = dialogue_anchors or []
-    dialogue_config = dialogue_config or DialogueAnchorConfig()
+    dialogue_config = dialogue_config or DialogueAudioConfig()
     fade_duration = min(3.0, max(0.1, duration))
     fade_start = max(0.0, duration - fade_duration)
     duck_condition = "+".join(
@@ -86,9 +98,10 @@ def build_final_audio_filter(
         f"{float(anchor['output_audio_end_sec']):.3f})"
         for anchor in dialogue_anchors
     )
+    duck_volume = config.bgm_volume * dialogue_config.bgm_duck_factor
     volume = (
         f"volume='if({duck_condition}\\,"
-        f"{dialogue_config.bgm_duck_volume}\\,{config.bgm_volume})':eval=frame,"
+        f"{duck_volume}\\,{config.bgm_volume})':eval=frame,"
         if duck_condition
         else f"volume={config.bgm_volume},"
     )
@@ -128,12 +141,12 @@ def mix_bgm(
     montage: Path,
     bgm: Path,
     output: Path,
-    config: RenderConfig,
+    config: RendererConfig,
     duration: float | None = None,
     *,
     source_video: Path | None = None,
     script: list[dict[str, Any]] | None = None,
-    dialogue_config: DialogueAnchorConfig | None = None,
+    dialogue_config: DialogueAudioConfig | None = None,
 ) -> None:
     duration = float(duration if duration is not None else media_duration(montage))
     dialogue_anchors = [
@@ -189,8 +202,8 @@ def render_montage(
     audio_path: Path,
     script: list[dict[str, Any]],
     output_dir: Path,
-    config: RenderConfig,
-    dialogue_config: DialogueAnchorConfig | None = None,
+    config: RendererConfig,
+    dialogue_config: DialogueAudioConfig | None = None,
     *,
     include_dialogue_audio: bool = True,
 ) -> tuple[Path, Path]:
@@ -244,14 +257,36 @@ def render_montage(
                 source_end_sec=end,
                 frames=frame_count,
             )
-            render_clip(
-                video_path,
-                clip_path,
-                start,
-                frame_count,
-                config,
-                encoder,
-            )
+            try:
+                render_clip(
+                    video_path,
+                    clip_path,
+                    start,
+                    frame_count,
+                    config,
+                    encoder,
+                )
+            except RenderError:
+                if config.encoder != "auto" or encoder == "libx264":
+                    raise
+                log_event(
+                    "WARNING",
+                    "renderer",
+                    "fallback.apply",
+                    "Hardware encoder failed; retrying with libx264",
+                    failed_encoder=encoder,
+                    fallback_encoder="libx264",
+                    clip=index,
+                )
+                encoder = "libx264"
+                render_clip(
+                    video_path,
+                    clip_path,
+                    start,
+                    frame_count,
+                    config,
+                    encoder,
+                )
             clip_paths.append(clip_path)
 
     montage_path = output_dir / "montage.mp4"
@@ -273,3 +308,142 @@ def render_montage(
         dialogue_config=dialogue_config,
     )
     return montage_path, output_path
+
+
+def _montage_signature(plan: RenderPlan, config: RendererConfig) -> dict[str, Any]:
+    return {
+        "render_schema_version": 2,
+        "plan_id": plan.plan_id,
+        "width": config.width,
+        "height": config.height,
+        "fps": config.fps,
+        "encoder": config.encoder,
+        "threads": config.threads,
+    }
+
+
+class Renderer:
+    """Execute an immutable RenderPlan without invoking analysis or models."""
+
+    def __init__(self, config: RendererConfig) -> None:
+        self.config = config
+
+    def render(self, request: RenderRequest) -> RenderResult:
+        request.validate()
+        plan = RenderPlan.read(request.plan_path)
+        if plan.fps != self.config.fps:
+            raise ValueError(
+                f"Render plan fps {plan.fps} does not match renderer fps "
+                f"{self.config.fps}"
+            )
+        output_dir = request.output_dir.resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "output.mp4"
+        if output_path.exists() and not request.overwrite:
+            raise FileExistsError(
+                f"Rendered output already exists; pass --overwrite: {output_path}"
+            )
+        (output_dir / "render_request.json").write_text(
+            json.dumps(request.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        script = [dict(item) for item in plan.clips]
+        dialogue_audio_reused = False
+        stage_started = time.monotonic()
+        if request.audio_mode == "dialogue":
+            script, dialogue_audio_reused = prepare_dialogue_audio(
+                Path(plan.source_video.path),
+                script,
+                output_dir,
+                self.config.dialogue_audio,
+            )
+        timings["dialogue_audio_preparation"] = time.monotonic() - stage_started
+
+        montage_path = output_dir / "montage.mp4"
+        montage_manifest_path = output_dir / "montage_manifest.json"
+        signature = _montage_signature(plan, self.config)
+        montage_reused = False
+        if montage_path.is_file() and montage_manifest_path.is_file():
+            try:
+                manifest = json.loads(
+                    montage_manifest_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                manifest = None
+            montage_reused = manifest == signature
+
+        stage_started = time.monotonic()
+        if montage_reused:
+            mix_bgm(
+                montage_path,
+                Path(plan.background_music.path),
+                output_path,
+                self.config,
+                plan.duration_sec,
+                source_video=Path(plan.source_video.path),
+                script=script if request.audio_mode == "dialogue" else None,
+                dialogue_config=self.config.dialogue_audio,
+            )
+        else:
+            montage_path, output_path = render_montage(
+                Path(plan.source_video.path),
+                Path(plan.background_music.path),
+                script,
+                output_dir,
+                self.config,
+                self.config.dialogue_audio,
+                include_dialogue_audio=request.audio_mode == "dialogue",
+            )
+        actual_frames = media_frame_count(output_path)
+        if actual_frames != plan.total_frames:
+            if montage_manifest_path.exists():
+                montage_manifest_path.unlink()
+            raise RenderError(
+                "Rendered frame count does not match RenderPlan: "
+                f"expected {plan.total_frames}, got {actual_frames}"
+            )
+        if not montage_reused:
+            montage_manifest_path.write_text(
+                json.dumps(signature, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        timings["rendering"] = time.monotonic() - stage_started
+        canonical_request = json.dumps(
+            {
+                "plan_id": plan.plan_id,
+                "audio_mode": request.audio_mode,
+                "renderer": asdict(self.config),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        result = RenderResult(
+            status="success",
+            plan_id=plan.plan_id,
+            render_id=hashlib.sha256(
+                canonical_request.encode("utf-8")
+            ).hexdigest()[:16],
+            audio_mode=request.audio_mode,
+            output_video=str(output_path.resolve()),
+            montage_video=str(montage_path.resolve()),
+            duration_sec=media_duration(output_path),
+            frames=actual_frames,
+            montage_reused=montage_reused,
+            dialogue_audio_reused=dialogue_audio_reused,
+            stage_timings_sec=timings,
+            wall_clock_sec=time.monotonic() - started,
+        )
+        result.write(output_dir / "render_result.json")
+        return result
+
+
+__all__ = [
+    "Renderer",
+    "build_final_audio_filter",
+    "concatenate_clips",
+    "mix_bgm",
+    "render_clip",
+    "render_montage",
+]

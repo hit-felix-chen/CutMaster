@@ -64,3 +64,24 @@ def probe_media(path: Path) -> dict[str, Any]:
 
 def media_duration(path: Path) -> float:
     return float(probe_media(path)["duration"])
+
+
+def media_frame_count(path: Path) -> int:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-count_frames",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_read_frames",
+        "-of",
+        "json",
+        str(path),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    streams = json.loads(result.stdout).get("streams") or []
+    if not streams or streams[0].get("nb_read_frames") in (None, "N/A"):
+        raise MediaToolError(f"Unable to count video frames: {path}")
+    return int(streams[0]["nb_read_frames"])

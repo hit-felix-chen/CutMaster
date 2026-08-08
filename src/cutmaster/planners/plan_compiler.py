@@ -4,6 +4,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from cutmaster.configuration.schema import AppConfig
+from cutmaster.contracts.planning import PlanningRequest, RenderPlan
+from cutmaster.planners.source_window_optimizer import (
+    optimize_script_source_windows,
+)
+from cutmaster.runtime.media_probe import media_duration
 from cutmaster.timecode import format_range, parse_range
 
 
@@ -142,3 +148,56 @@ def script_duration(items: list[dict[str, Any]]) -> float:
 
 def write_script(path: Path, items: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(items, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def compile_render_plan(
+    *,
+    request: PlanningRequest,
+    raw_script: list[dict[str, Any]],
+    music_profile: dict[str, Any],
+    video_description: dict[str, Any],
+    config: AppConfig,
+) -> RenderPlan:
+    """Finalize every editorial timing decision before rendering begins."""
+
+    clips = adapt_script(
+        raw_script,
+        request.target_output_length_sec,
+        request.target_shot_length_sec,
+        request.max_clip_duration_sec,
+        music_profile["accents_sec"],
+        media_duration(request.video_path),
+        config.renderer.fps,
+    )
+    clips = optimize_script_source_windows(
+        request.video_path,
+        clips,
+        music_profile["beats_sec"],
+        video_description,
+        output_fps=config.renderer.fps,
+        detection_config=config.analyser.shot_detection,
+        optimization_config=config.planners.source_window_optimization,
+    )
+    return RenderPlan.create(
+        source_video=request.video_path,
+        background_music=request.audio_path,
+        fps=config.renderer.fps,
+        clips=clips,
+        planning_metadata={
+            "prompt": request.prompt,
+            "prompt_type": request.prompt_type,
+            "video_title": request.video_title or request.video_path.stem,
+            "target_output_length_sec": request.target_output_length_sec,
+            "target_shot_length_sec": request.target_shot_length_sec,
+            "music_profile_schema_version": music_profile.get("schema_version"),
+        },
+    )
+
+
+__all__ = [
+    "adapt_script",
+    "align_cut_boundaries",
+    "compile_render_plan",
+    "script_duration",
+    "write_script",
+]

@@ -1,6 +1,6 @@
 import os
 
-from cutmaster.cli import _load_runtime_environment
+from cutmaster.cli import _command_component, _load_runtime_environment
 
 
 def test_runtime_environment_loads_dotenv_next_to_config(
@@ -21,3 +21,10 @@ def test_runtime_environment_loads_dotenv_next_to_config(
 
     assert os.environ["DASHSCOPE_API_KEY"] == "from-dotenv"
     assert os.environ["PRESERVED_VALUE"] == "from-process"
+
+
+def test_cli_commands_map_to_stable_log_components() -> None:
+    assert _command_component("analyse") == "analyser"
+    assert _command_component("plan") == "planner"
+    assert _command_component("render") == "renderer"
+    assert _command_component("run") == "orchestrator"

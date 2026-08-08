@@ -1,9 +1,6 @@
-"""Material Analyst public API."""
+"""Public API for reusable source-material analysis."""
 
-from cutmaster.contracts.material import MaterialAnalysisResult
-from cutmaster.analyser.material_analyst import MaterialAnalystAgent
+from cutmaster.analyser.analyser import Analyser
+from cutmaster.contracts.analyser import AnalysisRequest, AnalysisResult
 
-__all__ = [
-    "MaterialAnalystAgent",
-    "MaterialAnalysisResult",
-]
+__all__ = ["Analyser", "AnalysisRequest", "AnalysisResult"]

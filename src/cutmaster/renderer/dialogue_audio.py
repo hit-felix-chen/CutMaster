@@ -9,12 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from cutmaster.configuration.schema import DialogueAnchorConfig
+from cutmaster.configuration.schema import DialogueAudioConfig
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
     build_prompt_failure,
 )
-from cutmaster.production.ffmpeg import RenderError, run_media_command
+from cutmaster.renderer.ffmpeg import RenderError, run_media_command
 from cutmaster.runtime.media_probe import media_duration
 from cutmaster.runtime.observability import error_summary, log_event
 
@@ -79,7 +79,7 @@ def _anchor_specs(
 def _cache_key(
     video_path: Path,
     specs: list[dict[str, Any]],
-    config: DialogueAnchorConfig,
+    config: DialogueAudioConfig,
 ) -> str:
     stat = video_path.stat()
     payload = {
@@ -175,7 +175,7 @@ def _build_dialogue_reel(
 def _run_demucs(
     reel_path: Path,
     work_dir: Path,
-    config: DialogueAnchorConfig,
+    config: DialogueAudioConfig,
     device: str,
 ) -> Path:
     started = time.monotonic()
@@ -321,12 +321,12 @@ def prepare_dialogue_audio(
     video_path: Path,
     script: list[dict[str, Any]],
     output_dir: Path,
-    config: DialogueAnchorConfig,
-) -> list[dict[str, Any]]:
+    config: DialogueAudioConfig,
+) -> tuple[list[dict[str, Any]], bool]:
     if not config.enable_vocal_separation:
-        return [dict(item) for item in script]
+        return [dict(item) for item in script], False
     if not any(item.get("dialogue_anchor") is not None for item in script):
-        return [dict(item) for item in script]
+        return [dict(item) for item in script], False
     source_duration_sec = media_duration(video_path)
     specs = _anchor_specs(
         script,
@@ -334,7 +334,7 @@ def prepare_dialogue_audio(
         config.separator_padding_sec,
     )
     if not specs:
-        return [dict(item) for item in script]
+        return [dict(item) for item in script], False
     device = _separator_device(config.separator_device)
     cache_key = _cache_key(video_path, specs, config)
     cache_dir = output_dir / "dialogue_audio" / cache_key
@@ -350,13 +350,16 @@ def prepare_dialogue_audio(
             cache_key=cache_key,
             model=config.separator_model,
         )
-        return _attach_prepared_audio(
-            script,
-            specs,
-            outputs,
-            cache_key=cache_key,
-            model=config.separator_model,
-            device=device,
+        return (
+            _attach_prepared_audio(
+                script,
+                specs,
+                outputs,
+                cache_key=cache_key,
+                model=config.separator_model,
+                device=device,
+            ),
+            True,
         )
 
     with tempfile.TemporaryDirectory(
@@ -390,13 +393,16 @@ def prepare_dialogue_audio(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    return _attach_prepared_audio(
-        script,
-        specs,
-        outputs,
-        cache_key=cache_key,
-        model=config.separator_model,
-        device=device,
+    return (
+        _attach_prepared_audio(
+            script,
+            specs,
+            outputs,
+            cache_key=cache_key,
+            model=config.separator_model,
+            device=device,
+        ),
+        False,
     )
 
 

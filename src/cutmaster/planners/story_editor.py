@@ -593,7 +593,7 @@ class StoryEditorAgent:
         return select_dialogue_anchors(
             slots,
             self.config.llm,
-            self.config.dialogue_anchors,
+            self.config.planners.dialogue_anchors,
             self.context,
         )
 

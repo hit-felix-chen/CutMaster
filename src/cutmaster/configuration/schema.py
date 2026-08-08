@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -66,6 +66,15 @@ class ShotAnnotationConfig:
 
 
 @dataclass(frozen=True)
+class AnalyserConfig:
+    material_analysis: MaterialAnalysisConfig
+    shot_detection: ShotDetectionConfig
+    asr: ASRConfig
+    scene_segmentation: SceneSegmentationConfig
+    shot_annotation: ShotAnnotationConfig
+
+
+@dataclass(frozen=True)
 class SlotPlanningConfig:
     target_clip_duration_sec: float = 4.0
     replan_max_rounds: int = 3
@@ -75,16 +84,6 @@ class SlotPlanningConfig:
 class DialogueAnchorConfig:
     max_anchors: int = 4
     min_anchor_duration_sec: float = 1.5
-    enable_vocal_separation: bool = True
-    separator_model: str = "htdemucs"
-    separator_device: str = "auto"
-    separator_segment_sec: int = 7
-    separator_shifts: int = 0
-    separator_padding_sec: float = 1.0
-    separated_loudness_lufs: float = -16.0
-    dialogue_volume: float = 1.0
-    bgm_duck_volume: float = 0.08
-    fade_sec: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -116,7 +115,37 @@ class SourceWindowOptimizationConfig:
 
 
 @dataclass(frozen=True)
-class RenderConfig:
+class PlannersConfig:
+    slot_planning: SlotPlanningConfig = field(default_factory=SlotPlanningConfig)
+    dialogue_anchors: DialogueAnchorConfig = field(
+        default_factory=DialogueAnchorConfig
+    )
+    candidate_retrieval: CandidateRetrievalConfig = field(
+        default_factory=CandidateRetrievalConfig
+    )
+    beam_search: BeamSearchConfig = field(default_factory=BeamSearchConfig)
+    script_review: ScriptReviewConfig = field(default_factory=ScriptReviewConfig)
+    source_window_optimization: SourceWindowOptimizationConfig = field(
+        default_factory=SourceWindowOptimizationConfig
+    )
+
+
+@dataclass(frozen=True)
+class DialogueAudioConfig:
+    enable_vocal_separation: bool = True
+    separator_model: str = "htdemucs"
+    separator_device: str = "auto"
+    separator_segment_sec: int = 7
+    separator_shifts: int = 0
+    separator_padding_sec: float = 1.0
+    separated_loudness_lufs: float = -16.0
+    dialogue_volume: float = 1.0
+    bgm_duck_factor: float = 0.5
+    fade_sec: float = 0.3
+
+
+@dataclass(frozen=True)
+class RendererConfig:
     width: int = 1920
     height: int = 1080
     fps: int = 30
@@ -125,21 +154,36 @@ class RenderConfig:
     bgm_volume: float = 0.3
     original_volume: float = 0.0
     audio_sample_rate: int = 48000
+    dialogue_audio: DialogueAudioConfig = field(default_factory=DialogueAudioConfig)
 
 
 @dataclass(frozen=True)
 class AppConfig:
     llm: LLMConfig
     vlm: VLMConfig
-    material_analysis: MaterialAnalysisConfig
-    shot_detection: ShotDetectionConfig
-    asr: ASRConfig
-    scene_segmentation: SceneSegmentationConfig
-    shot_annotation: ShotAnnotationConfig
-    slot_planning: SlotPlanningConfig
-    dialogue_anchors: DialogueAnchorConfig
-    candidate_retrieval: CandidateRetrievalConfig
-    beam_search: BeamSearchConfig
-    script_review: ScriptReviewConfig
-    source_window_optimization: SourceWindowOptimizationConfig
-    render: RenderConfig
+    analyser: AnalyserConfig
+    planners: PlannersConfig
+    renderer: RendererConfig
+
+
+__all__ = [
+    "ASRConfig",
+    "AnalyserConfig",
+    "AppConfig",
+    "BeamSearchConfig",
+    "CandidateRetrievalConfig",
+    "DialogueAnchorConfig",
+    "DialogueAudioConfig",
+    "LLMConfig",
+    "MaterialAnalysisConfig",
+    "ModelConfig",
+    "PlannersConfig",
+    "RendererConfig",
+    "SceneSegmentationConfig",
+    "ScriptReviewConfig",
+    "ShotAnnotationConfig",
+    "ShotDetectionConfig",
+    "SlotPlanningConfig",
+    "SourceWindowOptimizationConfig",
+    "VLMConfig",
+]

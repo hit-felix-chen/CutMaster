@@ -7,7 +7,7 @@ from cutmaster.planners.timeline_scout import TimelineScoutAgent
 from cutmaster.planners.story_editor import StoryEditorAgent
 from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.configuration.schema import AppConfig
-from cutmaster.contracts.workflow import RunRequest
+from cutmaster.contracts.planning import PlanningRequest
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
     build_prompt_failure,
@@ -104,7 +104,7 @@ class ASTERTeam:
 
     def arrange(
         self,
-        request: RunRequest,
+        request: PlanningRequest,
         music_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
         self._warn_about_missing_shot_annotations()
@@ -238,7 +238,7 @@ class ASTERTeam:
             error=error,
             diagnostics=diagnostics,
             failed_slots=failed_slots,
-            candidates_per_slot=self.config.candidate_retrieval.candidates_per_slot,
+            candidates_per_slot=self.config.planners.candidate_retrieval.candidates_per_slot,
         )
         self.context.set_artifact("planning_feedback", feedback)
 

@@ -4,8 +4,8 @@ import subprocess
 
 import pytest
 
-from cutmaster.configuration.schema import DialogueAnchorConfig, RenderConfig
-from cutmaster.production.renderer import (
+from cutmaster.configuration.schema import DialogueAudioConfig, RendererConfig
+from cutmaster.renderer.renderer import (
     build_final_audio_filter,
     concatenate_clips,
     mix_bgm,
@@ -15,7 +15,7 @@ from cutmaster.production.renderer import (
 
 def test_final_audio_filter_uses_only_bgm_when_source_is_muted() -> None:
     audio_filter = build_final_audio_filter(
-        RenderConfig(bgm_volume=0.3, original_volume=0.0),
+        RendererConfig(bgm_volume=0.3, original_volume=0.0),
         duration=60.0,
     )
     assert "[1:a]" in audio_filter
@@ -26,7 +26,7 @@ def test_final_audio_filter_uses_only_bgm_when_source_is_muted() -> None:
 
 def test_final_audio_filter_mixes_selected_dialogue_and_ducks_bgm() -> None:
     audio_filter = build_final_audio_filter(
-        RenderConfig(bgm_volume=0.3, original_volume=0.0),
+        RendererConfig(bgm_volume=0.3, original_volume=0.0),
         duration=60.0,
         dialogue_anchors=[
             {
@@ -36,15 +36,15 @@ def test_final_audio_filter_mixes_selected_dialogue_and_ducks_bgm() -> None:
                 "output_audio_end_sec": 12.0,
             }
         ],
-        dialogue_config=DialogueAnchorConfig(
+        dialogue_config=DialogueAudioConfig(
             dialogue_volume=1.0,
-            bgm_duck_volume=0.08,
+            bgm_duck_factor=0.5,
             fade_sec=0.05,
         ),
     )
     assert "[2:a]volume=1.0" in audio_filter
     assert "between(t\\,10.000\\,12.000)" in audio_filter
-    assert "0.08" in audio_filter
+    assert "0.15" in audio_filter
     assert "adelay=10000:all=1" in audio_filter
     assert "amix" in audio_filter
 
@@ -55,7 +55,7 @@ def test_mix_bgm_uses_prepared_vocal_stem_without_source_seek(
 ) -> None:
     commands = []
     monkeypatch.setattr(
-        "cutmaster.production.renderer.run_media_command",
+        "cutmaster.renderer.renderer.run_media_command",
         lambda command: commands.append(command),
     )
     prepared = tmp_path / "anchor.wav"
@@ -64,7 +64,7 @@ def test_mix_bgm_uses_prepared_vocal_stem_without_source_seek(
         tmp_path / "montage.mp4",
         tmp_path / "bgm.mp3",
         tmp_path / "output.mp4",
-        RenderConfig(),
+        RendererConfig(),
         duration=4.0,
         script=[
             {
@@ -77,7 +77,7 @@ def test_mix_bgm_uses_prepared_vocal_stem_without_source_seek(
                 }
             }
         ],
-        dialogue_config=DialogueAnchorConfig(),
+        dialogue_config=DialogueAudioConfig(),
     )
 
     command = commands[0]
@@ -96,7 +96,7 @@ def test_concatenated_clips_preserve_exact_total_frame_count(tmp_path) -> None:
         ],
         check=True,
     )
-    config = RenderConfig(width=320, height=180, fps=30, threads=1)
+    config = RendererConfig(width=320, height=180, fps=30, threads=1)
     first = tmp_path / "first.mp4"
     second = tmp_path / "second.mp4"
     render_clip(source, first, 0.0, 114, config, "libx264")
@@ -116,6 +116,19 @@ def test_concatenated_clips_preserve_exact_total_frame_count(tmp_path) -> None:
     stream = json.loads(probe.stdout)["streams"][0]
     assert int(stream["nb_read_frames"]) == 243
     assert float(stream["duration"]) == pytest.approx(8.1, abs=1e-6)
+
+    for clip in (first, second):
+        clip_probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=start_time", "-of", "json", str(clip),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        clip_stream = json.loads(clip_probe.stdout)["streams"][0]
+        assert float(clip_stream["start_time"]) == pytest.approx(0.0, abs=1e-6)
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is required")
@@ -153,7 +166,7 @@ def test_mix_bgm_accepts_exact_source_dialogue_anchor(tmp_path) -> None:
         montage,
         bgm,
         output,
-        RenderConfig(width=160, height=90, fps=30),
+        RendererConfig(width=160, height=90, fps=30),
         duration=4.0,
         source_video=source,
         script=[
@@ -166,7 +179,7 @@ def test_mix_bgm_accepts_exact_source_dialogue_anchor(tmp_path) -> None:
                 }
             }
         ],
-        dialogue_config=DialogueAnchorConfig(),
+        dialogue_config=DialogueAudioConfig(),
     )
 
     probe = subprocess.run(

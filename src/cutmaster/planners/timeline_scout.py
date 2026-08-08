@@ -1172,7 +1172,7 @@ class TimelineScoutAgent:
             self.media,
             self.config.llm,
             self.config.vlm,
-            self.config.candidate_retrieval,
+            self.config.planners.candidate_retrieval,
             self.context,
             replan_slots=self.repair_slots,
         )

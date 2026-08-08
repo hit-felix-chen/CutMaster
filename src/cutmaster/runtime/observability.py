@@ -31,6 +31,7 @@ VALID_LEVELS = frozenset(
 VALID_COMPONENTS = frozenset(
     {
         "cutmaster",
+        "orchestrator",
         "analyser",
         "dialogue",
         "dialogue_audio",
@@ -46,6 +47,7 @@ VALID_COMPONENTS = frozenset(
         "renderer",
         "asr",
         "model",
+        "planner",
     }
 )
 VALID_EVENTS = frozenset(
@@ -89,6 +91,8 @@ _COMPONENT_BY_MODULE = {
     "material_analyst": "analyser",
     "music_analysis": "music",
     "music": "music",
+    "orchestrator": "orchestrator",
+    "planner": "planner",
     "media": "aster.media",
     "renderer": "renderer",
     "revision_editor": "aster.revision",

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from cutmaster.configuration.schema import DialogueAnchorConfig
-from cutmaster.production.dialogue_audio import _anchor_specs, prepare_dialogue_audio
+from cutmaster.configuration.schema import DialogueAudioConfig
+from cutmaster.renderer.dialogue_audio import _anchor_specs, prepare_dialogue_audio
 
 
 def test_anchor_specs_add_padding_and_preserve_exact_speech_offset() -> None:
@@ -34,12 +34,13 @@ def test_anchor_specs_add_padding_and_preserve_exact_speech_offset() -> None:
 def test_disabled_vocal_separation_does_not_read_media(tmp_path: Path) -> None:
     script = [{"dialogue_anchor": {"anchor_id": "line_1"}}]
 
-    result = prepare_dialogue_audio(
+    result, reused = prepare_dialogue_audio(
         tmp_path / "missing.mp4",
         script,
         tmp_path,
-        DialogueAnchorConfig(enable_vocal_separation=False),
+        DialogueAudioConfig(enable_vocal_separation=False),
     )
 
     assert result == script
     assert result is not script
+    assert reused is False

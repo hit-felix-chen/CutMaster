@@ -559,10 +559,10 @@ class EditComposerAgent:
             self.media,
             slots,
             candidate_space,
-            self.config.beam_search.beam_width,
+            self.config.planners.beam_search.beam_width,
             self.config.vlm,
             self.context,
-            sample_frames=self.config.candidate_retrieval.visual_sample_frames,
+            sample_frames=self.config.planners.candidate_retrieval.visual_sample_frames,
         )
 
     def build_script(

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, LLMConfig
-from cutmaster.contracts.workflow import RunRequest
+from cutmaster.contracts.planning import PlanningRequest
 from cutmaster.planners.tools.music_analysis import (
     analyze_music,
     compact_music_profile,
@@ -23,7 +23,7 @@ MAX_AVERAGE_TARGET_ERROR_RATIO = 0.125
 DURATION_TOLERANCE_SEC = 1e-6
 
 
-def _request_metadata(request: RunRequest) -> dict[str, Any]:
+def _request_metadata(request: PlanningRequest) -> dict[str, Any]:
     return {
         "instruction": request.prompt,
         "prompt_type": request.prompt_type,
@@ -191,7 +191,7 @@ def _validate_slots(
 
 
 def plan_edit_slots(
-    request: RunRequest,
+    request: PlanningRequest,
     music_profile: dict[str, Any],
     config: LLMConfig,
     context: WorkflowContext,
@@ -771,7 +771,7 @@ class ArrangementArchitectAgent:
 
     def arrange(
         self,
-        request: RunRequest,
+        request: PlanningRequest,
         music_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
         slots = plan_edit_slots(
@@ -780,15 +780,15 @@ class ArrangementArchitectAgent:
             self.config.llm,
             self.context,
             target_clip_duration_sec=(
-                self.config.slot_planning.target_clip_duration_sec
+                self.config.planners.slot_planning.target_clip_duration_sec
             ),
         )
         return align_slots_to_music(
             slots,
             music_profile,
             request.target_output_length_sec,
-            self.config.render.fps,
-            self.config.slot_planning.target_clip_duration_sec,
+            self.config.renderer.fps,
+            self.config.planners.slot_planning.target_clip_duration_sec,
         )
 
     def repair(

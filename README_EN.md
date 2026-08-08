@@ -39,7 +39,7 @@ ASTER   = Planning team
 M + ASTER = MASTER
 ```
 
-`CutMaster` is the only complete-workflow entry point. `ASTERTeam` is the only coordinator for the five planning agents. Agents never call one another directly; the team orchestrator owns all forward collaboration and repair loops.
+`Orchestrator` is the complete-workflow entry point, while `Analyser`, `Planner`, and `Renderer` are independently callable. `ASTERTeam` remains the sole coordinator for the five planning agents.
 
 ## Architecture
 
@@ -57,8 +57,9 @@ flowchart LR
     MM --> T
     T --> E["E · Edit Composer"]
     E --> R["R · Revision Editor"]
-    R --> PR["Production"]
-    PR --> O["Final video"]
+    R --> RP["RenderPlan"]
+    RP --> RD["Renderer"]
+    RD --> O["Final video"]
 
     T -. "candidate shortage / targeted repair" .-> A
     E -. "no feasible chronological path / replan" .-> A
@@ -69,16 +70,16 @@ The executable call structure is:
 
 ```text
 CLI
-└── CutMaster
-    ├── MaterialAnalystAgent
-    ├── ASTERTeam
+└── Orchestrator
+    ├── Analyser
+    ├── Planner / ASTERTeam
     │   ├── ArrangementArchitectAgent
     │   ├── StoryEditorAgent
     │   ├── TimelineScoutAgent
     │   ├── EditComposerAgent
     │   └── RevisionEditorAgent
-    └── Production
-        ├── source-window optimization
+    │   └── plan compiler / source-window optimization
+    └── Renderer
         ├── dialogue audio preparation
         └── frame-exact rendering
 ```
@@ -87,7 +88,8 @@ CLI
 
 - **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, compose the sequence, and review the script.
 - **Tools provide capabilities**: ASR, caching, music analysis, media access, motion computation, visual scoring, and planning feedback live under `analyser/tools/` and `planners/tools/`.
-- **Production executes the plan**: source-window optimization, vocal preparation, FFmpeg rendering, and audio mixing happen after planning. Production is not a seventh agent.
+- **Planner finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
+- **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating planning artifacts.
 - **Shared infrastructure remains neutral**: configuration, contracts, prompt registration, and runtime capabilities live under `configuration/`, `contracts/`, `prompting/`, and `runtime/`.
 
 ## Core mechanisms
@@ -131,7 +133,7 @@ Sequence selection uses Beam Search. VLM transition scores are computed lazily o
 
 ### 6. Candidate-constrained revision
 
-The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. It never bypasses the Timeline Scout by inventing unverified clips. Production then adapts source windows, renders on a frame-exact timeline, prepares dialogue vocals, and produces the final video.
+The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. Planner then compiles a frame-exact `RenderPlan`; Renderer can reuse that plan for BGM-only and dialogue variants.
 
 ## Quick start
 
@@ -186,6 +188,7 @@ uv run cutmaster run \
   --output-dir /path/to/output \
   --target-duration 60 \
   --target-shot-length 4 \
+  --audio-mode bgm_only \
   --config config.toml \
   --overwrite
 ```
@@ -204,6 +207,7 @@ Common optional arguments:
 | `--prompt-type` | Prompt category, defaults to `event` |
 | `--video-title` | Source title supplied to material analysis |
 | `--max-clip-duration` | Maximum duration for an individual candidate clip |
+| `--audio-mode` | `bgm_only` or `dialogue` |
 | `--overwrite` | Replace an existing output and start a fresh planning run |
 
 ### Python API
@@ -211,12 +215,12 @@ Common optional arguments:
 ```python
 from pathlib import Path
 
-from cutmaster import CutMaster
+from cutmaster import Orchestrator
 from cutmaster.configuration.loader import load_config
-from cutmaster.contracts.workflow import RunRequest
+from cutmaster.contracts.workflow import WorkflowRequest
 
 config = load_config(Path("config.toml"))
-request = RunRequest(
+request = WorkflowRequest(
     video_path=Path("/path/to/source.mp4"),
     audio_path=Path("/path/to/bgm.mp3"),
     prompt="Create an energetic cut centered on the protagonist's growth",
@@ -226,11 +230,11 @@ request = RunRequest(
     overwrite=True,
 )
 
-result = CutMaster(config).run(request)
+result = Orchestrator(config).run(request)
 print(result.output_video)
 ```
 
-External integrations and benchmark adapters should use the public `from cutmaster import CutMaster` entry point rather than importing internal agents or tools.
+External integrations should use `Orchestrator` for a full run or the public `Analyser`, `Planner`, and `Renderer` stage services.
 
 ## Configuration
 
@@ -239,14 +243,9 @@ The default configuration lives in [`config.toml`](config.toml) and follows the 
 | Section | Owner | Main controls |
 |---|---|---|
 | `[llm]`, `[vlm]` | Runtime | Models, endpoints, timeouts, retries, and concurrency |
-| `[asr]`, `[shot_detection]`, `[shot_annotation]` | Material Analyst | Subtitle generation, shot detection, and annotation |
-| `[material_analysis]` | Material Analyst | Material Memory cache location |
-| `[slot_planning]` | Arrangement Architect | Target clip duration and replan rounds |
-| `[dialogue_anchors]` | Story Editor / Production | Anchor limits, vocal separation, and mixing |
-| `[candidate_retrieval]` | Timeline Scout | Candidate count, retrieval rounds, and validation |
-| `[beam_search]` | Edit Composer | Beam width |
-| `[script_review]` | Revision Editor | Candidate-constrained review rounds |
-| `[source_window_optimization]`, `[render]` | Production | Cut search, canvas, frame rate, encoding, and volume |
+| `[analyser.*]` | Analyser | ASR, shot/scene annotation, and material caching |
+| `[planners.*]` | Planner | Slot, anchor, retrieval, Beam, review, and source-window controls |
+| `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
 The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `1800` seconds. Every field and default is documented inline in `config.toml`.
 
@@ -256,17 +255,13 @@ Each run keeps auditable intermediate artifacts under `output_dir`:
 
 | Artifact | Meaning |
 |---|---|
-| `output.mp4` | Final video |
-| `montage.mp4` | Visual montage before final audio assembly |
 | `result.json` | Final result, timings, and artifact paths |
-| `source.srt`, `dialogue_merged.srt`, `dialogues.json` | Raw and reconstructed dialogue data |
-| `music_profile.json` | Beat, energy, and musical-section profile |
-| `edit_plan.json` | Slot arrangement from the Arrangement Architect |
-| `dialogue_anchors.json` | Source-dialogue anchors selected by the Story Editor |
-| `candidate_pool.json` | Candidate space built by the Timeline Scout |
-| `selection_diagnostics.json` | Edit Composer path and scoring diagnostics |
-| `script_raw.json`, `script_adapted.json` | Reviewed script and Production-adapted script |
-| `planning_history.json`, `planning_calls.json` | Planning feedback history and model-call tree |
+| `analyser/analysis_result.json` | Formal reusable-analysis index |
+| `planners/render_plan.json` | Immutable frame-exact handoff to Renderer |
+| `planners/*.json`, `planners/diagnostics/` | Planning artifacts and diagnostics |
+| `renderer/montage.mp4` | Reusable silent visual montage |
+| `renderer/output.mp4` | Final rendered video |
+| `renderer/render_request.json`, `render_result.json` | Render request and result |
 | `cutmaster.log` | Structured runtime log |
 
 The material cache additionally stores `video_description.json`, `video_summary.json`, and `analysis_history.json` for cross-run reuse and analysis tracing.
@@ -275,11 +270,13 @@ The material cache additionally stores `video_description.json`, `video_summary.
 
 ```text
 src/cutmaster/
-├── cutmaster.py                     # complete-workflow entry point
+├── orchestrator.py                  # complete three-stage entry point
 ├── analyser/
 │   ├── material_analyst.py          # M
 │   └── tools/                       # ASR, dialogue reconstruction, cache
 ├── planners/
+│   ├── planner.py                   # public planning service
+│   ├── plan_compiler.py             # frame timeline and RenderPlan compiler
 │   ├── aster_team.py                # ASTER team orchestrator
 │   ├── arrangement_architect.py     # A
 │   ├── story_editor.py              # S
@@ -287,7 +284,7 @@ src/cutmaster/
 │   ├── edit_composer.py             # E
 │   ├── revision_editor.py           # R
 │   └── tools/                       # music, retrieval, validation, scoring, feedback
-├── production/                      # script adaptation, audio, frame-exact rendering
+├── renderer/                        # independent audio and frame-exact rendering
 ├── prompting/                       # prompts and response-contract registry
 ├── configuration/                   # configuration models and loading
 ├── contracts/                       # cross-stage data contracts

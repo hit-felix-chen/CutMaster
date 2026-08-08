@@ -1,5 +1,3 @@
-gt
-
 # MASTER 多智能体剪辑机制
 
 CutMaster 将长视频剪辑组织为 **MASTER Editing Team**：
@@ -14,7 +12,8 @@ ASTER = Arrangement Architect
 ```
 
 M 负责建立与具体剪辑任务无关的 Material Memory；ASTER 是共享同一规划状态的
-五智能体剪辑团队。整个工作流由 `CutMaster` 统一启动，ASTER 内部协作由
+五智能体剪辑团队。完整工作流由 `Orchestrator` 启动，素材分析、规划和渲染也可
+分别通过 `Analyser`、`Planner`、`Renderer` 独立执行。ASTER 内部协作由
 `ASTERTeam` 编排。
 
 ## 设计目标
@@ -44,9 +43,10 @@ flowchart TD
     C["Chronology preflight<br/>确定性可行性检查"]
     E["E · Edit Composer<br/>VLM 转场评分 + Beam Search"]
     R["R · Revision Editor<br/>候选池内审片修订"]
-    F["Production<br/>窗口优化、音频与渲染"]
+    P["Plan Compiler<br/>窗口优化与帧时间线"]
+    F["Renderer<br/>音频与渲染"]
 
-    M --> A --> B --> S --> T --> C --> E --> R --> F
+    M --> A --> B --> S --> T --> C --> E --> R --> P --> F
     T -->|候选不足及视觉诊断| A
     A -->|修复后 Anchor 失效| S
     C -->|无时间顺序路径| A
@@ -167,7 +167,8 @@ Agent 拥有编辑决策和业务责任；Tool 提供确定性能力：
 | Revision Editor       | Patch validation、路径重新评分                  |
 
 Agent 可以同时使用 LLM、VLM 和确定性工具；“Agent”不等于一次模型调用。
-Production 位于 ASTER 完成修订之后，不属于任何 Planner Agent 的私有工具。
+Plan Compiler 位于 ASTER 修订之后，负责固化源窗口和输出帧时间线；Renderer
+只实现该计划，不属于任何 Planner Agent 的私有工具，也不调用模型。
 
 ## 生命周期
 
@@ -178,6 +179,7 @@ materialized
   -> scouted
   -> composed
   -> revised
+  -> compiled
   -> rendered
 ```
 

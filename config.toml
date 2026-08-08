@@ -38,7 +38,7 @@ max_concurrency = 10
 
 # Stage 1: reusable source-material analysis
 # material_cache_dir: 按视频素材和分析配置保存可复用中间产物与最终描述的根目录。
-[material_analysis]
+[analyser.material_analysis]
 material_cache_dir = ".cutmaster/materials"
 
 # adaptive_threshold: PySceneDetect AdaptiveDetector 的自适应切镜阈值。
@@ -46,7 +46,7 @@ material_cache_dir = ".cutmaster/materials"
 # adaptive_min_scene_len_sec: 允许生成的最短 Shot 时长（秒）。
 # duplicate_frame_threshold: 去除近重复采样帧时使用的灰度平均绝对差阈值。
 # 这组切镜参数也会被最终的源窗口优化阶段复用。
-[shot_detection]
+[analyser.shot_detection]
 adaptive_threshold = 2.0
 adaptive_min_content_val = 15.0
 adaptive_min_scene_len_sec = 0.25
@@ -59,7 +59,7 @@ duplicate_frame_threshold = 1.0
 # poll_interval_sec: 查询异步 ASR 任务状态的间隔（秒）。
 # max_chars: 初始字幕条目的期望最大字符数。
 # max_subtitle_duration_sec: 初始字幕条目的期望最大持续时间（秒）。
-[asr]
+[analyser.asr]
 backend = "bailian"
 api_key_env = "DASHSCOPE_API_KEY"
 reuse = true
@@ -72,7 +72,7 @@ max_subtitle_duration_sec = 3.5
 # context_shots: 单次 VLM 请求可见的连续 Shot 数，按论文固定为 20。
 # focus_shots: 在上下文中央顺序判断边界的 Shot 数，按论文固定为 10。
 # frames_per_shot: 每个 Shot 的均匀采样帧数，按论文固定为 3。
-[scene_segmentation]
+[analyser.scene_segmentation]
 context_shots = 20
 focus_shots = 10
 frames_per_shot = 3
@@ -81,7 +81,7 @@ frames_per_shot = 3
 # max_images_per_request: VLM 单次请求允许的最大图片数。
 # max_shots_per_request: 长 Segment 内单次 VLM 请求最多标注的 Shot 数；批次会逐个
 # 保存 checkpoint，最后仍合并为一个 Segment。批量模式下每个 Shot 的 5 帧组成联系表。
-[shot_annotation]
+[analyser.shot_annotation]
 shot_sample_frames = 5
 max_images_per_request = 250
 max_shots_per_request = 20
@@ -93,36 +93,16 @@ max_shots_per_request = 20
 # target_clip_duration_sec: 画面 Slot 的目标时长（秒）；平均时长须接近该值，
 # 单个 Slot 最长为该值的 1.5 倍。长原声通过 J/L-cut 跨 Slot，不会拉长画面 Slot。
 # replan_max_rounds: 候选不足或严格时序路径无解时，最多重新规划 Slot 的轮数。
-[slot_planning]
+[planners.slot_planning]
 target_clip_duration_sec = 4.0
 replan_max_rounds = 3
 
-# Stage 4: original-dialogue anchor selection and mixing
+# Stage 4: original-dialogue anchor selection
 # max_anchors: 一条成片最多选择多少段原声；只保留最有剧情价值的少量台词。
 # min_anchor_duration_sec: 每段原声的最短连续时长，过滤无意义的零碎短句。
-# enable_vocal_separation: 是否用 Demucs 从最终选中的原声锚点中分离人声。
-# separator_model: 使用的 Demucs 模型名称。
-# separator_device: 分离设备；auto 按 CUDA、MPS、CPU 的顺序自动选择。
-# separator_segment_sec: Demucs 内部分块长度（秒），调小可降低峰值内存。
-# separator_shifts: 随机平移集成次数；增加可能改善质量，但会增加耗时。
-# separator_padding_sec: 分离前在每段台词首尾增加的源音频上下文（秒）。
-# separated_loudness_lufs: 分离后每段人声的目标响度。
-# dialogue_volume: 最终混音中原声台词的音量倍率。
-# bgm_duck_volume: 原声台词播放期间背景音乐的音量倍率。
-# fade_sec: 每段原声台词首尾淡入淡出的持续时间（秒）。
-[dialogue_anchors]
+[planners.dialogue_anchors]
 max_anchors = 5
 min_anchor_duration_sec = 3
-enable_vocal_separation = true
-separator_model = "htdemucs"
-separator_device = "auto"
-separator_segment_sec = 7
-separator_shifts = 0
-separator_padding_sec = 1.0
-separated_loudness_lufs = -16.0
-dialogue_volume = 1.0
-bgm_duck_volume = 0.5
-fade_sec = 0.3
 
 # Stage 5a: structured candidate retrieval and visual validation
 # candidates_per_slot: 每个非锚点 Slot 最终希望保留的候选片段数。
@@ -134,7 +114,7 @@ fade_sec = 0.3
 # motion_sample_fps: 计算候选运动强度时的视频采样帧率。
 # motion_workers: 并行解码与计算候选运动特征的 worker 数。
 # static_kinetic_energy_threshold: 平均运动强度不高于该值时丢弃候选。
-[candidate_retrieval]
+[planners.candidate_retrieval]
 candidates_per_slot = 3
 retrieval_max_rounds = 3
 visual_sample_frames = 4
@@ -145,19 +125,19 @@ static_kinetic_energy_threshold = 0.05
 
 # Stage 5b: chronological sequence selection
 # beam_width: Beam Search 每一层保留的最高分路径数量；越大搜索更充分但占用更多计算。
-[beam_search]
+[planners.beam_search]
 beam_width = 8
 
 # Stage 6: candidate-constrained script review
 # review_rounds: 在既有候选池内让 LLM 复核并提出脚本替换的轮数。
-[script_review]
+[planners.script_review]
 review_rounds = 1
 
 # Stage 7: source-window optimization against visual cuts and music beats
 # search_margin_sec: 围绕候选窗口搜索更合适视觉切点的时间范围（秒）。
 # min_boundary_distance_sec: 内部切点距离片段首尾的首选安全距离（秒）。
 # max_workers: 并行执行源窗口切点优化的最大 worker 数。
-[source_window_optimization]
+[planners.source_window_optimization]
 search_margin_sec = 2.0
 min_boundary_distance_sec = 1.0
 max_workers = 8
@@ -170,7 +150,7 @@ max_workers = 8
 # bgm_volume: 最终背景音乐的音量倍率。
 # original_volume: 普通原片音频音量；帧精确模式必须保持为 0。
 # audio_sample_rate: 最终 AAC 音轨的采样率（Hz）。
-[render]
+[renderer]
 width = 1920
 height = 1080
 fps = 30
@@ -179,3 +159,26 @@ threads = 8
 bgm_volume = 0.3
 original_volume = 0.0
 audio_sample_rate = 48000
+
+# Stage 8b: original-dialogue preparation and mixing
+# enable_vocal_separation: 是否用 Demucs 从最终选中的原声锚点中分离人声。
+# separator_model: 使用的 Demucs 模型名称。
+# separator_device: 分离设备；auto 按 CUDA、MPS、CPU 的顺序自动选择。
+# separator_segment_sec: Demucs 内部分块长度（秒），调小可降低峰值内存。
+# separator_shifts: 随机平移集成次数；增加可能改善质量，但会增加耗时。
+# separator_padding_sec: 分离前在每段台词首尾增加的源音频上下文（秒）。
+# separated_loudness_lufs: 分离后每段人声的目标响度。
+# dialogue_volume: 最终混音中原声台词的音量倍率。
+# bgm_duck_factor: 原声播放期间，背景音乐相对 bgm_volume 的衰减倍率。
+# fade_sec: 每段原声台词首尾淡入淡出的持续时间（秒）。
+[renderer.dialogue_audio]
+enable_vocal_separation = true
+separator_model = "htdemucs"
+separator_device = "auto"
+separator_segment_sec = 7
+separator_shifts = 0
+separator_padding_sec = 1.0
+separated_loudness_lufs = -16.0
+dialogue_volume = 1.0
+bgm_duck_factor = 0.5
+fade_sec = 0.3

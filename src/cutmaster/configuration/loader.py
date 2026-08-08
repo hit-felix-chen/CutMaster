@@ -7,15 +7,18 @@ from typing import Any
 
 from cutmaster.configuration.schema import (
     ASRConfig,
+    AnalyserConfig,
     AppConfig,
     BeamSearchConfig,
     CandidateRetrievalConfig,
     DialogueAnchorConfig,
+    DialogueAudioConfig,
     LLMConfig,
     MaterialAnalysisConfig,
-    RenderConfig,
-    ScriptReviewConfig,
+    PlannersConfig,
+    RendererConfig,
     SceneSegmentationConfig,
+    ScriptReviewConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
     SlotPlanningConfig,
@@ -37,9 +40,7 @@ MODEL_CONFIG_KEYS = {
     "max_concurrency",
 }
 
-CONFIG_SCHEMA: dict[str, set[str]] = {
-    "llm": MODEL_CONFIG_KEYS,
-    "vlm": MODEL_CONFIG_KEYS,
+ANALYSER_SCHEMA: dict[str, set[str]] = {
     "material_analysis": {"material_cache_dir"},
     "shot_detection": {
         "adaptive_threshold",
@@ -67,24 +68,11 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "max_images_per_request",
         "max_shots_per_request",
     },
-    "slot_planning": {
-        "target_clip_duration_sec",
-        "replan_max_rounds",
-    },
-    "dialogue_anchors": {
-        "max_anchors",
-        "min_anchor_duration_sec",
-        "enable_vocal_separation",
-        "separator_model",
-        "separator_device",
-        "separator_segment_sec",
-        "separator_shifts",
-        "separator_padding_sec",
-        "separated_loudness_lufs",
-        "dialogue_volume",
-        "bgm_duck_volume",
-        "fade_sec",
-    },
+}
+
+PLANNERS_SCHEMA: dict[str, set[str]] = {
+    "slot_planning": {"target_clip_duration_sec", "replan_max_rounds"},
+    "dialogue_anchors": {"max_anchors", "min_anchor_duration_sec"},
     "candidate_retrieval": {
         "candidates_per_slot",
         "retrieval_max_rounds",
@@ -101,39 +89,107 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "min_boundary_distance_sec",
         "max_workers",
     },
-    "render": {
-        "width",
-        "height",
-        "fps",
-        "encoder",
-        "threads",
-        "bgm_volume",
-        "original_volume",
-        "audio_sample_rate",
-    },
+}
+
+RENDERER_KEYS = {
+    "width",
+    "height",
+    "fps",
+    "encoder",
+    "threads",
+    "bgm_volume",
+    "original_volume",
+    "audio_sample_rate",
+    "dialogue_audio",
+}
+
+DIALOGUE_AUDIO_KEYS = {
+    "enable_vocal_separation",
+    "separator_model",
+    "separator_device",
+    "separator_segment_sec",
+    "separator_shifts",
+    "separator_padding_sec",
+    "separated_loudness_lufs",
+    "dialogue_volume",
+    "bgm_duck_factor",
+    "fade_sec",
 }
 
 
-def _validate_schema(data: dict[str, Any]) -> None:
-    unknown_sections = set(data) - set(CONFIG_SCHEMA)
+def _read_data(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    _validate_schema(data)
+    return data
+
+
+def _validate_nested_stage(
+    data: dict[str, Any],
+    stage: str,
+    schema: dict[str, set[str]],
+) -> None:
+    stage_value = data.get(stage, {})
+    if not isinstance(stage_value, dict):
+        raise ValueError(f"Config section [{stage}] must be a table")
+    unknown_sections = set(stage_value) - set(schema)
     if unknown_sections:
         raise ValueError(
-            f"Unknown config sections: {sorted(unknown_sections)}"
+            f"Unknown config sections in [{stage}]: {sorted(unknown_sections)}"
         )
-    for section_name, values in data.items():
-        if not isinstance(values, dict):
-            raise ValueError(f"Config section [{section_name}] must be a table")
-        unknown_keys = set(values) - CONFIG_SCHEMA[section_name]
+    for name, value in stage_value.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Config section [{stage}.{name}] must be a table")
+        unknown_keys = set(value) - schema[name]
         if unknown_keys:
             raise ValueError(
-                f"Unknown keys in [{section_name}]: {sorted(unknown_keys)}"
+                f"Unknown keys in [{stage}.{name}]: {sorted(unknown_keys)}"
             )
 
 
-def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
-    value = data.get(name, {})
+def _validate_schema(data: dict[str, Any]) -> None:
+    allowed = {"llm", "vlm", "analyser", "planners", "renderer"}
+    unknown_sections = set(data) - allowed
+    if unknown_sections:
+        raise ValueError(f"Unknown config sections: {sorted(unknown_sections)}")
+    for model_section in ("llm", "vlm"):
+        value = data.get(model_section, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"Config section [{model_section}] must be a table")
+        unknown_keys = set(value) - MODEL_CONFIG_KEYS
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown keys in [{model_section}]: {sorted(unknown_keys)}"
+            )
+    _validate_nested_stage(data, "analyser", ANALYSER_SCHEMA)
+    _validate_nested_stage(data, "planners", PLANNERS_SCHEMA)
+    renderer = data.get("renderer", {})
+    if not isinstance(renderer, dict):
+        raise ValueError("Config section [renderer] must be a table")
+    unknown_renderer = set(renderer) - RENDERER_KEYS
+    if unknown_renderer:
+        raise ValueError(f"Unknown keys in [renderer]: {sorted(unknown_renderer)}")
+    dialogue_audio = renderer.get("dialogue_audio", {})
+    if not isinstance(dialogue_audio, dict):
+        raise ValueError("Config section [renderer.dialogue_audio] must be a table")
+    unknown_dialogue = set(dialogue_audio) - DIALOGUE_AUDIO_KEYS
+    if unknown_dialogue:
+        raise ValueError(
+            "Unknown keys in [renderer.dialogue_audio]: "
+            f"{sorted(unknown_dialogue)}"
+        )
+
+
+def _section(data: dict[str, Any], *names: str) -> dict[str, Any]:
+    value: Any = data
+    for name in names:
+        if not isinstance(value, dict):
+            raise ValueError(f"Config section [{'.'.join(names)}] must be a table")
+        value = value.get(name, {})
     if not isinstance(value, dict):
-        raise ValueError(f"Config section [{name}] must be a table")
+        raise ValueError(f"Config section [{'.'.join(names)}] must be a table")
     return value
 
 
@@ -169,12 +225,7 @@ def _llm_config(section: dict[str, Any]) -> LLMConfig:
         model=model,
         base_url=str(section.get("base_url") or "").strip(),
         api_key=_secret(section, "llm"),
-        enable_thinking=_boolean(
-            section,
-            "llm",
-            "enable_thinking",
-            True,
-        ),
+        enable_thinking=_boolean(section, "llm", "enable_thinking", True),
         temperature=float(section.get("temperature", 0.1)),
         max_tokens=int(section.get("max_tokens", 4000)),
         timeout_sec=float(section.get("timeout_sec", 180.0)),
@@ -191,12 +242,7 @@ def _vlm_config(section: dict[str, Any]) -> VLMConfig:
         model=model,
         base_url=str(section.get("base_url") or "").strip(),
         api_key=_secret(section, "vlm"),
-        enable_thinking=_boolean(
-            section,
-            "vlm",
-            "enable_thinking",
-            True,
-        ),
+        enable_thinking=_boolean(section, "vlm", "enable_thinking", True),
         temperature=float(section.get("temperature", 0.1)),
         max_tokens=int(section.get("max_tokens", 4000)),
         timeout_sec=float(section.get("timeout_sec", 180.0)),
@@ -205,7 +251,49 @@ def _vlm_config(section: dict[str, Any]) -> VLMConfig:
     )
 
 
+def _renderer_config(data: dict[str, Any]) -> RendererConfig:
+    renderer = _section(data, "renderer")
+    dialogue = _section(data, "renderer", "dialogue_audio")
+    return RendererConfig(
+        width=int(renderer.get("width", 1920)),
+        height=int(renderer.get("height", 1080)),
+        fps=int(renderer.get("fps", 30)),
+        encoder=str(renderer.get("encoder") or "auto").strip(),
+        threads=int(renderer.get("threads", 8)),
+        bgm_volume=float(renderer.get("bgm_volume", 0.3)),
+        original_volume=float(renderer.get("original_volume", 0.0)),
+        audio_sample_rate=int(renderer.get("audio_sample_rate", 48000)),
+        dialogue_audio=DialogueAudioConfig(
+            enable_vocal_separation=_boolean(
+                dialogue,
+                "renderer.dialogue_audio",
+                "enable_vocal_separation",
+                True,
+            ),
+            separator_model=str(
+                dialogue.get("separator_model") or "htdemucs"
+            ).strip(),
+            separator_device=str(
+                dialogue.get("separator_device") or "auto"
+            ).strip().lower(),
+            separator_segment_sec=int(dialogue.get("separator_segment_sec", 7)),
+            separator_shifts=int(dialogue.get("separator_shifts", 0)),
+            separator_padding_sec=float(dialogue.get("separator_padding_sec", 1.0)),
+            separated_loudness_lufs=float(
+                dialogue.get("separated_loudness_lufs", -16.0)
+            ),
+            dialogue_volume=float(dialogue.get("dialogue_volume", 1.0)),
+            bgm_duck_factor=float(dialogue.get("bgm_duck_factor", 0.5)),
+            fade_sec=float(dialogue.get("fade_sec", 0.3)),
+        ),
+    )
+
+
 def _validate_values(config: AppConfig) -> None:
+    analyser = config.analyser
+    planners = config.planners
+    renderer = config.renderer
+    dialogue = renderer.dialogue_audio
     positive = {
         "llm.max_tokens": config.llm.max_tokens,
         "llm.timeout_sec": config.llm.timeout_sec,
@@ -213,68 +301,34 @@ def _validate_values(config: AppConfig) -> None:
         "vlm.max_tokens": config.vlm.max_tokens,
         "vlm.timeout_sec": config.vlm.timeout_sec,
         "vlm.max_concurrency": config.vlm.max_concurrency,
-        "shot_detection.adaptive_threshold": (
-            config.shot_detection.adaptive_threshold
-        ),
-        "shot_detection.adaptive_min_content_val": (
-            config.shot_detection.adaptive_min_content_val
-        ),
-        "shot_detection.adaptive_min_scene_len_sec": (
-            config.shot_detection.adaptive_min_scene_len_sec
-        ),
-        "shot_detection.duplicate_frame_threshold": (
-            config.shot_detection.duplicate_frame_threshold
-        ),
-        "asr.timeout_sec": config.asr.timeout_sec,
-        "asr.poll_interval_sec": config.asr.poll_interval_sec,
-        "asr.max_chars": config.asr.max_chars,
-        "asr.max_subtitle_duration_sec": config.asr.max_subtitle_duration_sec,
-        "scene_segmentation.context_shots": (
-            config.scene_segmentation.context_shots
-        ),
-        "scene_segmentation.focus_shots": config.scene_segmentation.focus_shots,
-        "scene_segmentation.frames_per_shot": (
-            config.scene_segmentation.frames_per_shot
-        ),
-        "slot_planning.target_clip_duration_sec": (
-            config.slot_planning.target_clip_duration_sec
-        ),
-        "candidate_retrieval.candidates_per_slot": (
-            config.candidate_retrieval.candidates_per_slot
-        ),
-        "candidate_retrieval.retrieval_max_rounds": (
-            config.candidate_retrieval.retrieval_max_rounds
-        ),
-        "candidate_retrieval.visual_sample_frames": (
-            config.candidate_retrieval.visual_sample_frames
-        ),
-        "candidate_retrieval.motion_sample_fps": (
-            config.candidate_retrieval.motion_sample_fps
-        ),
-        "candidate_retrieval.motion_workers": (
-            config.candidate_retrieval.motion_workers
-        ),
-        "candidate_retrieval.static_kinetic_energy_threshold": (
-            config.candidate_retrieval.static_kinetic_energy_threshold
-        ),
-        "beam_search.beam_width": config.beam_search.beam_width,
-        "source_window_optimization.max_workers": (
-            config.source_window_optimization.max_workers
-        ),
-        "render.width": config.render.width,
-        "render.height": config.render.height,
-        "render.fps": config.render.fps,
-        "render.threads": config.render.threads,
-        "render.audio_sample_rate": config.render.audio_sample_rate,
-        "dialogue_anchors.separator_segment_sec": (
-            config.dialogue_anchors.separator_segment_sec
-        ),
-        "dialogue_anchors.max_anchors": (
-            config.dialogue_anchors.max_anchors
-        ),
-        "dialogue_anchors.min_anchor_duration_sec": (
-            config.dialogue_anchors.min_anchor_duration_sec
-        ),
+        "analyser.shot_detection.adaptive_threshold": analyser.shot_detection.adaptive_threshold,
+        "analyser.shot_detection.adaptive_min_content_val": analyser.shot_detection.adaptive_min_content_val,
+        "analyser.shot_detection.adaptive_min_scene_len_sec": analyser.shot_detection.adaptive_min_scene_len_sec,
+        "analyser.shot_detection.duplicate_frame_threshold": analyser.shot_detection.duplicate_frame_threshold,
+        "analyser.asr.timeout_sec": analyser.asr.timeout_sec,
+        "analyser.asr.poll_interval_sec": analyser.asr.poll_interval_sec,
+        "analyser.asr.max_chars": analyser.asr.max_chars,
+        "analyser.asr.max_subtitle_duration_sec": analyser.asr.max_subtitle_duration_sec,
+        "analyser.scene_segmentation.context_shots": analyser.scene_segmentation.context_shots,
+        "analyser.scene_segmentation.focus_shots": analyser.scene_segmentation.focus_shots,
+        "analyser.scene_segmentation.frames_per_shot": analyser.scene_segmentation.frames_per_shot,
+        "planners.slot_planning.target_clip_duration_sec": planners.slot_planning.target_clip_duration_sec,
+        "planners.dialogue_anchors.max_anchors": planners.dialogue_anchors.max_anchors,
+        "planners.dialogue_anchors.min_anchor_duration_sec": planners.dialogue_anchors.min_anchor_duration_sec,
+        "planners.candidate_retrieval.candidates_per_slot": planners.candidate_retrieval.candidates_per_slot,
+        "planners.candidate_retrieval.retrieval_max_rounds": planners.candidate_retrieval.retrieval_max_rounds,
+        "planners.candidate_retrieval.visual_sample_frames": planners.candidate_retrieval.visual_sample_frames,
+        "planners.candidate_retrieval.motion_sample_fps": planners.candidate_retrieval.motion_sample_fps,
+        "planners.candidate_retrieval.motion_workers": planners.candidate_retrieval.motion_workers,
+        "planners.candidate_retrieval.static_kinetic_energy_threshold": planners.candidate_retrieval.static_kinetic_energy_threshold,
+        "planners.beam_search.beam_width": planners.beam_search.beam_width,
+        "planners.source_window_optimization.max_workers": planners.source_window_optimization.max_workers,
+        "renderer.width": renderer.width,
+        "renderer.height": renderer.height,
+        "renderer.fps": renderer.fps,
+        "renderer.threads": renderer.threads,
+        "renderer.audio_sample_rate": renderer.audio_sample_rate,
+        "renderer.dialogue_audio.separator_segment_sec": dialogue.separator_segment_sec,
     }
     invalid_positive = [
         name for name, value in positive.items() if float(value) <= 0
@@ -283,38 +337,26 @@ def _validate_values(config: AppConfig) -> None:
         raise ValueError(
             f"Config values must be positive: {sorted(invalid_positive)}"
         )
-    if config.slot_planning.target_clip_duration_sec < 1.5:
+    if planners.slot_planning.target_clip_duration_sec < 1.5:
         raise ValueError(
-            "slot_planning.target_clip_duration_sec must be at least 1.5"
+            "planners.slot_planning.target_clip_duration_sec must be at least 1.5"
         )
     non_negative = {
         "llm.temperature": config.llm.temperature,
         "llm.max_retries": config.llm.max_retries,
         "vlm.temperature": config.vlm.temperature,
         "vlm.max_retries": config.vlm.max_retries,
-        "slot_planning.replan_max_rounds": (
-            config.slot_planning.replan_max_rounds
-        ),
-        "script_review.review_rounds": config.script_review.review_rounds,
-        "source_window_optimization.search_margin_sec": (
-            config.source_window_optimization.search_margin_sec
-        ),
-        "source_window_optimization.min_boundary_distance_sec": (
-            config.source_window_optimization.min_boundary_distance_sec
-        ),
-        "render.bgm_volume": config.render.bgm_volume,
-        "render.original_volume": config.render.original_volume,
-        "dialogue_anchors.dialogue_volume": config.dialogue_anchors.dialogue_volume,
-        "dialogue_anchors.bgm_duck_volume": (
-            config.dialogue_anchors.bgm_duck_volume
-        ),
-        "dialogue_anchors.fade_sec": config.dialogue_anchors.fade_sec,
-        "dialogue_anchors.separator_shifts": (
-            config.dialogue_anchors.separator_shifts
-        ),
-        "dialogue_anchors.separator_padding_sec": (
-            config.dialogue_anchors.separator_padding_sec
-        ),
+        "planners.slot_planning.replan_max_rounds": planners.slot_planning.replan_max_rounds,
+        "planners.script_review.review_rounds": planners.script_review.review_rounds,
+        "planners.source_window_optimization.search_margin_sec": planners.source_window_optimization.search_margin_sec,
+        "planners.source_window_optimization.min_boundary_distance_sec": planners.source_window_optimization.min_boundary_distance_sec,
+        "renderer.bgm_volume": renderer.bgm_volume,
+        "renderer.original_volume": renderer.original_volume,
+        "renderer.dialogue_audio.dialogue_volume": dialogue.dialogue_volume,
+        "renderer.dialogue_audio.bgm_duck_factor": dialogue.bgm_duck_factor,
+        "renderer.dialogue_audio.fade_sec": dialogue.fade_sec,
+        "renderer.dialogue_audio.separator_shifts": dialogue.separator_shifts,
+        "renderer.dialogue_audio.separator_padding_sec": dialogue.separator_padding_sec,
     }
     invalid_non_negative = [
         name for name, value in non_negative.items() if float(value) < 0
@@ -323,230 +365,177 @@ def _validate_values(config: AppConfig) -> None:
         raise ValueError(
             f"Config values must be non-negative: {sorted(invalid_non_negative)}"
         )
-    if config.shot_annotation.shot_sample_frames != 5:
-        raise ValueError("shot_annotation.shot_sample_frames must equal 5")
-    if config.shot_annotation.max_images_per_request <= 0:
+    if analyser.shot_annotation.shot_sample_frames != 5:
+        raise ValueError("analyser.shot_annotation.shot_sample_frames must equal 5")
+    if analyser.shot_annotation.max_images_per_request <= 0:
         raise ValueError(
-            "shot_annotation.max_images_per_request must be positive"
+            "analyser.shot_annotation.max_images_per_request must be positive"
         )
-    if config.shot_annotation.max_shots_per_request <= 0:
+    if analyser.shot_annotation.max_shots_per_request <= 0:
         raise ValueError(
-            "shot_annotation.max_shots_per_request must be positive"
+            "analyser.shot_annotation.max_shots_per_request must be positive"
         )
-    if config.scene_segmentation.context_shots != 20:
-        raise ValueError("scene_segmentation.context_shots must equal 20")
-    if config.scene_segmentation.focus_shots != 10:
-        raise ValueError("scene_segmentation.focus_shots must equal 10")
-    if config.scene_segmentation.frames_per_shot != 3:
-        raise ValueError("scene_segmentation.frames_per_shot must equal 3")
-    threshold = (
-        config.candidate_retrieval.protagonist_visibility_likert_threshold
-    )
+    if analyser.scene_segmentation.context_shots != 20:
+        raise ValueError("analyser.scene_segmentation.context_shots must equal 20")
+    if analyser.scene_segmentation.focus_shots != 10:
+        raise ValueError("analyser.scene_segmentation.focus_shots must equal 10")
+    if analyser.scene_segmentation.frames_per_shot != 3:
+        raise ValueError("analyser.scene_segmentation.frames_per_shot must equal 3")
+    threshold = planners.candidate_retrieval.protagonist_visibility_likert_threshold
     if threshold not in {1, 2, 3, 4, 5}:
         raise ValueError(
-            "candidate_retrieval.protagonist_visibility_likert_threshold "
+            "planners.candidate_retrieval.protagonist_visibility_likert_threshold "
             "must be an integer from 1 to 5"
         )
-    static_threshold = (
-        config.candidate_retrieval.static_kinetic_energy_threshold
-    )
+    static_threshold = planners.candidate_retrieval.static_kinetic_energy_threshold
     if not 0.0 <= static_threshold <= 1.0:
         raise ValueError(
-            "candidate_retrieval.static_kinetic_energy_threshold "
+            "planners.candidate_retrieval.static_kinetic_energy_threshold "
             "must be between 0 and 1"
         )
-    if config.render.original_volume != 0.0:
-        raise ValueError("render.original_volume must be 0 for frame-exact rendering")
-    if config.dialogue_anchors.separator_device not in {
-        "auto",
-        "cpu",
-        "mps",
-        "cuda",
-    }:
+    if renderer.original_volume != 0.0:
         raise ValueError(
-            "dialogue_anchors.separator_device must be auto, cpu, mps, or cuda"
+            "renderer.original_volume must be 0 for frame-exact rendering"
         )
-    if not config.dialogue_anchors.separator_model.strip():
-        raise ValueError("dialogue_anchors.separator_model must not be empty")
-    if not -70.0 <= config.dialogue_anchors.separated_loudness_lufs <= 0.0:
+    if dialogue.separator_device not in {"auto", "cpu", "mps", "cuda"}:
         raise ValueError(
-            "dialogue_anchors.separated_loudness_lufs must be between -70 and 0"
+            "renderer.dialogue_audio.separator_device must be auto, cpu, mps, or cuda"
         )
+    if not dialogue.separator_model:
+        raise ValueError(
+            "renderer.dialogue_audio.separator_model must not be empty"
+        )
+    if not -70.0 <= dialogue.separated_loudness_lufs <= 0.0:
+        raise ValueError(
+            "renderer.dialogue_audio.separated_loudness_lufs must be between -70 and 0"
+        )
+
+
+def load_renderer_config(path: Path) -> RendererConfig:
+    """Load rendering configuration without resolving any API credentials."""
+
+    data = _read_data(path)
+    renderer = _renderer_config(data)
+    if renderer.width <= 0 or renderer.height <= 0 or renderer.fps <= 0:
+        raise ValueError("Renderer dimensions and fps must be positive")
+    if renderer.original_volume != 0.0:
+        raise ValueError(
+            "renderer.original_volume must be 0 for frame-exact rendering"
+        )
+    return renderer
 
 
 def load_config(path: Path) -> AppConfig:
-    if not path.is_file():
-        raise FileNotFoundError(f"Config file not found: {path}")
-    with path.open("rb") as handle:
-        data = tomllib.load(handle)
-    _validate_schema(data)
-
-    llm = _section(data, "llm")
-    vlm = _section(data, "vlm")
-    material_analysis = _section(data, "material_analysis")
-    shot_detection = _section(data, "shot_detection")
-    asr = _section(data, "asr")
-    scene_segmentation = _section(data, "scene_segmentation")
-    shot_annotation = _section(data, "shot_annotation")
-    slot_planning = _section(data, "slot_planning")
-    dialogue_anchors = _section(data, "dialogue_anchors")
-    candidate_retrieval = _section(data, "candidate_retrieval")
-    beam_search = _section(data, "beam_search")
-    script_review = _section(data, "script_review")
-    source_window_optimization = _section(data, "source_window_optimization")
-    render = _section(data, "render")
-    visibility_likert_threshold = candidate_retrieval.get(
-        "protagonist_visibility_likert_threshold",
-        3,
-    )
-    if (
-        isinstance(visibility_likert_threshold, bool)
-        or not isinstance(visibility_likert_threshold, int)
-    ):
+    data = _read_data(path)
+    analyser = _section(data, "analyser")
+    planners = _section(data, "planners")
+    material = _section(data, "analyser", "material_analysis")
+    shots = _section(data, "analyser", "shot_detection")
+    asr = _section(data, "analyser", "asr")
+    scene = _section(data, "analyser", "scene_segmentation")
+    annotation = _section(data, "analyser", "shot_annotation")
+    slot = _section(data, "planners", "slot_planning")
+    anchors = _section(data, "planners", "dialogue_anchors")
+    retrieval = _section(data, "planners", "candidate_retrieval")
+    beam = _section(data, "planners", "beam_search")
+    review = _section(data, "planners", "script_review")
+    source_window = _section(data, "planners", "source_window_optimization")
+    visibility = retrieval.get("protagonist_visibility_likert_threshold", 3)
+    if isinstance(visibility, bool) or not isinstance(visibility, int):
         raise ValueError(
-            "candidate_retrieval.protagonist_visibility_likert_threshold "
+            "planners.candidate_retrieval.protagonist_visibility_likert_threshold "
             "must be an integer from 1 to 5"
         )
     config = AppConfig(
-        llm=_llm_config(llm),
-        vlm=_vlm_config(vlm),
-        material_analysis=MaterialAnalysisConfig(
-            material_cache_dir=(
-                path.parent
-                / str(
-                    material_analysis.get("material_cache_dir")
-                    or ".cutmaster/materials"
-                )
-            ).resolve(),
-        ),
-        shot_detection=ShotDetectionConfig(
-            adaptive_threshold=float(
-                shot_detection.get("adaptive_threshold", 2.0)
+        llm=_llm_config(_section(data, "llm")),
+        vlm=_vlm_config(_section(data, "vlm")),
+        analyser=AnalyserConfig(
+            material_analysis=MaterialAnalysisConfig(
+                material_cache_dir=(
+                    path.parent
+                    / str(material.get("material_cache_dir") or ".cutmaster/materials")
+                ).resolve(),
             ),
-            adaptive_min_content_val=float(
-                shot_detection.get("adaptive_min_content_val", 15.0)
+            shot_detection=ShotDetectionConfig(
+                adaptive_threshold=float(shots.get("adaptive_threshold", 2.0)),
+                adaptive_min_content_val=float(
+                    shots.get("adaptive_min_content_val", 15.0)
+                ),
+                adaptive_min_scene_len_sec=float(
+                    shots.get("adaptive_min_scene_len_sec", 0.25)
+                ),
+                duplicate_frame_threshold=float(
+                    shots.get("duplicate_frame_threshold", 1.0)
+                ),
             ),
-            adaptive_min_scene_len_sec=float(
-                shot_detection.get("adaptive_min_scene_len_sec", 0.25)
+            asr=ASRConfig(
+                backend=str(asr.get("backend") or "bailian").strip().lower(),
+                api_key=_secret(asr, "analyser.asr"),
+                reuse=_boolean(asr, "analyser.asr", "reuse", True),
+                timeout_sec=float(asr.get("timeout_sec", 1800.0)),
+                poll_interval_sec=float(asr.get("poll_interval_sec", 2.0)),
+                max_chars=int(asr.get("max_chars", 20)),
+                max_subtitle_duration_sec=float(
+                    asr.get("max_subtitle_duration_sec", 3.5)
+                ),
             ),
-            duplicate_frame_threshold=float(
-                shot_detection.get("duplicate_frame_threshold", 1.0)
+            scene_segmentation=SceneSegmentationConfig(
+                context_shots=int(scene.get("context_shots", 20)),
+                focus_shots=int(scene.get("focus_shots", 10)),
+                frames_per_shot=int(scene.get("frames_per_shot", 3)),
             ),
-        ),
-        asr=ASRConfig(
-            backend=str(asr.get("backend") or "bailian").strip().lower(),
-            api_key=_secret(asr, "asr"),
-            reuse=bool(asr.get("reuse", True)),
-            timeout_sec=float(asr.get("timeout_sec", 1800.0)),
-            poll_interval_sec=float(asr.get("poll_interval_sec", 2.0)),
-            max_chars=int(asr.get("max_chars", 20)),
-            max_subtitle_duration_sec=float(asr.get("max_subtitle_duration_sec", 3.5)),
-        ),
-        scene_segmentation=SceneSegmentationConfig(
-            context_shots=int(scene_segmentation.get("context_shots", 20)),
-            focus_shots=int(scene_segmentation.get("focus_shots", 10)),
-            frames_per_shot=int(
-                scene_segmentation.get("frames_per_shot", 3)
-            ),
-        ),
-        shot_annotation=ShotAnnotationConfig(
-            shot_sample_frames=int(shot_annotation.get("shot_sample_frames", 5)),
-            max_images_per_request=int(
-                shot_annotation.get("max_images_per_request", 250)
-            ),
-            max_shots_per_request=int(
-                shot_annotation.get("max_shots_per_request", 20)
+            shot_annotation=ShotAnnotationConfig(
+                shot_sample_frames=int(annotation.get("shot_sample_frames", 5)),
+                max_images_per_request=int(
+                    annotation.get("max_images_per_request", 250)
+                ),
+                max_shots_per_request=int(
+                    annotation.get("max_shots_per_request", 20)
+                ),
             ),
         ),
-        slot_planning=SlotPlanningConfig(
-            target_clip_duration_sec=float(
-                slot_planning.get("target_clip_duration_sec", 4.0)
+        planners=PlannersConfig(
+            slot_planning=SlotPlanningConfig(
+                target_clip_duration_sec=float(
+                    slot.get("target_clip_duration_sec", 4.0)
+                ),
+                replan_max_rounds=int(slot.get("replan_max_rounds", 3)),
             ),
-            replan_max_rounds=int(slot_planning.get("replan_max_rounds", 3)),
+            dialogue_anchors=DialogueAnchorConfig(
+                max_anchors=int(anchors.get("max_anchors", 4)),
+                min_anchor_duration_sec=float(
+                    anchors.get("min_anchor_duration_sec", 1.5)
+                ),
+            ),
+            candidate_retrieval=CandidateRetrievalConfig(
+                candidates_per_slot=int(retrieval.get("candidates_per_slot", 3)),
+                retrieval_max_rounds=int(retrieval.get("retrieval_max_rounds", 3)),
+                motion_sample_fps=float(retrieval.get("motion_sample_fps", 2.0)),
+                motion_workers=int(retrieval.get("motion_workers", 4)),
+                static_kinetic_energy_threshold=float(
+                    retrieval.get("static_kinetic_energy_threshold", 0.05)
+                ),
+                visual_sample_frames=int(retrieval.get("visual_sample_frames", 4)),
+                protagonist_visibility_likert_threshold=visibility,
+            ),
+            beam_search=BeamSearchConfig(
+                beam_width=int(beam.get("beam_width", 8))
+            ),
+            script_review=ScriptReviewConfig(
+                review_rounds=int(review.get("review_rounds", 1))
+            ),
+            source_window_optimization=SourceWindowOptimizationConfig(
+                search_margin_sec=float(source_window.get("search_margin_sec", 2.0)),
+                min_boundary_distance_sec=float(
+                    source_window.get("min_boundary_distance_sec", 1.0)
+                ),
+                max_workers=int(source_window.get("max_workers", 8)),
+            ),
         ),
-        dialogue_anchors=DialogueAnchorConfig(
-            max_anchors=int(dialogue_anchors.get("max_anchors", 4)),
-            min_anchor_duration_sec=float(
-                dialogue_anchors.get("min_anchor_duration_sec", 1.5)
-            ),
-            enable_vocal_separation=_boolean(
-                dialogue_anchors,
-                "dialogue_anchors",
-                "enable_vocal_separation",
-                True,
-            ),
-            separator_model=str(
-                dialogue_anchors.get("separator_model") or "htdemucs"
-            ).strip(),
-            separator_device=str(
-                dialogue_anchors.get("separator_device") or "auto"
-            ).strip().lower(),
-            separator_segment_sec=int(
-                dialogue_anchors.get("separator_segment_sec", 7)
-            ),
-            separator_shifts=int(dialogue_anchors.get("separator_shifts", 0)),
-            separator_padding_sec=float(
-                dialogue_anchors.get("separator_padding_sec", 1.0)
-            ),
-            separated_loudness_lufs=float(
-                dialogue_anchors.get("separated_loudness_lufs", -16.0)
-            ),
-            dialogue_volume=float(dialogue_anchors.get("dialogue_volume", 1.0)),
-            bgm_duck_volume=float(
-                dialogue_anchors.get("bgm_duck_volume", 0.08)
-            ),
-            fade_sec=float(dialogue_anchors.get("fade_sec", 0.05)),
-        ),
-        candidate_retrieval=CandidateRetrievalConfig(
-            candidates_per_slot=int(
-                candidate_retrieval.get("candidates_per_slot", 3)
-            ),
-            retrieval_max_rounds=int(
-                candidate_retrieval.get("retrieval_max_rounds", 3)
-            ),
-            motion_sample_fps=float(
-                candidate_retrieval.get("motion_sample_fps", 2.0)
-            ),
-            motion_workers=int(candidate_retrieval.get("motion_workers", 4)),
-            static_kinetic_energy_threshold=float(
-                candidate_retrieval.get(
-                    "static_kinetic_energy_threshold",
-                    0.05,
-                )
-            ),
-            visual_sample_frames=int(
-                candidate_retrieval.get("visual_sample_frames", 4)
-            ),
-            protagonist_visibility_likert_threshold=visibility_likert_threshold,
-        ),
-        beam_search=BeamSearchConfig(
-            beam_width=int(beam_search.get("beam_width", 8)),
-        ),
-        script_review=ScriptReviewConfig(
-            review_rounds=int(script_review.get("review_rounds", 1)),
-        ),
-        source_window_optimization=SourceWindowOptimizationConfig(
-            search_margin_sec=float(
-                source_window_optimization.get("search_margin_sec", 2.0)
-            ),
-            min_boundary_distance_sec=float(
-                source_window_optimization.get(
-                    "min_boundary_distance_sec",
-                    1.0,
-                )
-            ),
-            max_workers=int(source_window_optimization.get("max_workers", 8)),
-        ),
-        render=RenderConfig(
-            width=int(render.get("width", 1920)),
-            height=int(render.get("height", 1080)),
-            fps=int(render.get("fps", 30)),
-            encoder=str(render.get("encoder") or "auto").strip(),
-            threads=int(render.get("threads", 8)),
-            bgm_volume=float(render.get("bgm_volume", 0.3)),
-            original_volume=float(render.get("original_volume", 0.0)),
-            audio_sample_rate=int(render.get("audio_sample_rate", 48000)),
-        ),
+        renderer=_renderer_config(data),
     )
     _validate_values(config)
     return config
+
+
+__all__ = ["load_config", "load_renderer_config"]

@@ -4,7 +4,7 @@ import numpy as np
 from scenedetect import FrameTimecode
 
 from cutmaster.runtime.shot_detection import detect_source_cuts
-from cutmaster.production.source_windows import (
+from cutmaster.planners.source_window_optimizer import (
     _detect_used_segment_cuts,
     choose_source_window,
     optimize_script_source_windows,
@@ -206,7 +206,7 @@ def test_parallel_optimization_preserves_script_order(
         "segments": [],
     }
     monkeypatch.setattr(
-        "cutmaster.production.source_windows._detect_used_segment_cuts",
+        "cutmaster.planners.source_window_optimizer._detect_used_segment_cuts",
         lambda *_args, **_kwargs: (
             (12.0, 22.0, 32.0),
             10.0,
@@ -243,7 +243,7 @@ def test_cutless_used_segment_preserves_source_window(
         "segments": [],
     }
     monkeypatch.setattr(
-        "cutmaster.production.source_windows._detect_used_segment_cuts",
+        "cutmaster.planners.source_window_optimizer._detect_used_segment_cuts",
         lambda *_args, **_kwargs: ((), 10.0, 60.0),
     )
 
@@ -290,7 +290,7 @@ def test_used_segment_detection_skips_anchor_and_unused_segments(
         return [3.5], 30.0
 
     monkeypatch.setattr(
-        "cutmaster.production.source_windows.detect_source_cuts",
+        "cutmaster.planners.source_window_optimizer.detect_source_cuts",
         fake_detect,
     )
 

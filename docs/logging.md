@@ -42,12 +42,16 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 
 ```text
 cutmaster
+orchestrator
 analyser
 dialogue
+dialogue_audio
 music
+planner
 aster.arrangement
 aster.story
 aster.timeline
+aster.media
 aster.composition
 aster.revision
 script
