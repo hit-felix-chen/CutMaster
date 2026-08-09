@@ -11,7 +11,29 @@ from cutmaster.prompting import (
     ResponseContract,
 )
 from cutmaster.prompting.registry import PromptRegistry
+from cutmaster.runtime.model_gateway import ModelResponse, ModelUsage
 from cutmaster.runtime.workflow_context import WorkflowContext
+
+
+def model_response(content: str = '{"ok":true}') -> ModelResponse:
+    return ModelResponse(
+        content=content,
+        response_id="response-test",
+        response_model="test-resolved",
+        usage=ModelUsage(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            cached_prompt_tokens=40,
+            uncached_prompt_tokens=60,
+            reasoning_tokens=10,
+            provider_usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        ),
+    )
 
 
 def test_context_persists_artifacts_without_model_call_history(
@@ -23,7 +45,9 @@ def test_context_persists_artifacts_without_model_call_history(
     context.set_artifact("music_profile", {"tempo_bpm": 120})
     monkeypatch.setattr(
         "cutmaster.runtime.workflow_context.generate_text",
-        lambda prompt, *_args, **_kwargs: '{"items":[{"slot_id":"slot_01"}]}',
+        lambda prompt, *_args, **_kwargs: model_response(
+            '{"items":[{"slot_id":"slot_01"}]}'
+        ),
     )
     package = PromptPackage(
         stage=PromptStage.PLANNER,
@@ -127,7 +151,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
 
     def generate(prompt, *_args, **_kwargs):
         prompts.append(prompt)
-        return '{"ok":true}'
+        return model_response()
 
     def validate(parsed):
         nonlocal validations
@@ -151,6 +175,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     context = WorkflowContext(
         tmp_path / "history.json",
         model_call_tree_path=call_tree_path,
+        model_usage_path=tmp_path / "model_usage.json",
     )
     result = context.call_prompt(
         package=package,
@@ -193,6 +218,15 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     assert call["attempts"][0]["prompt"]["prompt_id"] == (
         "planner.candidate_retrieval"
     )
+    assert root["usage"]["request_count"] == 3
+    assert root["usage"]["prompt_tokens"] == 300
+    assert call["attempts"][0]["usage"]["cached_prompt_tokens"] == 40
+    usage = json.loads((tmp_path / "model_usage.json").read_text(encoding="utf-8"))
+    assert usage["summary"]["total_tokens"] == 360
+    assert usage["calls"][0]["attempts"][0]["response_id"] == "response-test"
+    serialized_usage = json.dumps(usage, ensure_ascii=False)
+    assert '{"ok":true}' not in serialized_usage
+    assert "Retrieve candidates" not in serialized_usage
 
 
 def test_request_failure_logging_does_not_duplicate_operation(

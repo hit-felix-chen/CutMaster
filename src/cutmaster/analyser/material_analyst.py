@@ -42,6 +42,7 @@ from cutmaster.configuration.schema import (
     VLMConfig,
 )
 from cutmaster.runtime.observability import log_event
+from cutmaster.runtime.model_gateway import empty_usage_summary
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
@@ -1341,6 +1342,12 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
         analysis_history_path=material_directory / "analysis_history.json",
         video_description=description,
         video_summary=summary,
+        model_usage_path=(
+            material_directory / "model_usage.json"
+            if (material_directory / "model_usage.json").is_file()
+            else None
+        ),
+        model_usage_summary=empty_usage_summary(),
     )
 
 
@@ -1383,7 +1390,12 @@ def _analyse_video_material(
     )
     material_directory.mkdir(parents=True, exist_ok=True)
     history_path = material_directory / "analysis_history.json"
-    context = WorkflowContext(history_path)
+    model_usage_path = material_directory / "model_usage.json"
+    context = WorkflowContext(
+        history_path,
+        model_usage_path=model_usage_path,
+        stage_name="analyser",
+    )
 
     media = probe_media(video_path)
     duration_sec = float(media["duration"])
@@ -1767,6 +1779,7 @@ def _analyse_video_material(
             "video_summary": str(summary_path.resolve()),
         },
     )
+    context.save_model_usage()
     return MaterialAnalysisResult(
         material_directory=material_directory,
         source_srt=source_srt,
@@ -1777,6 +1790,8 @@ def _analyse_video_material(
         analysis_history_path=history_path,
         video_description=description_dict,
         video_summary=video_summary,
+        model_usage_path=model_usage_path,
+        model_usage_summary=context.model_usage_summary(),
     )
 
 

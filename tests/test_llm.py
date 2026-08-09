@@ -54,6 +54,15 @@ def test_model_thinking_config_reaches_api_request(
         def create(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(
+                id="response-1",
+                model=config.model,
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "prompt_cache_hit_tokens": 60,
+                    "completion_tokens_details": {"reasoning_tokens": 12},
+                },
                 choices=[
                     SimpleNamespace(
                         message=SimpleNamespace(content='{"ok":true}')
@@ -63,7 +72,14 @@ def test_model_thinking_config_reaches_api_request(
 
     monkeypatch.setattr("cutmaster.runtime.model_gateway.OpenAI", FakeOpenAI)
 
-    assert generate_text("test", config, "Return JSON") == '{"ok":true}'
+    response = generate_text("test", config, "Return JSON")
+    assert response.content == '{"ok":true}'
+    assert response.response_id == "response-1"
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 100
+    assert response.usage.cached_prompt_tokens == 60
+    assert response.usage.uncached_prompt_tokens == 40
+    assert response.usage.reasoning_tokens == 12
     assert captured["model"] == config.model
     expected_body = (
         expected
@@ -85,6 +101,7 @@ def test_multimodal_labels_are_interleaved_with_images(monkeypatch) -> None:
         def create(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(
+                usage=None,
                 choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
             )
 

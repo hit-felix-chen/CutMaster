@@ -14,6 +14,7 @@ from cutmaster.contracts.workflow import WorkflowRequest, WorkflowResult
 from cutmaster.planners import Planner
 from cutmaster.renderer import Renderer
 from cutmaster.runtime.artifact_layout import ArtifactLayout
+from cutmaster.runtime.model_gateway import merge_usage_summaries
 from cutmaster.runtime.observability import log_event
 
 
@@ -122,6 +123,16 @@ class Orchestrator:
             dialogue_audio_included=request.audio_mode == "dialogue",
             stage_timings_sec=timings,
             wall_clock_sec=time.monotonic() - started,
+            model_usage={
+                "analyser": analysis.model_usage_summary,
+                "planners": planning.model_usage_summary,
+                "total": merge_usage_summaries(
+                    [
+                        analysis.model_usage_summary,
+                        planning.model_usage_summary,
+                    ]
+                ),
+            },
         )
         layout.workflow_result.write_text(
             json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",

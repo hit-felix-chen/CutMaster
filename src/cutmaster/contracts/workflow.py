@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ class WorkflowResult:
     dialogue_audio_included: bool
     stage_timings_sec: dict[str, float]
     wall_clock_sec: float
+    model_usage: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "1.0"
 
     def to_dict(self) -> dict[str, Any]:

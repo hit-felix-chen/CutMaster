@@ -7,7 +7,13 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, TypeVar
 
-from cutmaster.runtime.model_gateway import generate_text, request_json_with_retries
+from cutmaster.runtime.model_gateway import (
+    TOKEN_USAGE_FIELDS,
+    ModelUsage,
+    empty_usage_summary,
+    generate_text,
+    request_json_with_retries,
+)
 from cutmaster.configuration.schema import ModelConfig
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
@@ -28,11 +34,16 @@ class WorkflowContext:
         path: Path,
         *,
         model_call_tree_path: Path | None = None,
+        model_usage_path: Path | None = None,
+        stage_name: str = "planning",
     ) -> None:
         self._lock = RLock()
         self.path = path
         self._model_call_tree_path = model_call_tree_path
+        self._model_usage_path = model_usage_path
+        self._model_stage_name = stage_name
         self._model_call_tree_started_at = datetime.now().astimezone().isoformat()
+        self._prior_usage_calls = self._load_prior_usage_calls()
         self._model_calls: list[dict[str, Any]] = []
         self.data: dict[str, Any] = {
             "schema_version": "2.0",
@@ -40,6 +51,16 @@ class WorkflowContext:
             "artifacts": {},
             "script_versions": [],
         }
+
+    def _load_prior_usage_calls(self) -> list[dict[str, Any]]:
+        if self._model_usage_path is None or not self._model_usage_path.is_file():
+            return []
+        try:
+            payload = json.loads(self._model_usage_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        calls = payload.get("calls") if isinstance(payload, dict) else None
+        return list(calls) if isinstance(calls, list) else []
 
     def save(self) -> None:
         with self._lock:
@@ -105,11 +126,11 @@ class WorkflowContext:
         *,
         image_count: int,
     ) -> dict[str, Any] | None:
-        if self._model_call_tree_path is None:
+        if self._model_call_tree_path is None and self._model_usage_path is None:
             return None
         with self._lock:
             call = {
-                "call_id": len(self._model_calls) + 1,
+                "call_id": len(self._prior_usage_calls) + len(self._model_calls) + 1,
                 "task": package.task.value,
                 "operation": package.operation,
                 "started_at": datetime.now().astimezone().isoformat(),
@@ -158,6 +179,9 @@ class WorkflowContext:
                 },
                 "response": None,
                 "response_chars": 0,
+                "response_id": None,
+                "response_model": None,
+                "usage": None,
                 "error": None,
             }
             call["attempts"].append(attempt)
@@ -169,6 +193,9 @@ class WorkflowContext:
         *,
         status: str,
         response: str | None = None,
+        usage: ModelUsage | None = None,
+        response_id: str | None = None,
+        response_model: str | None = None,
         error: BaseException | None = None,
     ) -> None:
         if attempt is None:
@@ -179,6 +206,12 @@ class WorkflowContext:
             if response is not None:
                 attempt["response"] = response
                 attempt["response_chars"] = len(response)
+            if usage is not None:
+                attempt["usage"] = usage.to_dict()
+            if response_id is not None:
+                attempt["response_id"] = response_id
+            if response_model is not None:
+                attempt["response_model"] = response_model
             if error is not None:
                 attempt["error"] = {
                     "type": type(error).__name__,
@@ -232,10 +265,10 @@ class WorkflowContext:
                     tasks.append(task_node)
                 task_node["calls"].append(call)
             tree = {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "root": {
                     "node_type": "stage",
-                    "stage": "planning",
+                    "stage": self._model_stage_name,
                     "started_at": self._model_call_tree_started_at,
                     "completed_at": datetime.now().astimezone().isoformat(),
                     "status": status,
@@ -243,6 +276,7 @@ class WorkflowContext:
                     "attempt_count": sum(
                         len(call["attempts"]) for call in self._model_calls
                     ),
+                    "usage": self.model_usage_summary(),
                     "children": tasks,
                 },
             }
@@ -256,6 +290,97 @@ class WorkflowContext:
             )
             temporary_path.replace(self._model_call_tree_path)
             return self._model_call_tree_path
+
+    @staticmethod
+    def _usage_call(call: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "call_id": call["call_id"],
+            "task": call["task"],
+            "operation": call["operation"],
+            "started_at": call["started_at"],
+            "completed_at": call.get("completed_at"),
+            "status": call["status"],
+            "model": call["model"],
+            "attempts": [
+                {
+                    "attempt": attempt["attempt"],
+                    "prompt_id": attempt.get("prompt", {}).get("prompt_id"),
+                    "started_at": attempt["started_at"],
+                    "completed_at": attempt.get("completed_at"),
+                    "status": attempt["status"],
+                    "response_id": attempt.get("response_id"),
+                    "response_model": attempt.get("response_model"),
+                    "usage": attempt.get("usage"),
+                }
+                for attempt in call["attempts"]
+            ],
+        }
+
+    @staticmethod
+    def _summarize_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
+        summary = empty_usage_summary()
+        for call in calls:
+            model_name = str((call.get("model") or {}).get("name") or "unknown")
+            model_summary = summary["by_model"].setdefault(
+                model_name,
+                {
+                    "request_count": 0,
+                    "reported_usage_count": 0,
+                    "unreported_usage_count": 0,
+                    **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
+                },
+            )
+            for attempt in call.get("attempts") or []:
+                summary["request_count"] += 1
+                model_summary["request_count"] += 1
+                usage = attempt.get("usage")
+                count_field = (
+                    "reported_usage_count" if isinstance(usage, dict)
+                    else "unreported_usage_count"
+                )
+                summary[count_field] += 1
+                model_summary[count_field] += 1
+                if not isinstance(usage, dict):
+                    continue
+                for field_name in TOKEN_USAGE_FIELDS:
+                    value = int(usage.get(field_name) or 0)
+                    summary[field_name] += value
+                    model_summary[field_name] += value
+        return summary
+
+    def model_usage_summary(self, *, include_prior: bool = False) -> dict[str, Any]:
+        with self._lock:
+            calls = list(self._model_calls)
+            if include_prior:
+                calls = [*self._prior_usage_calls, *calls]
+            return self._summarize_calls(calls)
+
+    def save_model_usage(self) -> Path | None:
+        if self._model_usage_path is None:
+            return None
+        with self._lock:
+            calls = [
+                *self._prior_usage_calls,
+                *(self._usage_call(call) for call in self._model_calls),
+            ]
+            payload = {
+                "schema_version": "1.0",
+                "stage": self._model_stage_name,
+                "started_at": self._model_call_tree_started_at,
+                "updated_at": datetime.now().astimezone().isoformat(),
+                "summary": self._summarize_calls(calls),
+                "calls": calls,
+            }
+            self._model_usage_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self._model_usage_path.with_suffix(
+                self._model_usage_path.suffix + ".tmp"
+            )
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(self._model_usage_path)
+            return self._model_usage_path
 
     def call_prompt(
         self,
@@ -282,6 +407,9 @@ class WorkflowContext:
         )
         current_attempt: dict[str, Any] | None = None
         latest_response: str | None = None
+        latest_usage: ModelUsage | None = None
+        latest_response_id: str | None = None
+        latest_response_model: str | None = None
 
         def contextual_prompt() -> tuple[str, int]:
             if not snapshot:
@@ -300,7 +428,8 @@ class WorkflowContext:
             )
 
         def request() -> str:
-            nonlocal current_attempt, latest_response
+            nonlocal current_attempt, latest_response, latest_usage
+            nonlocal latest_response_id, latest_response_model
             prompt, context_chars = contextual_prompt()
             current_attempt = self._record_model_attempt_start(
                 call,
@@ -309,6 +438,9 @@ class WorkflowContext:
                 context_chars=context_chars,
             )
             latest_response = None
+            latest_usage = None
+            latest_response_id = None
+            latest_response_model = None
             request_started = time.monotonic()
             modality = "text_and_images" if image_data_urls else "text"
             log_event(
@@ -328,7 +460,7 @@ class WorkflowContext:
                 retry_failures=len(failure_reasons),
             )
             try:
-                raw = generate_text(
+                model_response = generate_text(
                     prompt,
                     config,
                     system_prompt=active_package.system_prompt,
@@ -359,7 +491,23 @@ class WorkflowContext:
                     error=exc,
                 )
                 raise
+            raw = model_response.content
             latest_response = raw
+            latest_usage = model_response.usage
+            latest_response_id = model_response.response_id
+            latest_response_model = model_response.response_model
+            usage_fields = (
+                {
+                    "prompt_tokens": latest_usage.prompt_tokens,
+                    "completion_tokens": latest_usage.completion_tokens,
+                    "total_tokens": latest_usage.total_tokens,
+                    "cached_prompt_tokens": latest_usage.cached_prompt_tokens,
+                    "uncached_prompt_tokens": latest_usage.uncached_prompt_tokens,
+                    "reasoning_tokens": latest_usage.reasoning_tokens,
+                }
+                if latest_usage is not None
+                else {"usage": "unreported"}
+            )
             log_event(
                 "INFO",
                 "model",
@@ -371,6 +519,7 @@ class WorkflowContext:
                 modality=modality,
                 elapsed_sec=time.monotonic() - request_started,
                 response_chars=len(raw),
+                **usage_fields,
             )
             return raw
 
@@ -392,8 +541,12 @@ class WorkflowContext:
                     else "request_failed"
                 ),
                 response=latest_response,
+                usage=latest_usage,
+                response_id=latest_response_id,
+                response_model=latest_response_model,
                 error=error,
             )
+            self.save_model_usage()
             failure_reasons.append(error_summary(error))
             if package.retry_builder is not None:
                 active_package = package.retry_builder(tuple(failure_reasons))
@@ -415,17 +568,25 @@ class WorkflowContext:
                     else "request_failed"
                 ),
                 response=latest_response,
+                usage=latest_usage,
+                response_id=latest_response_id,
+                response_model=latest_response_model,
                 error=exc,
             )
             self._finish_model_call(call, status="failed", error=exc)
+            self.save_model_usage()
             self.save_model_call_tree(status="failed")
             raise
         self._finish_model_attempt(
             current_attempt,
             status="accepted",
             response=latest_response,
+            usage=latest_usage,
+            response_id=latest_response_id,
+            response_model=latest_response_model,
         )
         self._finish_model_call(call, status="success")
+        self.save_model_usage()
         if package.output_artifact:
             self.set_artifact(package.output_artifact, result)
         return result

@@ -73,8 +73,13 @@ class Planner:
             )
         planning_history_path = diagnostics_dir / "planning_history.json"
         planning_calls_path = diagnostics_dir / "planning_calls.json"
+        model_usage_path = diagnostics_dir / "model_usage.json"
         if request.overwrite:
-            for stale_path in (planning_history_path, planning_calls_path):
+            for stale_path in (
+                planning_history_path,
+                planning_calls_path,
+                model_usage_path,
+            ):
                 if stale_path.exists():
                     stale_path.unlink()
         music_profile_path = output_dir / "music_profile.json"
@@ -92,6 +97,8 @@ class Planner:
         context = WorkflowContext(
             planning_history_path,
             model_call_tree_path=planning_calls_path,
+            model_usage_path=model_usage_path,
+            stage_name="planning",
         )
         context.set_artifact("video_description", video_description)
         context.set_artifact("video_summary", video_summary)
@@ -245,6 +252,7 @@ class Planner:
                 pairwise_scores,
             )
         context.save_model_call_tree()
+        context.save_model_usage()
         write_script(raw_script_path, raw_script)
         _write_json(selection_path, selection)
         timings["sequence_selection_and_review"] = (
@@ -278,6 +286,8 @@ class Planner:
             num_planned_clips=len(render_plan.clips),
             stage_timings_sec=timings,
             wall_clock_sec=time.monotonic() - started,
+            model_usage=str(model_usage_path.resolve()),
+            model_usage_summary=context.model_usage_summary(),
         )
         result.write(result_path)
         log_event(

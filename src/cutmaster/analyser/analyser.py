@@ -54,6 +54,12 @@ class Analyser:
             video_summary=str(material.video_summary_path.resolve()),
             analysis_history=str(material.analysis_history_path.resolve()),
             elapsed_sec=elapsed,
+            model_usage=(
+                str(material.model_usage_path.resolve())
+                if material.model_usage_path is not None
+                else None
+            ),
+            model_usage_summary=material.model_usage_summary,
         )
         result.write(output_dir / "analysis_result.json")
         log_event(

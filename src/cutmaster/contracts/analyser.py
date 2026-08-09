@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ class AnalysisResult:
     video_summary: str
     analysis_history: str
     elapsed_sec: float
+    model_usage: str | None = None
+    model_usage_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "1.0"
 
     def to_dict(self) -> dict[str, Any]:

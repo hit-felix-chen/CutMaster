@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,3 +18,5 @@ class MaterialAnalysisResult:
     analysis_history_path: Path
     video_description: dict[str, Any]
     video_summary: dict[str, Any]
+    model_usage_path: Path | None = None
+    model_usage_summary: dict[str, Any] = field(default_factory=dict)

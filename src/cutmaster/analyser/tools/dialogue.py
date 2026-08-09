@@ -29,7 +29,7 @@ SPEAKER_RE = re.compile(r"^(Speaker\s+\d+):\s*(.*)$", re.IGNORECASE | re.DOTALL)
 TERMINAL_RE = re.compile(r"[。！？.!?][\"'”’）)]*$")
 CJK_RE = re.compile(r"[\u3400-\u9fff]")
 def generate_boundary_decisions(prompt: str, config: LLMConfig, system_prompt: str) -> str:
-    return generate_text(prompt, config, system_prompt)
+    return generate_text(prompt, config, system_prompt).content
 
 
 @dataclass(frozen=True)
