@@ -24,8 +24,8 @@ CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 
 | 字母 | 智能体 | 代码入口 | 剪辑职责 |
 |---|---|---|---|
-| **M** | **Material Analyst** | `analyser/material_analyst.py` | 建立 Shot、Segment、台词和故事摘要等可复用素材记忆 |
-| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | 分析 BGM，编排 Slot 长度、剪辑节奏、情绪曲线和叙事结构 |
+| **M** | **Material Analyst** | `analyser/material_analyst.py` | 建立视频的 Shot、Segment、台词与故事摘要，以及完整音乐的可复用素材记忆 |
+| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | 将 Music Memory 投影到目标时长，编排 Slot 长度、剪辑节奏、情绪曲线和叙事结构 |
 | **S** | **Story Editor** | `planners/story_editor.py` | 用关键原声锚定情节、人物弧光和提示词意图 |
 | **T** | **Timeline Scout** | `planners/timeline_scout.py` | 沿原片时间线检索并验证每个 Slot 的候选镜头 |
 | **E** | **Edit Composer** | `planners/edit_composer.py` | 综合单镜头质量与镜头衔接，用 Beam Search 组接最终序列 |
@@ -46,15 +46,17 @@ M + ASTER = MASTER
 ```mermaid
 flowchart LR
     V["长视频 / 字幕"] --> M["M · Material Analyst"]
-    M --> MM["Material Memory"]
+    B["BGM"] --> M
+    M --> VM["Video Material Memory"]
+    M --> MU["Music Memory"]
 
-    B["BGM"] --> A["A · Arrangement Architect"]
-    P["用户提示词"] --> A
-    MM --> A
+    P["用户提示词"] --> A["A · Arrangement Architect"]
+    VM --> A
+    MU --> A
     A --> S["S · Story Editor"]
-    MM --> S
+    VM --> S
     S --> T["T · Timeline Scout"]
-    MM --> T
+    VM --> T
     T --> E["E · Edit Composer"]
     E --> R["R · Revision Editor"]
     R --> RP["RenderPlan"]
@@ -89,22 +91,26 @@ CLI
 ### 智能体与工具的边界
 
 - **Agent 负责决策**：理解素材、规划结构、选择故事锚点、构造候选空间、组接序列和复核脚本。
-- **Tool 负责能力**：ASR、缓存、音乐分析、媒体读取、运动计算、视觉评分和规划反馈等非智能体能力分别位于 `analyser/tools/` 与 `planners/tools/`。
+- **Tool 负责能力**：ASR、素材库、完整音乐分析、媒体读取、Music Profile 投影、运动计算、视觉评分和规划反馈等非智能体能力分别位于 `analyser/tools/` 与 `planners/tools/`。
 - **Planner 交付精确计划**：源窗口优化、Beat 微调和输出帧分配都属于剪辑决策，最终固化为不可变的 `RenderPlan`。
 - **Renderer 负责执行**：只按照 `RenderPlan` 准备人声、执行 FFmpeg 渲染和混音，不访问 LLM/VLM，也不修改规划。
 - **共享基础设施保持中立**：配置、契约、Prompt 注册和运行时能力分别位于 `configuration/`、`contracts/`、`prompting/` 与 `runtime/`。
 
 ## 核心机制
 
-### 1. 可复用的 Material Memory
+### 1. Material Library 与可复用的 Material Memory
 
-Material Analyst 先用 PySceneDetect 提取完整 Shot 边界并把 ASR 台词绑定到 Shot，再按 Scene-VLM 的 context-focus 方法，以 20 个连续 Shot 为上下文、中央 10 个 Shot 为判断目标、每个 Shot 三帧，顺序判断语义 Scene 边界。生成 Segment 后，以 Segment 为 VLM 调用单位，一次返回其中全部 Shot 的逐镜头视觉标注，再执行 Segment 聚合和故事摘要。结果按素材与分析配置缓存在 `.cutmaster/materials/`，同一原片可被不同提示词和 BGM 复用。
+Material Library 保存视频和音乐的只读托管副本，并用唯一的 **Material Name** 作为公开身份。未显式指定名称时，CLI 使用源文件的 filename stem 作为候选名；同一素材类型内，同一候选名称族与相同 SHA-256 再次添加时直接复用已有 Material 及其分析结果，同名但内容不同时则依次分配 `Name (2)`、`Name (3)`。即使文件内容相同，只要显式使用了不同候选名，也会建立两个可独立选择的 Material。
 
-Material Memory 独立于某一次剪辑方案，避免每次运行都重新理解整部视频。
+SHA-256 仅作为内部一致性校验，不拼入 Material Name，也不作为 CLI 选择参数。若托管源文件与记录的指纹不一致，该 Material 会被阻止进入分析、规划和渲染；当前素材只支持添加和删除，不支持就地替换。
+
+已完成的 Material Memory 会直接复用；中断的视频分析只能在字幕与分析规格未变时继续，防止不同输入的 checkpoint 被混合。
+
+Material Analyst 对视频使用 PySceneDetect 提取完整 Shot 边界并把 ASR 台词绑定到 Shot，再按 Scene-VLM 的 context-focus 方法判断语义 Scene 边界、生成逐镜头视觉标注、Segment 聚合和故事摘要。它也对完整音乐提取节拍、重音、能量和段落。两类结果分别形成 Video Material Memory 与 Music Memory，并缓存在 `.cutmaster/materials/`，独立于某一次剪辑请求。
 
 ### 2. 音乐驱动的 Slot 编排
 
-Arrangement Architect 通过 `planners/tools/music_analysis.py` 提取节拍、重音、能量和音乐段落，并把目标时长编排为一组 Slot。每个 Slot 同时表达：
+完整曲目的分析由 Analyser 中的 Material Analyst 完成。Planner 不重新解码和分析音乐；Arrangement Architect 从可复用 Music Memory 出发，根据本次目标时长进行截断或循环投影，生成 Planning 专属的 Music Profile，再把时间线编排为一组 Slot。每个 Slot 同时表达：
 
 - 时间预算与节奏位置；
 - 叙事功能和目标内容；
@@ -195,6 +201,20 @@ uv run cutmaster run \
   --overwrite
 ```
 
+`run --video/--audio` 保持兼容：传入原始路径时，CutMaster 会先把文件加入 Material Library。默认候选 Material Name 是文件名 stem，也可以分别用 `--video-material-name` 和 `--music-material-name` 指定。命令输出中的 `video_material_name` 与 `music_material_name` 是实际分配的公开名称；后续可按该名称精确复用已完成分析的素材：
+
+```bash
+uv run cutmaster run \
+  --video-material "feature-film" \
+  --music-material "trailer-score" \
+  --prompt "剪出一支突出主角成长与最终胜利的高燃短片" \
+  --output-dir /path/to/output \
+  --target-duration 60 \
+  --config config.toml
+```
+
+`--video-material` 与 `--music-material` 接收精确 Material Name，而不是文件路径或 SHA-256；被选择的素材必须已经完成对应分析。
+
 也可以使用模块入口：
 
 ```bash
@@ -208,6 +228,10 @@ uv run python -m cutmaster run --help
 | `--subtitle` | 使用已有字幕；未提供时运行 ASR |
 | `--prompt-type` | 提示词类型，默认 `event` |
 | `--video-title` | 提供给素材分析的片名 |
+| `--material-name` | `analyse` / `analyse-music` 添加素材时使用的候选名称；默认取 filename stem |
+| `--video-material-name` | `run` 通过原始视频路径添加素材时使用的候选名称 |
+| `--music-material-name` | `plan` / `run` 通过原始音乐路径添加素材时使用的候选名称 |
+| `--video-material`, `--music-material` | 按精确 Material Name 选择已完成分析的视频和音乐素材 |
 | `--max-clip-duration` | 限制单个候选片段的最长时长 |
 | `--audio-mode` | `bgm_only` 或 `dialogue` |
 | `--overwrite` | 覆盖已有输出并启动新一轮规划 |
@@ -215,10 +239,26 @@ uv run python -m cutmaster run --help
 三个阶段也可以独立运行：
 
 ```bash
-uv run cutmaster analyse --video source.mp4 --output-dir artifacts/cutmaster/analyser
-uv run cutmaster plan --analysis-result artifacts/cutmaster/analyser/analysis_result.json --audio bgm.mp3 --prompt "..." --output-dir artifacts/cutmaster/planners
+uv run cutmaster analyse \
+  --video source.mp4 \
+  --material-name "feature-film" \
+  --output-dir artifacts/cutmaster/analyser
+
+uv run cutmaster analyse-music \
+  --audio bgm.mp3 \
+  --material-name "trailer-score" \
+  --output-dir artifacts/cutmaster/analyser/music
+
+uv run cutmaster plan \
+  --video-material "feature-film" \
+  --music-material "trailer-score" \
+  --prompt "..." \
+  --output-dir artifacts/cutmaster/planners
+
 uv run cutmaster render --plan artifacts/cutmaster/planners/render_plan.json --audio-mode dialogue --output-dir artifacts/cutmaster/renderer
 ```
+
+`plan` 也接受显式分析结果路径：视频使用 `--analysis-result`，音乐使用 `--music-analysis-result`。为兼容原有调用，音乐还可以直接通过 `--audio` 传入；此时 Analyser 会先建立或复用对应的 Music Memory，再进入 Planner。
 
 ### Python API
 
@@ -254,7 +294,7 @@ print(result.output_video)
 | 配置段 | 所有者 | 主要内容 |
 |---|---|---|
 | `[llm]`, `[vlm]` | Runtime | 模型、接口、超时、重试和并发 |
-| `[analyser.*]` | Analyser | ASR、切镜、Scene/Shot 标注和素材缓存 |
+| `[analyser.*]` | Analyser | Material Library、ASR、切镜、Scene/Shot 标注、完整音乐分析和素材缓存 |
 | `[planners.slot_planning]` | Arrangement Architect | 目标镜头长度与重规划轮数 |
 | `[planners.dialogue_anchors]` | Story Editor | 锚点数量和最短时长 |
 | `[planners.candidate_retrieval]` | Timeline Scout | 候选数量、检索轮次和视觉验证 |
@@ -272,17 +312,19 @@ print(result.output_video)
 | 产物 | 含义 |
 |---|---|
 | `result.json` | 完整运行结果、耗时和产物路径 |
-| `analyser/analysis_result.json` | 可复用素材分析的正式索引 |
+| `analyser/analysis_result.json` | 本次使用的 Video Material Memory 正式索引 |
 | `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json` | 原始与重建后的台词数据 |
+| `analyser/music/music_analysis_result.json` | 本次使用的 Music Memory 正式索引 |
+| `analyser/music/music_memory.json` | 完整源曲目的节拍、重音、能量与段落分析 |
 | `planners/render_plan.json` | Planner 交付给 Renderer 的不可变、帧精确计划 |
-| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | Planning 中间产物 |
+| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | 本次目标时长的 Music Profile 与其他 Planning 中间产物 |
 | `planners/diagnostics/` | Beam 诊断、规划历史和模型调用树 |
 | `renderer/montage.mp4` | 可跨音频版本复用的无声蒙太奇 |
 | `renderer/output.mp4` | 当前 Render 的最终视频 |
 | `renderer/render_request.json`, `render_result.json` | 渲染请求与结果 |
 | `cutmaster.log` | 结构化运行日志 |
 
-素材级缓存目录还会保存 `video_description.json`、`video_summary.json` 和 `analysis_history.json`，用于跨任务复用与分析追踪。
+Material Library 的清单与托管素材位于配置指定的 `.cutmaster/materials/`。每个视频 Material 的分析目录保存 `video_description.json`、`video_summary.json` 和 `analysis_history.json`，每个音乐 Material 的分析目录保存 `music_memory.json`；CLI 通过 Material Name 解析这些缓存，而不要求调用方持有缓存路径。
 
 ## 源码结构
 
@@ -292,7 +334,7 @@ src/cutmaster/
 ├── analyser/
 │   ├── analyser.py                  # Analyser 公共服务
 │   ├── material_analyst.py          # M
-│   └── tools/                       # ASR、台词重建、缓存
+│   └── tools/                       # Material Library、ASR、台词重建、视频缓存、完整音乐分析
 ├── planners/
 │   ├── planner.py                   # Planner 公共服务
 │   ├── plan_compiler.py             # 帧时间线与 RenderPlan 编译
@@ -303,7 +345,7 @@ src/cutmaster/
 │   ├── timeline_scout.py            # T
 │   ├── edit_composer.py             # E
 │   ├── revision_editor.py           # R
-│   └── tools/                       # 音乐分析、检索、验证、评分、反馈
+│   └── tools/                       # Music Profile 投影、检索、验证、评分、反馈
 ├── renderer/                        # 独立音频准备与帧精确渲染
 ├── prompting/                       # Prompt 与响应契约注册
 ├── configuration/                   # 配置模型与加载

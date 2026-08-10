@@ -12,6 +12,14 @@ from cutmaster.runtime.media_probe import media_duration
 from cutmaster.timecode import parse_range
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class PlanningRequest:
     video_path: Path
@@ -24,6 +32,8 @@ class PlanningRequest:
     video_title: str = ""
     max_clip_duration_sec: float | None = None
     overwrite: bool = False
+    video_material_name: str = ""
+    music_material_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,7 @@ class MediaReference:
     size_bytes: int
     mtime_ns: int
     duration_sec: float
+    sha256: str = ""
 
     @classmethod
     def from_path(cls, path: Path) -> "MediaReference":
@@ -42,6 +53,7 @@ class MediaReference:
             size_bytes=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
             duration_sec=media_duration(resolved),
+            sha256=_file_sha256(resolved),
         )
 
     def validate(self) -> None:
@@ -51,6 +63,10 @@ class MediaReference:
         stat = path.stat()
         if stat.st_size != self.size_bytes or stat.st_mtime_ns != self.mtime_ns:
             raise ValueError(f"Planned media has changed since planning: {path}")
+        if self.sha256 and _file_sha256(path) != self.sha256:
+            raise ValueError(
+                f"Planned media fingerprint has changed since planning: {path}"
+            )
 
 
 @dataclass(frozen=True)
@@ -178,6 +194,7 @@ class PlanningResult:
     num_planned_clips: int
     stage_timings_sec: dict[str, float]
     wall_clock_sec: float
+    music_memory: str | None = None
     model_usage: str | None = None
     model_usage_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "1.0"

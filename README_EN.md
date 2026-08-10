@@ -24,8 +24,8 @@ The complete CutMaster workflow is organized as a **MASTER** team:
 
 | Letter | Agent | Code entry | Editorial responsibility |
 |---|---|---|---|
-| **M** | **Material Analyst** | `analyser/material_analyst.py` | Builds reusable material memory from Shots, Segments, dialogue, and story summaries |
-| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | Profiles the BGM and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
+| **M** | **Material Analyst** | `analyser/material_analyst.py` | Builds reusable memory for video Shots, Segments, dialogue, and story summaries, as well as complete music tracks |
+| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | Projects Music Memory onto the target duration and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
 | **S** | **Story Editor** | `planners/story_editor.py` | Uses key source dialogue to anchor plot, character arcs, and prompt intent |
 | **T** | **Timeline Scout** | `planners/timeline_scout.py` | Searches the source timeline and validates candidates for every Slot |
 | **E** | **Edit Composer** | `planners/edit_composer.py` | Combines unary visual quality and pairwise transitions with Beam Search |
@@ -46,15 +46,17 @@ M + ASTER = MASTER
 ```mermaid
 flowchart LR
     V["Long video / subtitles"] --> M["M · Material Analyst"]
-    M --> MM["Material Memory"]
+    B["BGM"] --> M
+    M --> VM["Video Material Memory"]
+    M --> MU["Music Memory"]
 
-    B["BGM"] --> A["A · Arrangement Architect"]
-    P["User prompt"] --> A
-    MM --> A
+    P["User prompt"] --> A["A · Arrangement Architect"]
+    VM --> A
+    MU --> A
     A --> S["S · Story Editor"]
-    MM --> S
+    VM --> S
     S --> T["T · Timeline Scout"]
-    MM --> T
+    VM --> T
     T --> E["E · Edit Composer"]
     E --> R["R · Revision Editor"]
     R --> RP["RenderPlan"]
@@ -72,12 +74,14 @@ The executable call structure is:
 CLI
 └── Orchestrator
     ├── Analyser
-    ├── Planner / ASTERTeam
-    │   ├── ArrangementArchitectAgent
-    │   ├── StoryEditorAgent
-    │   ├── TimelineScoutAgent
-    │   ├── EditComposerAgent
-    │   └── RevisionEditorAgent
+    │   └── MaterialAnalystAgent
+    ├── Planner
+    │   ├── ASTERTeam
+    │   │   ├── ArrangementArchitectAgent
+    │   │   ├── StoryEditorAgent
+    │   │   ├── TimelineScoutAgent
+    │   │   ├── EditComposerAgent
+    │   │   └── RevisionEditorAgent
     │   └── plan compiler / source-window optimization
     └── Renderer
         ├── dialogue audio preparation
@@ -87,22 +91,28 @@ CLI
 ### Agent–tool boundary
 
 - **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, compose the sequence, and review the script.
-- **Tools provide capabilities**: ASR, caching, music analysis, media access, motion computation, visual scoring, and planning feedback live under `analyser/tools/` and `planners/tools/`.
+- **Tools provide capabilities**: ASR, the Material Library, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and planning feedback live under `analyser/tools/` and `planners/tools/`.
 - **Planner finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
 - **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating planning artifacts.
 - **Shared infrastructure remains neutral**: configuration, contracts, prompt registration, and runtime capabilities live under `configuration/`, `contracts/`, `prompting/`, and `runtime/`.
 
 ## Core mechanisms
 
-### 1. Reusable Material Memory
+### 1. Material Library and reusable Material Memory
 
-The Material Analyst first detects the complete PySceneDetect Shot partition and binds ASR dialogue to Shots. It then applies a Scene-VLM context-focus pass: 20 consecutive Shots provide context, the central 10 receive sequential boundary decisions, and every Shot contributes three labelled frames. After semantic Segments are created, the analyser submits one VLM request per Segment and receives ordered per-Shot annotations for every Shot in that Segment, then performs Segment aggregation and story summarization. Results are cached under `.cutmaster/materials/` by source material and analysis configuration, so the same video can support different prompts and BGM tracks.
+The Material Library stores read-only managed copies of video and music sources and uses a unique **Material Name** as each asset's public identity. When no name is supplied, the CLI uses the source filename stem as the candidate name. Within one Material type, adding the same SHA-256 bytes under the same candidate-name family reuses the existing Material and its completed analysis. Adding different bytes under the same family allocates `Name (2)`, `Name (3)`, and so on. Equal bytes explicitly submitted under different candidate names remain two independently selectable Materials.
 
-Material Memory is independent of any single edit plan, avoiding repeated full-video understanding on every run.
+SHA-256 is only an internal consistency check. It is not embedded in the Material Name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, planning, and rendering. Sources can currently be added or deleted, but not replaced in place.
+
+Completed Material Memory is reused directly. An interrupted video analysis can
+resume only when its subtitle and analysis specification are unchanged, so
+checkpoints from incompatible inputs are never mixed.
+
+For video, the Material Analyst detects the complete PySceneDetect Shot partition and binds ASR dialogue to Shots. It applies the Scene-VLM context-focus pass, creates semantic Segments, produces ordered per-Shot annotations, and aggregates story summaries. For complete music tracks, it extracts tempo, beats, accents, energy, and musical sections. These outputs form Video Material Memory and Music Memory under `.cutmaster/materials/`, independently of any single editing request.
 
 ### 2. Music-aware Slot arrangement
 
-The Arrangement Architect uses `planners/tools/music_analysis.py` to extract beats, accents, energy, and musical sections, then arranges the target duration into a sequence of Slots. Each Slot expresses:
+Complete-track music analysis belongs to the Material Analyst in Analyser. Planner does not decode and analyse the source track again. The Arrangement Architect projects reusable Music Memory onto the requested output duration—truncating or looping it as needed—to create a planning-specific Music Profile, then arranges that duration into a sequence of Slots. Each Slot expresses:
 
 - its time budget and rhythmic position;
 - its narrative function and desired content;
@@ -193,6 +203,28 @@ uv run cutmaster run \
   --overwrite
 ```
 
+The existing `run --video/--audio` form remains supported. Raw paths are first
+added to the Material Library; their candidate Material Names default to the
+filename stems and can be overridden with `--video-material-name` and
+`--music-material-name`. The `analyse` commands report the final
+`material_name`; a full run reports `video_material_name` and
+`music_material_name`. Later calls can reuse completed analysis by selecting
+those exact public names:
+
+```bash
+uv run cutmaster run \
+  --video-material "feature-film" \
+  --music-material "trailer-score" \
+  --prompt "Create an energetic cut centered on the protagonist's growth and final victory" \
+  --output-dir /path/to/output \
+  --target-duration 60 \
+  --config config.toml
+```
+
+`--video-material` and `--music-material` accept exact Material Names, not file
+paths or SHA-256 values. The selected Materials must already have completed the
+corresponding analysis.
+
 The module entry point is also available:
 
 ```bash
@@ -206,9 +238,43 @@ Common optional arguments:
 | `--subtitle` | Reuse an existing subtitle file; otherwise run ASR |
 | `--prompt-type` | Prompt category, defaults to `event` |
 | `--video-title` | Source title supplied to material analysis |
+| `--material-name` | Candidate name used by `analyse` / `analyse-music`; defaults to the filename stem |
+| `--video-material-name` | Candidate name used when `run` adds a raw video path |
+| `--music-material-name` | Candidate name used when `plan` / `run` adds a raw music path |
+| `--video-material`, `--music-material` | Select analysed video and music by exact Material Name |
 | `--max-clip-duration` | Maximum duration for an individual candidate clip |
 | `--audio-mode` | `bgm_only` or `dialogue` |
 | `--overwrite` | Replace an existing output and start a fresh planning run |
+
+The three stages are also independently callable:
+
+```bash
+uv run cutmaster analyse \
+  --video source.mp4 \
+  --material-name "feature-film" \
+  --output-dir artifacts/cutmaster/analyser
+
+uv run cutmaster analyse-music \
+  --audio bgm.mp3 \
+  --material-name "trailer-score" \
+  --output-dir artifacts/cutmaster/analyser/music
+
+uv run cutmaster plan \
+  --video-material "feature-film" \
+  --music-material "trailer-score" \
+  --prompt "..." \
+  --output-dir artifacts/cutmaster/planners
+
+uv run cutmaster render \
+  --plan artifacts/cutmaster/planners/render_plan.json \
+  --audio-mode dialogue \
+  --output-dir artifacts/cutmaster/renderer
+```
+
+`plan` also accepts explicit analysis-result paths: `--analysis-result` for
+video and `--music-analysis-result` for music. For compatibility, a raw track
+may still be passed with `--audio`; Analyser then builds or reuses its Music
+Memory before Planner starts.
 
 ### Python API
 
@@ -243,7 +309,7 @@ The default configuration lives in [`config.toml`](config.toml) and follows the 
 | Section | Owner | Main controls |
 |---|---|---|
 | `[llm]`, `[vlm]` | Runtime | Models, endpoints, timeouts, retries, and concurrency |
-| `[analyser.*]` | Analyser | ASR, shot/scene annotation, and material caching |
+| `[analyser.*]` | Analyser | Material Library, ASR, shot/scene annotation, complete-track music analysis, and material caching |
 | `[planners.*]` | Planner | Slot, anchor, retrieval, Beam, review, and source-window controls |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
@@ -256,15 +322,20 @@ Each run keeps auditable intermediate artifacts under `output_dir`:
 | Artifact | Meaning |
 |---|---|
 | `result.json` | Final result, timings, and artifact paths |
-| `analyser/analysis_result.json` | Formal reusable-analysis index |
+| `analyser/analysis_result.json` | Formal index of the selected Video Material Memory |
+| `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json` | Source and reconstructed dialogue data |
+| `analyser/music/music_analysis_result.json` | Formal index of the selected Music Memory |
+| `analyser/music/music_memory.json` | Complete-track beats, accents, energy, and section analysis |
+| `planners/planning_result.json` | Planner stage result and planning summary |
 | `planners/render_plan.json` | Immutable frame-exact handoff to Renderer |
-| `planners/*.json`, `planners/diagnostics/` | Planning artifacts and diagnostics |
+| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | Target-duration Music Profile and other planning artifacts |
+| `planners/diagnostics/` | Beam diagnostics, planning history, and model-call traces |
 | `renderer/montage.mp4` | Reusable silent visual montage |
 | `renderer/output.mp4` | Final rendered video |
 | `renderer/render_request.json`, `render_result.json` | Render request and result |
 | `cutmaster.log` | Structured runtime log |
 
-The material cache additionally stores `video_description.json`, `video_summary.json`, and `analysis_history.json` for cross-run reuse and analysis tracing.
+The Material Library manifest and managed source copies live under the configured `.cutmaster/materials/` root. Each video Material's analysis directory stores `video_description.json`, `video_summary.json`, and `analysis_history.json`; each music Material's analysis directory stores `music_memory.json`. CLI callers resolve these caches by Material Name and do not need to retain their internal paths.
 
 ## Source layout
 
@@ -272,18 +343,20 @@ The material cache additionally stores `video_description.json`, `video_summary.
 src/cutmaster/
 ├── orchestrator.py                  # complete three-stage entry point
 ├── analyser/
+│   ├── analyser.py                  # public Analyser service
 │   ├── material_analyst.py          # M
-│   └── tools/                       # ASR, dialogue reconstruction, cache
+│   └── tools/                       # Material Library, ASR, dialogue reconstruction, video cache, complete-track music analysis
 ├── planners/
 │   ├── planner.py                   # public planning service
 │   ├── plan_compiler.py             # frame timeline and RenderPlan compiler
+│   ├── source_window_optimizer.py   # source-window optimization
 │   ├── aster_team.py                # ASTER team orchestrator
 │   ├── arrangement_architect.py     # A
 │   ├── story_editor.py              # S
 │   ├── timeline_scout.py            # T
 │   ├── edit_composer.py             # E
 │   ├── revision_editor.py           # R
-│   └── tools/                       # music, retrieval, validation, scoring, feedback
+│   └── tools/                       # Music Profile projection, retrieval, validation, scoring, feedback
 ├── renderer/                        # independent audio and frame-exact rendering
 ├── prompting/                       # prompts and response-contract registry
 ├── configuration/                   # configuration models and loading

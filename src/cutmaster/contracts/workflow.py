@@ -23,6 +23,8 @@ class WorkflowRequest:
     max_clip_duration_sec: float | None = None
     audio_mode: AudioMode = "dialogue"
     overwrite: bool = False
+    video_material_name: str = ""
+    music_material_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,10 @@ class WorkflowResult:
     stage_timings_sec: dict[str, float]
     wall_clock_sec: float
     model_usage: dict[str, Any] = field(default_factory=dict)
+    music_analysis_result: str = ""
+    video_material_name: str = ""
+    music_material_name: str = ""
+    music_material_directory: str = ""
     schema_version: str = "1.0"
 
     def to_dict(self) -> dict[str, Any]:

@@ -18,6 +18,7 @@ class ArtifactLayout:
         for directory in (
             layout.root,
             layout.analyser_dir,
+            layout.music_analyser_dir,
             layout.planners_dir,
             layout.planning_diagnostics_dir,
             layout.renderer_dir,
@@ -28,6 +29,10 @@ class ArtifactLayout:
     @property
     def analyser_dir(self) -> Path:
         return self.root / "analyser"
+
+    @property
+    def music_analyser_dir(self) -> Path:
+        return self.analyser_dir / "music"
 
     @property
     def planners_dir(self) -> Path:
@@ -44,6 +49,10 @@ class ArtifactLayout:
     @property
     def analysis_result(self) -> Path:
         return self.analyser_dir / "analysis_result.json"
+
+    @property
+    def music_analysis_result(self) -> Path:
+        return self.music_analyser_dir / "music_analysis_result.json"
 
     @property
     def planning_result(self) -> Path:

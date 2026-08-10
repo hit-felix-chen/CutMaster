@@ -36,8 +36,8 @@ timeout_sec = 600.0
 max_retries = 3
 max_concurrency = 10
 
-# Stage 1: reusable source-material analysis
-# material_cache_dir: 按视频素材和分析配置保存可复用中间产物与最终描述的根目录。
+# Stage 1: reusable video and music Material analysis
+# material_cache_dir: Material Library 根目录；保存清单、只读托管源文件和可复用分析结果。
 [analyser.material_analysis]
 material_cache_dir = ".cutmaster/materials"
 
@@ -86,10 +86,10 @@ shot_sample_frames = 5
 max_images_per_request = 250
 max_shots_per_request = 20
 
-# Stage 2: music analysis currently has no user-tunable parameters.
-# 本阶段由 librosa 自动生成能量、onset、beat、重音和音乐段落画像。
+# 完整音乐分析同样由 Analyser 负责，当前没有用户可调参数；librosa 会生成
+# 能量、onset、beat、重音和音乐段落组成的可复用 Music Memory。
 
-# Stage 3: music-aware edit-Slot planning
+# Stage 2: music-aware edit-Slot planning
 # target_clip_duration_sec: 画面 Slot 的目标时长（秒）；平均时长须接近该值，
 # 单个 Slot 最长为该值的 1.5 倍。长原声通过 J/L-cut 跨 Slot，不会拉长画面 Slot。
 # replan_max_rounds: 候选不足或严格时序路径无解时，最多重新规划 Slot 的轮数。
@@ -97,14 +97,14 @@ max_shots_per_request = 20
 target_clip_duration_sec = 4.0
 replan_max_rounds = 3
 
-# Stage 4: original-dialogue anchor selection
+# Stage 3: original-dialogue anchor selection
 # max_anchors: 一条成片最多选择多少段原声；只保留最有剧情价值的少量台词。
 # min_anchor_duration_sec: 每段原声的最短连续时长，过滤无意义的零碎短句。
 [planners.dialogue_anchors]
 max_anchors = 5
 min_anchor_duration_sec = 3
 
-# Stage 5a: structured candidate retrieval and visual validation
+# Stage 4a: structured candidate retrieval and visual validation
 # candidates_per_slot: 每个非锚点 Slot 最终希望保留的候选片段数。
 # retrieval_max_rounds: 重试次数。指定 Segment 先正常检索一次，再重试该次数；
 # 随后在“指定 Segment＋前后各一个 Segment”范围内再检索该次数。
@@ -123,17 +123,17 @@ motion_sample_fps = 2.0
 motion_workers = 4
 static_kinetic_energy_threshold = 0.05
 
-# Stage 5b: chronological sequence selection
+# Stage 4b: chronological sequence selection
 # beam_width: Beam Search 每一层保留的最高分路径数量；越大搜索更充分但占用更多计算。
 [planners.beam_search]
 beam_width = 8
 
-# Stage 6: candidate-constrained script review
+# Stage 5: candidate-constrained script review
 # review_rounds: 在既有候选池内让 LLM 复核并提出脚本替换的轮数。
 [planners.script_review]
 review_rounds = 1
 
-# Stage 7: source-window optimization against visual cuts and music beats
+# Stage 6: source-window optimization against visual cuts and music beats
 # search_margin_sec: 围绕候选窗口搜索更合适视觉切点的时间范围（秒）。
 # min_boundary_distance_sec: 内部切点距离片段首尾的首选安全距离（秒）。
 # max_workers: 并行执行源窗口切点优化的最大 worker 数。
@@ -142,7 +142,7 @@ search_margin_sec = 2.0
 min_boundary_distance_sec = 1.0
 max_workers = 8
 
-# Stage 8: frame-exact rendering and BGM mixing
+# Stage 7: frame-exact rendering and BGM mixing
 # width/height: 最终视频画布的像素尺寸。
 # fps: 最终输出帧率，同时定义帧精确时间轴的网格。
 # encoder: FFmpeg 视频编码器；auto 会选择当前环境可用的合适编码器。

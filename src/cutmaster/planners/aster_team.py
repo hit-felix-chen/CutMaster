@@ -59,12 +59,12 @@ class ASTERTeam:
 
     def profile_music(
         self,
-        audio_path: Path,
+        music_memory: dict[str, Any],
         target_duration_sec: float,
         output_path: Path,
     ) -> dict[str, Any]:
         return self.arrangement_architect.profile_music(
-            audio_path,
+            music_memory,
             target_duration_sec,
             output_path,
         )

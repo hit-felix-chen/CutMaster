@@ -1,6 +1,11 @@
 """Public CutMaster workflow contracts."""
 
-from cutmaster.contracts.analyser import AnalysisRequest, AnalysisResult
+from cutmaster.contracts.analyser import (
+    AnalysisRequest,
+    AnalysisResult,
+    MusicAnalysisRequest,
+    MusicAnalysisResult,
+)
 from cutmaster.contracts.planning import (
     MediaReference,
     PlanningRequest,
@@ -13,6 +18,8 @@ from cutmaster.contracts.workflow import WorkflowRequest, WorkflowResult
 __all__ = [
     "AnalysisRequest",
     "AnalysisResult",
+    "MusicAnalysisRequest",
+    "MusicAnalysisResult",
     "MediaReference",
     "PlanningRequest",
     "PlanningResult",

@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from cutmaster.contracts.analyser import AnalysisResult
+from cutmaster.contracts.analyser import AnalysisResult, MusicAnalysisResult
 from cutmaster.contracts.planning import PlanningResult
 from cutmaster.contracts.renderer import RenderResult
 from cutmaster.contracts.workflow import WorkflowRequest
@@ -21,7 +21,7 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
             pass
 
         def analyse(self, request):
-            calls.append(("analyser", request.output_dir))
+            calls.append(("analyser.video", request.output_dir))
             return AnalysisResult(
                 status="success",
                 source_video=str(source),
@@ -33,13 +33,26 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
                 video_summary=str(tmp_path / "material" / "video_summary.json"),
                 analysis_history=str(tmp_path / "material" / "analysis_history.json"),
                 elapsed_sec=1.0,
+                material_name="Source",
+            )
+
+        def analyse_music(self, request):
+            calls.append(("analyser.music", request.output_dir))
+            return MusicAnalysisResult(
+                status="success",
+                source_audio=str(bgm),
+                material_name="BGM",
+                material_fingerprint="",
+                material_directory=str(tmp_path / "music"),
+                music_memory=str(tmp_path / "music" / "music_memory.json"),
+                elapsed_sec=0.5,
             )
 
     class FakePlanner:
         def __init__(self, _config) -> None:
             pass
 
-        def plan(self, request, _analysis):
+        def plan(self, request, _analysis, _music_analysis):
             calls.append(("planners", request.output_dir))
             return PlanningResult(
                 status="success",
@@ -97,11 +110,14 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
     )
 
     assert calls == [
-        ("analyser", root / "analyser"),
+        ("analyser.video", root / "analyser"),
+        ("analyser.music", root / "analyser" / "music"),
         ("planners", root / "planners"),
         ("renderer", root / "renderer"),
     ]
     assert result.output_video == str(root / "renderer" / "output.mp4")
+    assert result.video_material_name == "Source"
+    assert result.music_material_name == "BGM"
     assert json.loads((root / "result.json").read_text())["render_plan"] == str(
         root / "planners" / "render_plan.json"
     )

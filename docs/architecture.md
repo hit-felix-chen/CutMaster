@@ -10,6 +10,9 @@ cutmaster/
 │   ├── analyser.py
 │   ├── material_analyst.py
 │   └── tools/
+│       ├── material_library.py
+│       ├── music_analysis.py
+│       └── ...
 ├── planners/
 │   ├── planner.py
 │   ├── plan_compiler.py
@@ -35,12 +38,19 @@ cutmaster/
 ## Stage contracts
 
 ```text
-Analyser -> analyser/analysis_result.json
-Planner  -> planners/render_plan.json
-Renderer -> renderer/render_result.json
+Analyser(video) -> analyser/analysis_result.json
+Analyser(music) -> analyser/music/music_analysis_result.json
+Planner         -> planners/planning_result.json
+Planner         -> planners/render_plan.json
+Renderer        -> renderer/render_result.json
 ```
 
-`analysis_result.json` references the source-level Material Memory cache.
+`analysis_result.json` identifies the selected video Material and references
+its reusable Video Material Memory. `music_analysis_result.json` does the same
+for a complete music Material and its reusable Music Memory. Planner consumes
+both results, projects Music Memory onto the requested output duration as a
+Music Profile, and makes all editorial decisions.
+
 `render_plan.json` is the only formal handoff from Planner to Renderer. It
 contains exact source ranges and output frame ranges and never contains
 prepared audio paths or temporary render state. `render_result.json` describes
@@ -50,8 +60,18 @@ one concrete BGM-only or dialogue render.
 
 - `orchestrator.py` validates and coordinates a complete run, but contains no
   analysis, editorial, or rendering implementation.
-- `analyser/` builds reusable Shot, Segment, dialogue, and story memory.
-- `planners/planner.py` coordinates ASTER and owns every editorial decision.
+- `analyser/analyser.py` owns Material ingestion and resolution. It builds or
+  reuses Video Material Memory and complete-track Music Memory.
+- `analyser/tools/material_library.py` assigns public Material Names, stores
+  managed source copies, and checks their internal SHA-256 fingerprints.
+- `analyser/` builds reusable Shot, Segment, dialogue, story, beat, accent,
+  energy, and music-section memory. None of these outputs depends on the edit
+  prompt or requested output duration.
+- `planners/planner.py` consumes the two analysed Materials, coordinates ASTER,
+  and owns every editorial decision.
+- `planners/tools/music_analysis.py` projects existing Music Memory into the
+  target-duration-specific Music Profile; it is not the owner of source music
+  analysis.
 - `planners/plan_compiler.py` finalizes durations and the output frame grid.
 - `planners/source_window_optimizer.py` chooses source windows before the plan
   is handed to rendering.
@@ -60,12 +80,41 @@ one concrete BGM-only or dialogue render.
 - `prompting/`, `configuration/`, `contracts/`, and `runtime/` remain shared
   infrastructure.
 
+## Material identity and reuse
+
+A Material's public identity is its exact Material Name. When no name is
+provided, the CLI uses the source filename stem as the candidate name. Names
+are unique within each Material type.
+
+- Adding the same SHA-256 bytes again under the same candidate-name family
+  reuses the existing Material and any completed analysis.
+- Adding different bytes under the same candidate-name family allocates the
+  next public name, such as `Film (2)` or `Film (3)`.
+- Adding the same bytes under a different explicit candidate name creates a
+  distinct Material with its own public identity.
+- SHA-256 is an internal consistency check. It is not part of the Material
+  Name, is not accepted as a CLI selector, and is not a global deduplication
+  key.
+- A fingerprint mismatch makes a Material inconsistent and blocks it from
+  analysis, planning, and rendering. Source replacement is unsupported.
+- Completed Material Memory is reused as one immutable result. An interrupted
+  video analysis resumes only when its subtitle and analysis specification are
+  unchanged, preventing incompatible checkpoints from being mixed.
+
+`analyse --material-name` and `analyse-music --material-name` control the
+candidate names used while adding raw files. `plan` and `run` accept
+`--video-material` and `--music-material` to resolve already analysed inputs by
+exact public names. The existing `run --video ... --audio ...` form remains
+supported and implicitly adds or reuses the corresponding Materials.
+
 ## Dependency direction
 
 ```text
 CLI -> Orchestrator -> Analyser / Planner / Renderer
 
+Analyser -> Material Library -> Video Material Memory / Music Memory
 Planner  -> ASTERTeam -> ASTER agents -> planner tools
+Planner  -> Music Memory -> Music Profile
 Renderer -> Planning contracts / Renderer contracts / media runtime
 
 Renderer -X-> Analyser
@@ -82,15 +131,28 @@ render from the same plan. Changing FPS or any edit timing requires a new plan.
 ```text
 output_dir/
 ├── analyser/
+│   ├── analysis_result.json
+│   ├── source.srt
+│   ├── dialogue_merged.srt
+│   ├── dialogues.json
+│   └── music/
+│       ├── music_analysis_result.json
+│       └── music_memory.json
 ├── planners/
+│   ├── planning_result.json
+│   ├── render_plan.json
+│   ├── music_profile.json
 │   └── diagnostics/
 ├── renderer/
+│   ├── output.mp4
+│   └── render_result.json
 ├── result.json
 └── cutmaster.log
 ```
 
-The root files summarize the whole workflow. Every other artifact is owned by
-exactly one stage.
+The run-local Analyser results identify the selected Materials; their reusable
+memory lives in the configured Material Library. The root files summarize the
+whole workflow. Every other artifact is owned by exactly one stage.
 
 ## Public APIs
 
@@ -98,10 +160,19 @@ exactly one stage.
 from cutmaster import Analyser, Orchestrator, Planner, Renderer
 from cutmaster.contracts import (
     AnalysisRequest,
+    AnalysisResult,
+    MusicAnalysisRequest,
+    MusicAnalysisResult,
     PlanningRequest,
     RenderRequest,
     WorkflowRequest,
 )
+
+analysis = analyser.analyse(analysis_request)
+music_analysis = analyser.analyse_music(music_analysis_request)
+planning = planner.plan(planning_request, analysis, music_analysis)
 ```
 
-Internal agents and tools are not compatibility entry points.
+`Analyser.resolve_video(name)` and `Analyser.resolve_music(name)` are the
+programmatic name-based selectors. Internal agents, tools, cache paths, and
+fingerprints are not compatibility entry points.

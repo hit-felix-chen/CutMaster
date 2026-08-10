@@ -187,6 +187,8 @@ def compile_render_plan(
             "prompt": request.prompt,
             "prompt_type": request.prompt_type,
             "video_title": request.video_title or request.video_path.stem,
+            "video_material_name": request.video_material_name,
+            "music_material_name": request.music_material_name,
             "target_output_length_sec": request.target_output_length_sec,
             "target_shot_length_sec": request.target_shot_length_sec,
             "music_profile_schema_version": music_profile.get("schema_version"),

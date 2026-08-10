@@ -26,6 +26,7 @@ from cutmaster.analyser.tools.cache import (
 from cutmaster.contracts.material import MaterialAnalysisResult
 from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.analyser.tools.dialogue import postprocess_dialogues
+from cutmaster.analyser.tools.music_analysis import analyze_music_memory
 from cutmaster.analyser.scene_segmenter import (
     SCENE_SEGMENTATION_VERSION,
     build_segments_from_scene_boundaries,
@@ -1348,7 +1349,45 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
             else None
         ),
         model_usage_summary=empty_usage_summary(),
+        analysis_reused=True,
     )
+
+
+def _require_compatible_incomplete_analysis(
+    material_directory: Path,
+    analysis_signature: dict[str, Any],
+) -> None:
+    """Prevent checkpoints from different analysis inputs being mixed."""
+
+    spec_path = material_directory / "analysis_spec.json"
+    existing = _read_json_checkpoint(spec_path)
+    if existing is not None:
+        if existing != analysis_signature:
+            raise ValueError(
+                "Incomplete Material analysis was created with a different "
+                "subtitle or analysis configuration; resume with the original "
+                "inputs or add the source under a different Material Name"
+            )
+        return
+    if spec_path.exists():
+        raise ValueError(f"Material analysis specification is invalid: {spec_path}")
+    stale_entries = (
+        [
+            path
+            for path in material_directory.iterdir()
+            if path.name != ".analysis.lock"
+        ]
+        if material_directory.is_dir()
+        else []
+    )
+    if stale_entries:
+        raise ValueError(
+            "Incomplete Material analysis has checkpoints without a recorded "
+            "analysis specification; add the source under a different Material "
+            "Name before retrying"
+        )
+    material_directory.mkdir(parents=True, exist_ok=True)
+    _write_json_checkpoint(spec_path, analysis_signature)
 
 
 def _analyse_video_material(
@@ -1362,10 +1401,11 @@ def _analyse_video_material(
     annotation_config: ShotAnnotationConfig,
     llm_config: LLMConfig,
     vlm_config: VLMConfig,
+    material_directory_override: Path | None = None,
 ) -> MaterialAnalysisResult:
     if annotation_config.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must be exactly 5")
-    material_directory, analysis_signature = _material_directory(
+    legacy_material_directory, analysis_signature = _material_directory(
         video_path,
         video_title,
         provided_subtitle,
@@ -1377,9 +1417,19 @@ def _analyse_video_material(
         llm_config,
         vlm_config,
     )
+    material_directory = (
+        material_directory_override.resolve()
+        if material_directory_override is not None
+        else legacy_material_directory
+    )
     cached = _cache_result(material_directory)
     if cached is not None:
         return cached
+    if material_directory_override is not None:
+        _require_compatible_incomplete_analysis(
+            material_directory,
+            analysis_signature,
+        )
     log_event(
         "INFO",
         "analyser",
@@ -1796,7 +1846,7 @@ def _analyse_video_material(
 
 
 class MaterialAnalystAgent:
-    """M agent: build reusable material memory from long-form source footage."""
+    """M agent: build reusable memory for video and music Materials."""
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -1806,6 +1856,8 @@ class MaterialAnalystAgent:
         video_path: Path,
         video_title: str,
         provided_subtitle: Path | None,
+        *,
+        material_directory: Path | None = None,
     ) -> MaterialAnalysisResult:
         return _analyse_video_material(
             video_path,
@@ -1818,7 +1870,12 @@ class MaterialAnalystAgent:
             self.config.analyser.shot_annotation,
             self.config.llm,
             self.config.vlm,
+            material_directory,
         )
+
+    def analyse_music(self, audio_path: Path) -> dict[str, Any]:
+        """Build edit-independent Music Memory for the complete source track."""
+        return analyze_music_memory(audio_path)
 
 
 __all__ = ["MaterialAnalystAgent"]

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 from cutmaster.analyser import Analyser
 from cutmaster.configuration.schema import AppConfig
-from cutmaster.contracts.analyser import AnalysisRequest
+from cutmaster.contracts.analyser import AnalysisRequest, MusicAnalysisRequest
 from cutmaster.contracts.planning import PlanningRequest
 from cutmaster.contracts.renderer import RenderRequest
 from cutmaster.contracts.workflow import WorkflowRequest, WorkflowResult
@@ -70,22 +71,33 @@ class Orchestrator:
                     if request.subtitle_path is not None
                     else None
                 ),
+                material_name=request.video_material_name,
+            )
+        )
+        music_analysis = self.analyser.analyse_music(
+            MusicAnalysisRequest(
+                audio_path=request.audio_path.resolve(),
+                output_dir=layout.music_analyser_dir,
+                material_name=request.music_material_name,
             )
         )
         planning = self.planner.plan(
             PlanningRequest(
-                video_path=request.video_path.resolve(),
-                audio_path=request.audio_path.resolve(),
+                video_path=Path(analysis.source_video),
+                audio_path=Path(music_analysis.source_audio),
                 prompt=request.prompt,
                 output_dir=layout.planners_dir,
                 target_output_length_sec=request.target_output_length_sec,
                 target_shot_length_sec=request.target_shot_length_sec,
                 prompt_type=request.prompt_type,
-                video_title=request.video_title,
+                video_title=request.video_title or analysis.material_name,
                 max_clip_duration_sec=request.max_clip_duration_sec,
                 overwrite=request.overwrite,
+                video_material_name=analysis.material_name,
+                music_material_name=music_analysis.material_name,
             ),
             analysis,
+            music_analysis,
         )
         rendered = self.renderer.render(
             RenderRequest(
@@ -96,7 +108,9 @@ class Orchestrator:
             )
         )
         timings = {
-            "analyser": analysis.elapsed_sec,
+            "analyser": analysis.elapsed_sec + music_analysis.elapsed_sec,
+            "analyser.video": analysis.elapsed_sec,
+            "analyser.music": music_analysis.elapsed_sec,
             "planners": planning.wall_clock_sec,
             "renderer": rendered.wall_clock_sec,
             **{
@@ -133,6 +147,10 @@ class Orchestrator:
                     ]
                 ),
             },
+            music_analysis_result=str(layout.music_analysis_result),
+            video_material_name=analysis.material_name,
+            music_material_name=music_analysis.material_name,
+            music_material_directory=music_analysis.material_directory,
         )
         layout.workflow_result.write_text(
             json.dumps(result.to_dict(), ensure_ascii=False, indent=2) + "\n",

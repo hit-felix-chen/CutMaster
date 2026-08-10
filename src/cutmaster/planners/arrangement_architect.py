@@ -6,7 +6,7 @@ from typing import Any
 from cutmaster.configuration.schema import AppConfig, LLMConfig
 from cutmaster.contracts.planning import PlanningRequest
 from cutmaster.planners.tools.music_analysis import (
-    analyze_music,
+    build_music_profile,
     compact_music_profile,
     write_music_profile,
 )
@@ -757,11 +757,11 @@ class ArrangementArchitectAgent:
 
     def profile_music(
         self,
-        audio_path: Path,
+        music_memory: dict[str, Any],
         target_duration_sec: float,
         output_path: Path,
     ) -> dict[str, Any]:
-        profile = analyze_music(audio_path, target_duration_sec)
+        profile = build_music_profile(music_memory, target_duration_sec)
         write_music_profile(output_path, profile)
         self.context.set_artifact(
             "music_profile",

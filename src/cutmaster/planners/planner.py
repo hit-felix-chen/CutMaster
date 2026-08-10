@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig
-from cutmaster.contracts.analyser import AnalysisResult
+from cutmaster.contracts.analyser import AnalysisResult, MusicAnalysisResult
 from cutmaster.contracts.planning import PlanningRequest, PlanningResult
 from cutmaster.planners.aster_team import ASTERTeam
 from cutmaster.planners.plan_compiler import (
@@ -35,12 +35,26 @@ def _write_json(path: Path, value: Any) -> None:
 def _validate_request(
     request: PlanningRequest,
     analysis: AnalysisResult,
+    music_analysis: MusicAnalysisResult,
 ) -> None:
     analysis.validate()
+    music_analysis.validate()
     if request.video_path.resolve() != Path(analysis.source_video).resolve():
         raise ValueError("Planning source video does not match the analysis result")
     if not request.audio_path.is_file():
         raise FileNotFoundError(f"BGM not found: {request.audio_path}")
+    if request.audio_path.resolve() != Path(music_analysis.source_audio).resolve():
+        raise ValueError("Planning BGM does not match the music analysis result")
+    if (
+        request.video_material_name
+        and request.video_material_name != analysis.material_name
+    ):
+        raise ValueError("Planning video Material Name does not match the analysis result")
+    if (
+        request.music_material_name
+        and request.music_material_name != music_analysis.material_name
+    ):
+        raise ValueError("Planning music Material Name does not match the analysis result")
     if not request.prompt.strip():
         raise ValueError("Prompt must not be empty")
     if request.target_output_length_sec <= 0:
@@ -61,8 +75,9 @@ class Planner:
         self,
         request: PlanningRequest,
         analysis: AnalysisResult,
+        music_analysis: MusicAnalysisResult,
     ) -> PlanningResult:
-        _validate_request(request, analysis)
+        _validate_request(request, analysis, music_analysis)
         output_dir = request.output_dir.resolve()
         diagnostics_dir = output_dir / "diagnostics"
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +109,7 @@ class Planner:
         timings: dict[str, float] = {}
         video_description = analysis.load_video_description()
         video_summary = analysis.load_video_summary()
+        music_memory = music_analysis.load_music_memory()
         context = WorkflowContext(
             planning_history_path,
             model_call_tree_path=planning_calls_path,
@@ -106,11 +122,11 @@ class Planner:
 
         stage_started = time.monotonic()
         music_profile = team.profile_music(
-            request.audio_path,
+            music_memory,
             request.target_output_length_sec,
             music_profile_path,
         )
-        timings["music_analysis"] = time.monotonic() - stage_started
+        timings["music_profile"] = time.monotonic() - stage_started
 
         planning_seconds = 0.0
         anchor_seconds = 0.0
@@ -286,6 +302,7 @@ class Planner:
             num_planned_clips=len(render_plan.clips),
             stage_timings_sec=timings,
             wall_clock_sec=time.monotonic() - started,
+            music_memory=music_analysis.music_memory,
             model_usage=str(model_usage_path.resolve()),
             model_usage_summary=context.model_usage_summary(),
         )
