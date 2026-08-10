@@ -424,7 +424,7 @@ def add_visual_features(
     ) -> dict[str, dict[str, Any]]:
         subset_operation = operation + suffix
         package = prompt_registry.build(
-            PromptStage.PLANNER,
+            PromptStage.PLANNERS,
             PromptTask.CANDIDATE_VISUAL_SCORING,
             CandidateVisualScoringDetails(
                 operation=subset_operation,
@@ -687,7 +687,7 @@ def retrieve_candidates(
                     "fallback.apply",
                     (
                         "Candidate scope lacks enough non-overlapping fixed-duration "
-                        "windows; queuing targeted Slot replanning"
+                        "windows; queuing targeted Slot redesign"
                         if replan_slots is not None
                         else "Candidate scope lacks enough non-overlapping fixed-duration "
                         "windows; expanding in the next round"
@@ -707,7 +707,7 @@ def retrieve_candidates(
                 ]
             }
             package = prompt_registry.build(
-                PromptStage.PLANNER,
+                PromptStage.PLANNERS,
                 PromptTask.CANDIDATE_RETRIEVAL,
                 CandidateRetrievalDetails(
                     operation=f"Candidate retrieval round {round_index} slot {slot_id}",
@@ -987,7 +987,7 @@ def retrieve_candidates(
                 "WARNING",
                 "aster.arrangement",
                 "fallback.apply",
-                "Redesigning failed Slots in one targeted planning call",
+                "Redesigning failed Slots in one targeted Arrangement Architect call",
                 round=round_index,
                 slot_ids=sorted(target_slot_ids),
                 reasons={
@@ -1031,7 +1031,7 @@ def retrieve_candidates(
                 "INFO",
                 "aster.arrangement",
                 "stage.complete",
-                "Targeted Slot replanning completed; retrying replanned Slots",
+                "Targeted Slot redesign completed; retrying redesigned Slots",
                 round=round_index,
                 failed_slot_ids=sorted(target_slot_ids),
                 slot_ids=sorted(replanned_slot_ids),

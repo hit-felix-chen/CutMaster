@@ -45,6 +45,7 @@ class AnalysisResult:
     analysis_reused: bool = False
     model_usage: str | None = None
     model_usage_summary: dict[str, Any] = field(default_factory=dict)
+    model_usage_cumulative_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "1.0"
 
     def to_dict(self) -> dict[str, Any]:

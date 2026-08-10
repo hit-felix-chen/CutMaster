@@ -137,7 +137,7 @@ def project_music_profile(
     music_memory: dict[str, Any],
     target_duration_sec: float,
 ) -> dict[str, Any]:
-    """Project complete-track Music Memory onto one Planning Run duration."""
+    """Project complete-track Music Memory onto one ASTER run duration."""
     if target_duration_sec <= 0.0:
         raise ValueError("Music Profile target duration must be positive")
     source_duration_sec = float(music_memory["source_duration_sec"])
@@ -174,7 +174,7 @@ def build_music_profile(
     music_memory: dict[str, Any],
     target_duration_sec: float,
 ) -> dict[str, Any]:
-    """Build a Planning Run profile from reusable Music Memory."""
+    """Build an ASTER run profile from reusable Music Memory."""
     return project_music_profile(music_memory, target_duration_sec)
 
 

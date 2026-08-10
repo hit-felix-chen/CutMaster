@@ -15,6 +15,9 @@ class ModelConfig:
     timeout_sec: float = 180.0
     max_retries: int = 3
     max_concurrency: int = 4
+    input_price_yuan_per_million_tokens: float = 0.0
+    cached_input_price_yuan_per_million_tokens: float = 0.0
+    output_price_yuan_per_million_tokens: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ class AnalyserConfig:
 
 
 @dataclass(frozen=True)
-class SlotPlanningConfig:
+class ArrangementArchitectConfig:
     target_clip_duration_sec: float = 4.0
     replan_max_rounds: int = 3
 
@@ -116,7 +119,9 @@ class SourceWindowOptimizationConfig:
 
 @dataclass(frozen=True)
 class PlannersConfig:
-    slot_planning: SlotPlanningConfig = field(default_factory=SlotPlanningConfig)
+    arrangement_architect: ArrangementArchitectConfig = field(
+        default_factory=ArrangementArchitectConfig
+    )
     dialogue_anchors: DialogueAnchorConfig = field(
         default_factory=DialogueAnchorConfig
     )
@@ -183,7 +188,7 @@ __all__ = [
     "ScriptReviewConfig",
     "ShotAnnotationConfig",
     "ShotDetectionConfig",
-    "SlotPlanningConfig",
+    "ArrangementArchitectConfig",
     "SourceWindowOptimizationConfig",
     "VLMConfig",
 ]

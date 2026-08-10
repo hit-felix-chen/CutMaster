@@ -4,7 +4,7 @@ import subprocess
 import pytest
 
 from cutmaster.configuration.schema import DialogueAudioConfig, RendererConfig
-from cutmaster.contracts.planning import RenderPlan
+from cutmaster.contracts.planners import RenderPlan
 from cutmaster.contracts.renderer import RenderRequest
 from cutmaster.renderer import Renderer
 
@@ -61,7 +61,7 @@ def test_renderer_reuses_montage_without_mutating_plan(tmp_path) -> None:
                 "output_frame_range": [30, 60],
             },
         ],
-        planning_metadata={"prompt": "test"},
+        planners_metadata={"prompt": "test"},
     )
     plan_path = tmp_path / "planners" / "render_plan.json"
     plan.write(plan_path)

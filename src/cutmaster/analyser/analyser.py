@@ -218,6 +218,9 @@ class Analyser:
                 else None
             ),
             model_usage_summary=material.model_usage_summary,
+            model_usage_cumulative_summary=(
+                material.model_usage_cumulative_summary
+            ),
         )
         result.write(self._video_result_path(library_material))
         result.write(output_dir / "analysis_result.json")

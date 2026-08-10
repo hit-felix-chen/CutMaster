@@ -172,7 +172,7 @@ def _score_pairwise_layer(
             for current in feasible_current
         ]
         package = prompt_registry.build(
-            PromptStage.PLANNER,
+            PromptStage.PLANNERS,
             PromptTask.PAIRWISE_SCORING,
             PairwiseScoringDetails(
                 operation=(

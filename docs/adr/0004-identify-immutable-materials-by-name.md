@@ -15,5 +15,5 @@ Each Material records SHA-256 only as an internal Material Fingerprint. It is
 not embedded in the Material Name, exposed as a selector, or treated as a
 global deduplication key. CLI and service callers select completed Materials by
 exact Material Name. A fingerprint mismatch marks the Material as inconsistent
-and blocks analysis, planning, and rendering; recovery requires deleting and
+and blocks analysis, edit decision, and rendering; recovery requires deleting and
 adding it again because source replacement is unsupported.

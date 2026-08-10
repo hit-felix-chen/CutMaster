@@ -20,7 +20,7 @@ class ArtifactLayout:
             layout.analyser_dir,
             layout.music_analyser_dir,
             layout.planners_dir,
-            layout.planning_diagnostics_dir,
+            layout.planners_diagnostics_dir,
             layout.renderer_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
@@ -39,7 +39,7 @@ class ArtifactLayout:
         return self.root / "planners"
 
     @property
-    def planning_diagnostics_dir(self) -> Path:
+    def planners_diagnostics_dir(self) -> Path:
         return self.planners_dir / "diagnostics"
 
     @property
@@ -55,8 +55,8 @@ class ArtifactLayout:
         return self.music_analyser_dir / "music_analysis_result.json"
 
     @property
-    def planning_result(self) -> Path:
-        return self.planners_dir / "planning_result.json"
+    def planners_result(self) -> Path:
+        return self.planners_dir / "planners_result.json"
 
     @property
     def render_plan(self) -> Path:
@@ -73,6 +73,10 @@ class ArtifactLayout:
     @property
     def workflow_result(self) -> Path:
         return self.root / "result.json"
+
+    @property
+    def workflow_model_usage(self) -> Path:
+        return self.root / "model_usage.json"
 
     @property
     def workflow_log(self) -> Path:

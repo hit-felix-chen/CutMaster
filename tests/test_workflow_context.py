@@ -40,7 +40,7 @@ def test_context_persists_artifacts_without_model_call_history(
     tmp_path,
     monkeypatch,
 ) -> None:
-    path = tmp_path / "planning_history.json"
+    path = tmp_path / "planners_history.json"
     context = WorkflowContext(path)
     context.set_artifact("music_profile", {"tempo_bpm": 120})
     monkeypatch.setattr(
@@ -50,8 +50,8 @@ def test_context_persists_artifacts_without_model_call_history(
         ),
     )
     package = PromptPackage(
-        stage=PromptStage.PLANNER,
-        task=PromptTask.SLOT_PLANNING,
+        stage=PromptStage.PLANNERS,
+        task=PromptTask.SLOT_ARRANGEMENT,
         prompt_version="test",
         operation="plan",
         system_prompt="Return JSON",
@@ -119,7 +119,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
 
     def build_package(_details):
         return PromptPackage(
-            stage=PromptStage.PLANNER,
+            stage=PromptStage.PLANNERS,
             task=PromptTask.CANDIDATE_RETRIEVAL,
             prompt_version="test",
             operation="retrieve",
@@ -139,12 +139,12 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
         )
 
     registry.register(
-        PromptStage.PLANNER,
+        PromptStage.PLANNERS,
         PromptTask.CANDIDATE_RETRIEVAL,
         build_package,
     )
     package = registry.build(
-        PromptStage.PLANNER,
+        PromptStage.PLANNERS,
         PromptTask.CANDIDATE_RETRIEVAL,
         details=None,
     )
@@ -171,7 +171,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
         lambda _delay: None,
     )
 
-    call_tree_path = tmp_path / "planning_calls.json"
+    call_tree_path = tmp_path / "planners_calls.json"
     context = WorkflowContext(
         tmp_path / "history.json",
         model_call_tree_path=call_tree_path,
@@ -184,6 +184,9 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
             base_url="",
             api_key="test",
             max_retries=2,
+            input_price_yuan_per_million_tokens=2.0,
+            cached_input_price_yuan_per_million_tokens=0.5,
+            output_price_yuan_per_million_tokens=10.0,
         ),
         validate_business=validate,
     )
@@ -197,7 +200,7 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     assert "Duplicate candidate range" in prompts[2]
     tree = json.loads(call_tree_path.read_text(encoding="utf-8"))
     root = tree["root"]
-    assert root["stage"] == "planning"
+    assert root["stage"] == "planners"
     assert root["call_count"] == 1
     assert root["attempt_count"] == 3
     call = root["children"][0]["calls"][0]
@@ -216,17 +219,87 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
     assert "Retrieve candidates" not in persisted
     assert "Return JSON" not in persisted
     assert call["attempts"][0]["prompt"]["prompt_id"] == (
-        "planner.candidate_retrieval"
+        "planners.candidate_retrieval"
     )
     assert root["usage"]["request_count"] == 3
     assert root["usage"]["prompt_tokens"] == 300
     assert call["attempts"][0]["usage"]["cached_prompt_tokens"] == 40
     usage = json.loads((tmp_path / "model_usage.json").read_text(encoding="utf-8"))
     assert usage["summary"]["total_tokens"] == 360
+    assert usage["current_run"]["summary"]["total_tokens"] == 360
+    assert usage["cumulative"]["summary"]["total_tokens"] == 360
+    assert usage["current_run"]["summary"]["total_cost_yuan"] == 0.00102
+    task_usage = usage["current_run"]["summary"]["by_task"]
+    assert task_usage["candidate_retrieval"]["total_tokens"] == 360
+    assert task_usage["candidate_retrieval"]["total_cost_yuan"] == 0.00102
+    pricing = usage["calls"][0]["model"]["pricing"]
+    assert pricing == {
+        "currency": "CNY",
+        "unit": "yuan_per_million_tokens",
+        "input": 2.0,
+        "cached_input": 0.5,
+        "output": 10.0,
+    }
     assert usage["calls"][0]["attempts"][0]["response_id"] == "response-test"
     serialized_usage = json.dumps(usage, ensure_ascii=False)
     assert '{"ok":true}' not in serialized_usage
     assert "Retrieve candidates" not in serialized_usage
+
+
+def test_usage_separates_current_run_from_cumulative(tmp_path) -> None:
+    usage_path = tmp_path / "model_usage.json"
+    usage_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "2.0",
+                "calls": [
+                    {
+                        "call_id": 1,
+                        "task": "analyser.video_summary",
+                        "operation": "summarize",
+                        "status": "success",
+                        "model": {
+                            "name": "old-model",
+                            "pricing": {
+                                "currency": "CNY",
+                                "unit": "yuan_per_million_tokens",
+                                "input": 1.0,
+                                "cached_input": 0.1,
+                                "output": 2.0,
+                            },
+                        },
+                        "attempts": [
+                            {
+                                "attempt": 1,
+                                "status": "accepted",
+                                "usage": {
+                                    "prompt_tokens": 10,
+                                    "completion_tokens": 2,
+                                    "total_tokens": 12,
+                                    "cached_prompt_tokens": 0,
+                                    "uncached_prompt_tokens": 10,
+                                    "reasoning_tokens": 0,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = WorkflowContext(
+        tmp_path / "history.json",
+        model_usage_path=usage_path,
+        stage_name="analyser",
+    )
+
+    context.save_model_usage()
+
+    persisted = json.loads(usage_path.read_text(encoding="utf-8"))
+    assert persisted["current_run"]["summary"]["total_tokens"] == 0
+    assert persisted["cumulative"]["summary"]["total_tokens"] == 12
+    assert persisted["cumulative"]["summary"]["total_cost_yuan"] == 0.000014
 
 
 def test_request_failure_logging_does_not_duplicate_operation(
@@ -234,8 +307,8 @@ def test_request_failure_logging_does_not_duplicate_operation(
     monkeypatch,
 ) -> None:
     package = PromptPackage(
-        stage=PromptStage.PLANNER,
-        task=PromptTask.SLOT_PLANNING,
+        stage=PromptStage.PLANNERS,
+        task=PromptTask.SLOT_ARRANGEMENT,
         prompt_version="test",
         operation="plan",
         system_prompt="Return JSON",

@@ -1,3 +1,5 @@
+"""Optimize source windows for compiled ASTER script clips."""
+
 from __future__ import annotations
 
 import bisect

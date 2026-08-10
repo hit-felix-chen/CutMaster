@@ -75,11 +75,11 @@ result = workflow_context.call_prompt(
 | analyser | `dialogue_reconstruction` | LLM |
 | analyser | `dialogue_segmentation` | LLM |
 | analyser | `shot_annotation` | VLM |
-| planner | `slot_planning` | LLM |
-| planner | `candidate_retrieval` | LLM |
-| planner | `candidate_visual_scoring` | VLM |
-| planner | `pairwise_scoring` | VLM |
-| planner | `script_review` | LLM |
+| planners | `slot_arrangement` | LLM |
+| planners | `candidate_retrieval` | LLM |
+| planners | `candidate_visual_scoring` | VLM |
+| planners | `pairwise_scoring` | VLM |
+| planners | `script_review` | LLM |
 
 定义分别位于：
 
@@ -114,7 +114,7 @@ src/cutmaster/prompting/planners/tasks.py
 
 禁止：
 
-- 在 analyser/planner 业务模块中直接写 Prompt 长字符串；
+- 在 analyser/planners 业务模块中直接写 Prompt 长字符串；
 - 单独维护响应示例和 Python 枚举列表；
 - 绕过 `ResponseContract` 直接解析模型 JSON；
 - 根据旧版无 fingerprint 的历史响应做兼容修复。

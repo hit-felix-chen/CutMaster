@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def merge_planning_feedback(
+def merge_planners_feedback(
     previous: dict[str, Any] | None,
     *,
     attempt: int,
@@ -51,12 +51,12 @@ def merge_planning_feedback(
         "forbidden_segment_ids": sorted(forbidden_segment_ids),
         "failure_history": failure_history,
         "instruction": (
-            "Replan with supported source Segments in source order. Avoid every Segment "
+            "Redesign the arrangement with supported source Segments in source order. "
+            "Avoid every Segment "
             "assignment accumulated across earlier candidate shortages or empty "
             "chronological paths."
         ),
     }
 
 
-__all__ = ["merge_planning_feedback"]
-
+__all__ = ["merge_planners_feedback"]

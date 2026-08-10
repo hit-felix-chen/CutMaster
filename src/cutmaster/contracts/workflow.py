@@ -31,7 +31,7 @@ class WorkflowRequest:
 class WorkflowResult:
     status: str
     analysis_result: str
-    planning_result: str
+    planners_result: str
     render_result: str
     render_plan: str
     output_video: str
@@ -44,6 +44,7 @@ class WorkflowResult:
     stage_timings_sec: dict[str, float]
     wall_clock_sec: float
     model_usage: dict[str, Any] = field(default_factory=dict)
+    model_usage_artifact: str = ""
     music_analysis_result: str = ""
     video_material_name: str = ""
     music_material_name: str = ""

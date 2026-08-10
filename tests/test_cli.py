@@ -26,7 +26,7 @@ def test_runtime_environment_loads_dotenv_next_to_config(
 def test_cli_commands_map_to_stable_log_components() -> None:
     assert _command_component("analyse") == "analyser"
     assert _command_component("analyse-music") == "analyser"
-    assert _command_component("plan") == "planner"
+    assert _command_component("plan") == "planners"
     assert _command_component("render") == "renderer"
     assert _command_component("run") == "orchestrator"
 
@@ -68,7 +68,7 @@ def test_plan_and_run_cli_can_select_materials_by_exact_name() -> None:
             "--prompt",
             "A tense reunion",
             "--output-dir",
-            "planning",
+            "planners",
         ]
     )
     run = parser.parse_args(

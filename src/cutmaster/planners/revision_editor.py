@@ -80,7 +80,7 @@ def review_and_patch(
     pairwise_scores: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     package = prompt_registry.build(
-        PromptStage.PLANNER,
+        PromptStage.PLANNERS,
         PromptTask.SCRIPT_REVIEW,
         ScriptReviewDetails(
             slots=slots,

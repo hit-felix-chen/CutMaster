@@ -7,7 +7,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from cutmaster import Analyser, Orchestrator, Planner, Renderer
+from cutmaster import Analyser, Orchestrator, Planners, Renderer
 from cutmaster.configuration.loader import load_config, load_renderer_config
 from cutmaster.contracts.analyser import (
     AnalysisRequest,
@@ -15,7 +15,7 @@ from cutmaster.contracts.analyser import (
     MusicAnalysisRequest,
     MusicAnalysisResult,
 )
-from cutmaster.contracts.planning import PlanningRequest
+from cutmaster.contracts.planners import PlannersRequest
 from cutmaster.contracts.renderer import RenderRequest
 from cutmaster.contracts.workflow import WorkflowRequest
 from cutmaster.prompting.failure_catalog import (
@@ -34,7 +34,7 @@ def _add_video_metadata(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--video-title", default="")
 
 
-def _add_planning_options(parser: argparse.ArgumentParser) -> None:
+def _add_planners_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--target-duration", type=float, default=60.0)
     parser.add_argument("--target-shot-length", type=float, default=4.0)
@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Candidate Material Name when --audio adds a track",
     )
-    _add_planning_options(plan)
+    _add_planners_options(plan)
     _add_config(plan)
     plan.add_argument("--output-dir", type=Path, required=True)
     plan.add_argument("--overwrite", action="store_true")
@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Candidate Material Name when --audio adds a track",
     )
-    _add_planning_options(run)
+    _add_planners_options(run)
     _add_config(run)
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument(
@@ -152,7 +152,7 @@ def _command_component(command: str) -> str:
     return {
         "analyse": "analyser",
         "analyse-music": "analyser",
-        "plan": "planner",
+        "plan": "planners",
         "render": "renderer",
         "run": "orchestrator",
     }[command]
@@ -207,8 +207,8 @@ def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
                     "--music-material-name is only valid together with --audio"
                 )
             music_analysis = analyser.resolve_music(args.music_material)
-        return Planner(config).plan(
-            PlanningRequest(
+        return Planners(config).plan(
+            PlannersRequest(
                 video_path=Path(analysis.source_video),
                 audio_path=Path(music_analysis.source_audio),
                 prompt=args.prompt,

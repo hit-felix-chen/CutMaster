@@ -1,8 +1,8 @@
-from cutmaster.planners.tools.planning_feedback import merge_planning_feedback
+from cutmaster.planners.tools.planners_feedback import merge_planners_feedback
 
 
-def test_planning_feedback_accumulates_failed_assignments_and_forbidden_segments() -> None:
-    first = merge_planning_feedback(
+def test_planners_feedback_accumulates_failed_assignments_and_forbidden_segments() -> None:
+    first = merge_planners_feedback(
         None,
         attempt=1,
         error="first failure",
@@ -16,7 +16,7 @@ def test_planning_feedback_accumulates_failed_assignments_and_forbidden_segments
         ],
         candidates_per_slot=3,
     )
-    second = merge_planning_feedback(
+    second = merge_planners_feedback(
         first,
         attempt=2,
         error="second failure",

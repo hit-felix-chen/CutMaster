@@ -7,7 +7,7 @@ from cutmaster.planners.timeline_scout import TimelineScoutAgent
 from cutmaster.planners.story_editor import StoryEditorAgent
 from cutmaster.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.configuration.schema import AppConfig
-from cutmaster.contracts.planning import PlanningRequest
+from cutmaster.contracts.planners import PlannersRequest
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
     build_prompt_failure,
@@ -17,14 +17,14 @@ from cutmaster.runtime.workflow_context import WorkflowContext
 from cutmaster.planners.revision_editor import RevisionEditorAgent
 from cutmaster.planners.edit_composer import EditComposerAgent
 from cutmaster.planners.tools.errors import NoFeasiblePathError
-from cutmaster.planners.tools.planning_feedback import merge_planning_feedback
+from cutmaster.planners.tools.planners_feedback import merge_planners_feedback
 from cutmaster.planners.arrangement_architect import (
     ArrangementArchitectAgent,
 )
 
 
 class ASTERTeam:
-    """Coordinate the five specialized ASTER planning agents."""
+    """Coordinate the five specialized ASTER agents."""
 
     def __init__(
         self,
@@ -88,7 +88,7 @@ class ASTERTeam:
             "WARNING",
             "aster.arrangement",
             "fallback.apply",
-            "Planning is continuing with Shots that lack visual annotations",
+            "ASTER is continuing with Shots that lack visual annotations",
             missing_shots=len(missing),
             total_shots=sum(
                 len(segment.get("shots", []))
@@ -104,7 +104,7 @@ class ASTERTeam:
 
     def arrange(
         self,
-        request: PlanningRequest,
+        request: PlannersRequest,
         music_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
         self._warn_about_missing_shot_annotations()
@@ -232,15 +232,15 @@ class ASTERTeam:
         diagnostics: dict[str, Any],
         failed_slots: list[dict[str, Any]],
     ) -> None:
-        feedback = merge_planning_feedback(
-            self.context.get_artifact("planning_feedback"),
+        feedback = merge_planners_feedback(
+            self.context.get_artifact("planners_feedback"),
             attempt=attempt,
             error=error,
             diagnostics=diagnostics,
             failed_slots=failed_slots,
             candidates_per_slot=self.config.planners.candidate_retrieval.candidates_per_slot,
         )
-        self.context.set_artifact("planning_feedback", feedback)
+        self.context.set_artifact("planners_feedback", feedback)
 
 
 __all__ = [

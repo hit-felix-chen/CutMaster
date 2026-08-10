@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, LLMConfig
-from cutmaster.contracts.planning import PlanningRequest
+from cutmaster.contracts.planners import PlannersRequest
 from cutmaster.planners.tools.music_analysis import (
     build_music_profile,
     compact_music_profile,
     write_music_profile,
 )
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.planners import SlotPlanningDetails
+from cutmaster.prompting.planners import SlotArrangementDetails
 from cutmaster.runtime.observability import log_event
 from cutmaster.runtime.workflow_context import WorkflowContext
 
@@ -23,7 +23,7 @@ MAX_AVERAGE_TARGET_ERROR_RATIO = 0.125
 DURATION_TOLERANCE_SEC = 1e-6
 
 
-def _request_metadata(request: PlanningRequest) -> dict[str, Any]:
+def _request_metadata(request: PlannersRequest) -> dict[str, Any]:
     return {
         "instruction": request.prompt,
         "prompt_type": request.prompt_type,
@@ -191,7 +191,7 @@ def _validate_slots(
 
 
 def plan_edit_slots(
-    request: PlanningRequest,
+    request: PlannersRequest,
     music_profile: dict[str, Any],
     config: LLMConfig,
     context: WorkflowContext,
@@ -205,36 +205,36 @@ def plan_edit_slots(
     )
     video_description = context.get_artifact("video_description")
     if video_description is None:
-        raise RuntimeError("Video description must be available before edit-slot planning")
+        raise RuntimeError("Video description must be available before Slot arrangement")
     video_summary = context.get_artifact("video_summary")
     if video_summary is None:
-        raise RuntimeError("Video summary must be available before edit-slot planning")
+        raise RuntimeError("Video summary must be available before Slot arrangement")
     context.set_artifact(
         "source_story_context",
         _source_story_context(video_description, video_summary),
     )
-    planning_feedback = context.get_artifact("planning_feedback")
+    planners_feedback = context.get_artifact("planners_feedback")
     forbidden_segment_ids = {
         str(value)
-        for value in (planning_feedback or {}).get("forbidden_segment_ids") or []
+        for value in (planners_feedback or {}).get("forbidden_segment_ids") or []
     }
     failed_segment_assignments = {
         tuple(str(value) for value in failed.get("source_segment_ids") or [])
-        for failed in (planning_feedback or {}).get("failed_slots") or []
+        for failed in (planners_feedback or {}).get("failed_slots") or []
         if failed.get("source_segment_ids")
     }
     retry_note = ""
-    if planning_feedback:
+    if planners_feedback:
         retry_note = (
-            "\nThis is a replan after an infeasible candidate path. Correct the failure using "
-            "the maintained planning_feedback. Never use a Segment in forbidden_segment_ids. "
+            "\nThis is a redesign after an infeasible candidate path. Correct the failure using "
+            "the maintained planners_feedback. Never use a Segment in forbidden_segment_ids. "
             "Do not repeat any exact source_segment_ids assignment listed in failed_slots; "
             "choose different visual source evidence while preserving chronology.\n"
         )
     package = prompt_registry.build(
-        PromptStage.PLANNER,
-        PromptTask.SLOT_PLANNING,
-        SlotPlanningDetails(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
             target_duration_sec=request.target_output_length_sec,
             target_clip_duration_sec=target_clip_duration_sec,
             allowed_segment_ids=[
@@ -414,10 +414,10 @@ def _expand_degenerate_target_slot_ids(
 
     if blocked_slot_ids:
         raise ValueError(
-            "Targeted Slot replanning has a one-Segment interval for "
+            "Targeted Slot redesign has a one-Segment interval for "
             f"{', '.join(sorted(blocked_slot_ids))}, but no source-contiguous "
             "neighbor can participate in the repair; "
-            "full Slot replanning is required"
+            "full Slot arrangement is required"
         )
     return expanded_slot_ids
 
@@ -430,7 +430,7 @@ def _validate_targeted_slots(
 ) -> list[dict[str, Any]]:
     raw_slots = parsed.get("slots")
     if not isinstance(raw_slots, list):
-        raise ValueError("Targeted Slot replan must contain a slots array")
+        raise ValueError("Targeted Slot redesign must contain a slots array")
     expected_ids = set(constraints)
     replacements: dict[str, dict[str, Any]] = {}
     for item in raw_slots:
@@ -442,7 +442,7 @@ def _validate_targeted_slots(
         constraint = constraints[slot_id]
         duration = float(item["desired_duration_sec"])
         if abs(duration - float(constraint["desired_duration_sec"])) > DURATION_TOLERANCE_SEC:
-            raise ValueError(f"Targeted replan changed desired duration for {slot_id}")
+            raise ValueError(f"Targeted redesign changed desired duration for {slot_id}")
         planned_duration = float(item["planned_duration_sec"])
         if (
             abs(
@@ -451,7 +451,7 @@ def _validate_targeted_slots(
             )
             > DURATION_TOLERANCE_SEC
         ):
-            raise ValueError(f"Targeted replan changed planned duration for {slot_id}")
+            raise ValueError(f"Targeted redesign changed planned duration for {slot_id}")
         segment_ids = [
             str(value).strip()
             for value in item.get("source_segment_ids") or []
@@ -460,11 +460,11 @@ def _validate_targeted_slots(
         allowed = set(constraint["allowed_segment_ids"])
         if not segment_ids or any(segment_id not in allowed for segment_id in segment_ids):
             raise ValueError(
-                f"Targeted replan placed {slot_id} outside its chronological interval"
+                f"Targeted redesign placed {slot_id} outside its chronological interval"
             )
         if segment_ids in constraint["forbidden_segment_assignments"]:
             raise ValueError(
-                f"Targeted replan repeated a forbidden Segment assignment for {slot_id}"
+                f"Targeted redesign repeated a forbidden Segment assignment for {slot_id}"
             )
         required_subjects = [
             str(value).strip()
@@ -489,11 +489,11 @@ def _validate_targeted_slots(
             "required_visible_subjects": required_subjects,
         }
         if not replacement["content_description"]:
-            raise ValueError(f"Targeted replan left {slot_id} without visible content")
+            raise ValueError(f"Targeted redesign left {slot_id} without visible content")
         replacements[slot_id] = replacement
     if set(replacements) != expected_ids:
         raise ValueError(
-            f"Targeted replan omitted Slots: {sorted(expected_ids - set(replacements))}"
+            f"Targeted redesign omitted Slots: {sorted(expected_ids - set(replacements))}"
         )
 
     merged: list[dict[str, Any]] = []
@@ -541,7 +541,7 @@ def redesign_edit_slots(
         return slots, set()
     video_description = context.get_artifact("video_description")
     if video_description is None:
-        raise RuntimeError("Video description must be available for targeted Slot replanning")
+        raise RuntimeError("Video description must be available for targeted Slot redesign")
     expanded_slot_ids = _expand_degenerate_target_slot_ids(
         slots,
         target_slot_ids,
@@ -569,9 +569,9 @@ def redesign_edit_slots(
             ),
         )
     package = prompt_registry.build(
-        PromptStage.PLANNER,
-        PromptTask.SLOT_PLANNING,
-        SlotPlanningDetails(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
             target_duration_sec=sum(
                 float(slot["planned_duration_sec"]) for slot in slots
             ),
@@ -771,7 +771,7 @@ class ArrangementArchitectAgent:
 
     def arrange(
         self,
-        request: PlanningRequest,
+        request: PlannersRequest,
         music_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
         slots = plan_edit_slots(
@@ -780,7 +780,7 @@ class ArrangementArchitectAgent:
             self.config.llm,
             self.context,
             target_clip_duration_sec=(
-                self.config.planners.slot_planning.target_clip_duration_sec
+                self.config.planners.arrangement_architect.target_clip_duration_sec
             ),
         )
         return align_slots_to_music(
@@ -788,7 +788,7 @@ class ArrangementArchitectAgent:
             music_profile,
             request.target_output_length_sec,
             self.config.renderer.fps,
-            self.config.planners.slot_planning.target_clip_duration_sec,
+            self.config.planners.arrangement_architect.target_clip_duration_sec,
         )
 
     def repair(

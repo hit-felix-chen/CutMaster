@@ -7,11 +7,24 @@
 # max_tokens: 单次响应允许生成的最大 token 数。
 # timeout_sec: 单次模型请求的超时时间（秒）。
 # max_retries: 首次请求失败后的完整重试次数。
-# max_concurrency: LLM 请求的最大并发数，供台词、规划、检索和复核阶段共用。
+# max_concurrency: LLM 请求的最大并发数，供台词、编排、检索和复核阶段共用。
+# *_price_yuan_per_million_tokens: 未缓存输入、缓存命中输入、输出的计费单价，单位均为元/百万 token；请在供应商调价或账号折扣变化后同步更新。
 [llm]
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
+input_price_yuan_per_million_tokens = 1.0
+cached_input_price_yuan_per_million_tokens = 0.02
+output_price_yuan_per_million_tokens = 2.0
+
+# 省事方案：让 LLM 也走 DashScope。启用时注释上面的 DeepSeek
+# model = "qwen3.7-max"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# api_key_env = "DASHSCOPE_API_KEY"
+# input_price_yuan_per_million_tokens = 6.0
+# cached_input_price_yuan_per_million_tokens = 1.2
+# output_price_yuan_per_million_tokens = 18.0
+
 enable_thinking = true
 temperature = 0.1
 max_tokens = 40000
@@ -25,10 +38,15 @@ max_concurrency = 10
 # enable_thinking/temperature/max_tokens: 控制视觉请求的推理与输出。
 # timeout_sec/max_retries: 控制单次视觉请求及其失败重试。
 # max_concurrency: VLM 最大并发数，Segment 批量 Shot 标注、候选核验和片段对评分共用。
+# 当前 qwen3.7-plus 单价采用中国内地、单次输入不超过 256K 的目录价；高阶梯或限时折扣需按实际账单手动调整。
 [vlm]
 model = "qwen3.7-plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key_env = "DASHSCOPE_API_KEY"
+input_price_yuan_per_million_tokens = 2.0
+cached_input_price_yuan_per_million_tokens = 0.4
+output_price_yuan_per_million_tokens = 8.0
+
 enable_thinking = true
 temperature = 0.1
 max_tokens = 40000
@@ -89,11 +107,11 @@ max_shots_per_request = 20
 # 完整音乐分析同样由 Analyser 负责，当前没有用户可调参数；librosa 会生成
 # 能量、onset、beat、重音和音乐段落组成的可复用 Music Memory。
 
-# Stage 2: music-aware edit-Slot planning
+# Stage 2: music-aware edit-Slot arrangement
 # target_clip_duration_sec: 画面 Slot 的目标时长（秒）；平均时长须接近该值，
 # 单个 Slot 最长为该值的 1.5 倍。长原声通过 J/L-cut 跨 Slot，不会拉长画面 Slot。
-# replan_max_rounds: 候选不足或严格时序路径无解时，最多重新规划 Slot 的轮数。
-[planners.slot_planning]
+# replan_max_rounds: 候选不足或严格时序路径无解时，最多重新编排 Slot 的轮数。
+[planners.arrangement_architect]
 target_clip_duration_sec = 4.0
 replan_max_rounds = 3
 

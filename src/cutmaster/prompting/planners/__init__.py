@@ -1,4 +1,4 @@
-"""Prompt contracts used by the ASTER planning agents."""
+"""Prompt contracts used by the ASTER team."""
 
 from cutmaster.prompting.planners.tasks import (
     CandidateRetrievalDetails,
@@ -6,7 +6,7 @@ from cutmaster.prompting.planners.tasks import (
     DialogueAnchorSelectionDetails,
     PairwiseScoringDetails,
     ScriptReviewDetails,
-    SlotPlanningDetails,
+    SlotArrangementDetails,
 )
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "DialogueAnchorSelectionDetails",
     "PairwiseScoringDetails",
     "ScriptReviewDetails",
-    "SlotPlanningDetails",
+    "SlotArrangementDetails",
 ]

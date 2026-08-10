@@ -20,4 +20,5 @@ class MaterialAnalysisResult:
     video_summary: dict[str, Any]
     model_usage_path: Path | None = None
     model_usage_summary: dict[str, Any] = field(default_factory=dict)
+    model_usage_cumulative_summary: dict[str, Any] = field(default_factory=dict)
     analysis_reused: bool = False

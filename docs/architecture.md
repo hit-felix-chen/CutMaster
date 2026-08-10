@@ -12,11 +12,10 @@ cutmaster/
 │   └── tools/
 │       ├── material_library.py
 │       ├── music_analysis.py
+│       ├── scene_segmenter.py
 │       └── ...
 ├── planners/
-│   ├── planner.py
-│   ├── plan_compiler.py
-│   ├── source_window_optimizer.py
+│   ├── planners.py
 │   ├── aster_team.py
 │   ├── arrangement_architect.py
 │   ├── story_editor.py
@@ -24,6 +23,8 @@ cutmaster/
 │   ├── edit_composer.py
 │   ├── revision_editor.py
 │   └── tools/
+│       ├── plan_compiler.py
+│       └── source_window_optimizer.py
 ├── renderer/
 │   ├── renderer.py
 │   ├── dialogue_audio.py
@@ -40,18 +41,18 @@ cutmaster/
 ```text
 Analyser(video) -> analyser/analysis_result.json
 Analyser(music) -> analyser/music/music_analysis_result.json
-Planner         -> planners/planning_result.json
-Planner         -> planners/render_plan.json
+Planners        -> planners/planners_result.json
+Planners        -> planners/render_plan.json
 Renderer        -> renderer/render_result.json
 ```
 
 `analysis_result.json` identifies the selected video Material and references
 its reusable Video Material Memory. `music_analysis_result.json` does the same
-for a complete music Material and its reusable Music Memory. Planner consumes
+for a complete music Material and its reusable Music Memory. The Planners stage consumes
 both results, projects Music Memory onto the requested output duration as a
 Music Profile, and makes all editorial decisions.
 
-`render_plan.json` is the only formal handoff from Planner to Renderer. It
+`render_plan.json` is the only formal handoff from Planners to Renderer. It
 contains exact source ranges and output frame ranges and never contains
 prepared audio paths or temporary render state. `render_result.json` describes
 one concrete BGM-only or dialogue render.
@@ -64,17 +65,20 @@ one concrete BGM-only or dialogue render.
   reuses Video Material Memory and complete-track Music Memory.
 - `analyser/tools/material_library.py` assigns public Material Names, stores
   managed source copies, and checks their internal SHA-256 fingerprints.
+- `analyser/tools/scene_segmenter.py` performs Scene-VLM semantic Scene
+  segmentation over the detected Shots.
 - `analyser/` builds reusable Shot, Segment, dialogue, story, beat, accent,
   energy, and music-section memory. None of these outputs depends on the edit
   prompt or requested output duration.
-- `planners/planner.py` consumes the two analysed Materials, coordinates ASTER,
+- `planners/planners.py` consumes the two analysed Materials, coordinates ASTER,
   and owns every editorial decision.
 - `planners/tools/music_analysis.py` projects existing Music Memory into the
   target-duration-specific Music Profile; it is not the owner of source music
   analysis.
-- `planners/plan_compiler.py` finalizes durations and the output frame grid.
-- `planners/source_window_optimizer.py` chooses source windows before the plan
-  is handed to rendering.
+- `planners/tools/plan_compiler.py` finalizes durations and the output frame
+  grid.
+- `planners/tools/source_window_optimizer.py` chooses source windows before the
+  plan is handed to rendering.
 - `renderer/` only realizes an immutable RenderPlan: it renders video, prepares
   selected dialogue, mixes audio, and manages render-local caches.
 - `prompting/`, `configuration/`, `contracts/`, and `runtime/` remain shared
@@ -96,7 +100,7 @@ are unique within each Material type.
   Name, is not accepted as a CLI selector, and is not a global deduplication
   key.
 - A fingerprint mismatch makes a Material inconsistent and blocks it from
-  analysis, planning, and rendering. Source replacement is unsupported.
+  analysis, edit decision, and rendering. Source replacement is unsupported.
 - Completed Material Memory is reused as one immutable result. An interrupted
   video analysis resumes only when its subtitle and analysis specification are
   unchanged, preventing incompatible checkpoints from being mixed.
@@ -110,15 +114,15 @@ supported and implicitly adds or reuses the corresponding Materials.
 ## Dependency direction
 
 ```text
-CLI -> Orchestrator -> Analyser / Planner / Renderer
+CLI -> Orchestrator -> Analyser / Planners / Renderer
 
 Analyser -> Material Library -> Video Material Memory / Music Memory
-Planner  -> ASTERTeam -> ASTER agents -> planner tools
-Planner  -> Music Memory -> Music Profile
-Renderer -> Planning contracts / Renderer contracts / media runtime
+Planners -> ASTERTeam -> ASTER agents -> planners tools
+Planners -> Music Memory -> Music Profile
+Renderer -> Planners contracts / Renderer contracts / media runtime
 
 Renderer -X-> Analyser
-Renderer -X-> Planner implementations
+Renderer -X-> Planners implementations
 Renderer -X-> Prompting or model gateway
 ```
 
@@ -139,7 +143,7 @@ output_dir/
 │       ├── music_analysis_result.json
 │       └── music_memory.json
 ├── planners/
-│   ├── planning_result.json
+│   ├── planners_result.json
 │   ├── render_plan.json
 │   ├── music_profile.json
 │   └── diagnostics/
@@ -157,20 +161,21 @@ whole workflow. Every other artifact is owned by exactly one stage.
 ## Public APIs
 
 ```python
-from cutmaster import Analyser, Orchestrator, Planner, Renderer
+from cutmaster import Analyser, Orchestrator, Planners, Renderer
 from cutmaster.contracts import (
     AnalysisRequest,
     AnalysisResult,
     MusicAnalysisRequest,
     MusicAnalysisResult,
-    PlanningRequest,
+    PlannersRequest,
+    PlannersResult,
     RenderRequest,
     WorkflowRequest,
 )
 
 analysis = analyser.analyse(analysis_request)
 music_analysis = analyser.analyse_music(music_analysis_request)
-planning = planner.plan(planning_request, analysis, music_analysis)
+planners_result = planners.plan(planners_request, analysis, music_analysis)
 ```
 
 `Analyser.resolve_video(name)` and `Analyser.resolve_music(name)` are the

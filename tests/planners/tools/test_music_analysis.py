@@ -128,7 +128,7 @@ def test_analyze_music_remains_a_compatible_analyse_then_project_wrapper(
     assert profile["planned_duration_sec"] == 2.5
 
 
-def test_compact_music_profile_keeps_only_macro_planning_context() -> None:
+def test_compact_music_profile_keeps_only_macro_edit_context() -> None:
     compact = compact_music_profile(
         {
             "schema_version": "1.0",

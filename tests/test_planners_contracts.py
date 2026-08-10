@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from cutmaster.contracts.planning import RenderPlan
+from cutmaster.contracts.planners import RenderPlan
 
 
 def _media(tmp_path: Path, name: str) -> Path:
@@ -13,7 +13,7 @@ def _media(tmp_path: Path, name: str) -> Path:
 
 def test_render_plan_round_trip_and_frame_timeline(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "cutmaster.contracts.planning.media_duration",
+        "cutmaster.contracts.planners.media_duration",
         lambda _path: 10.0,
     )
     source = _media(tmp_path, "source.mp4")
@@ -32,7 +32,7 @@ def test_render_plan_round_trip_and_frame_timeline(tmp_path, monkeypatch) -> Non
                 "output_frame_range": [30, 60],
             },
         ],
-        planning_metadata={"prompt": "test"},
+        planners_metadata={"prompt": "test"},
     )
     path = tmp_path / "render_plan.json"
     plan.write(path)
@@ -49,7 +49,7 @@ def test_render_plan_rejects_renderer_transient_audio_path(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "cutmaster.contracts.planning.media_duration",
+        "cutmaster.contracts.planners.media_duration",
         lambda _path: 10.0,
     )
     source = _media(tmp_path, "source.mp4")
@@ -70,5 +70,5 @@ def test_render_plan_rejects_renderer_transient_audio_path(
                     },
                 }
             ],
-            planning_metadata={},
+            planners_metadata={},
         )

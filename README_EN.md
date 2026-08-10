@@ -16,7 +16,7 @@ CutMaster is a multi-agent automatic editing framework for long-form video. It a
   <img src="assets/framework.png" alt="CutMaster MASTER multi-agent editing architecture" width="100%">
 </p>
 
-<p align="center"><em>Starting from long-form footage and user intent, the MASTER team collaborates on material understanding, edit planning, sequence optimization, and final rendering.</em></p>
+<p align="center"><em>Starting from long-form footage and user intent, the MASTER team collaborates on material understanding, editorial decisions, sequence optimization, and final rendering.</em></p>
 
 ## The MASTER Editing Team
 
@@ -35,11 +35,11 @@ In short:
 
 ```text
 M       = Analyser
-ASTER   = Planning team
+ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-`Orchestrator` is the complete-workflow entry point, while `Analyser`, `Planner`, and `Renderer` are independently callable. `ASTERTeam` remains the sole coordinator for the five planning agents.
+`Orchestrator` is the complete-workflow entry point, while `Analyser`, `Planners`, and `Renderer` are independently callable. `ASTERTeam` remains the sole coordinator for the five editorial agents.
 
 ## Architecture
 
@@ -75,7 +75,7 @@ CLI
 └── Orchestrator
     ├── Analyser
     │   └── MaterialAnalystAgent
-    ├── Planner
+    ├── Planners
     │   ├── ASTERTeam
     │   │   ├── ArrangementArchitectAgent
     │   │   ├── StoryEditorAgent
@@ -91,9 +91,9 @@ CLI
 ### Agent–tool boundary
 
 - **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, compose the sequence, and review the script.
-- **Tools provide capabilities**: ASR, the Material Library, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and planning feedback live under `analyser/tools/` and `planners/tools/`.
-- **Planner finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
-- **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating planning artifacts.
+- **Tools provide capabilities**: ASR, the Material Library, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and ASTER coordination feedback live under `analyser/tools/` and `planners/tools/`.
+- **The Planners stage finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
+- **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating ASTER artifacts.
 - **Shared infrastructure remains neutral**: configuration, contracts, prompt registration, and runtime capabilities live under `configuration/`, `contracts/`, `prompting/`, and `runtime/`.
 
 ## Core mechanisms
@@ -102,7 +102,7 @@ CLI
 
 The Material Library stores read-only managed copies of video and music sources and uses a unique **Material Name** as each asset's public identity. When no name is supplied, the CLI uses the source filename stem as the candidate name. Within one Material type, adding the same SHA-256 bytes under the same candidate-name family reuses the existing Material and its completed analysis. Adding different bytes under the same family allocates `Name (2)`, `Name (3)`, and so on. Equal bytes explicitly submitted under different candidate names remain two independently selectable Materials.
 
-SHA-256 is only an internal consistency check. It is not embedded in the Material Name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, planning, and rendering. Sources can currently be added or deleted, but not replaced in place.
+SHA-256 is only an internal consistency check. It is not embedded in the Material Name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, edit decision, and rendering. The low-level Material Library supports adding and deleting sources, but deletion is not exposed through the CLI or frontend yet. In-place replacement is unsupported.
 
 Completed Material Memory is reused directly. An interrupted video analysis can
 resume only when its subtitle and analysis specification are unchanged, so
@@ -112,14 +112,14 @@ For video, the Material Analyst detects the complete PySceneDetect Shot partitio
 
 ### 2. Music-aware Slot arrangement
 
-Complete-track music analysis belongs to the Material Analyst in Analyser. Planner does not decode and analyse the source track again. The Arrangement Architect projects reusable Music Memory onto the requested output duration—truncating or looping it as needed—to create a planning-specific Music Profile, then arranges that duration into a sequence of Slots. Each Slot expresses:
+Complete-track music analysis belongs to the Material Analyst in Analyser. The Planners stage does not decode and analyse the source track again. The Arrangement Architect projects reusable Music Memory onto the requested output duration—truncating or looping it as needed—to create a Music Profile specific to the current Planners invocation, then arranges that duration into a sequence of Slots. Each Slot expresses:
 
 - its time budget and rhythmic position;
 - its narrative function and desired content;
 - its emotional, shot-scale, and motion intent;
 - its structural relation to neighboring Slots.
 
-Slot Planning defines what the cut needs before deciding which exact shot should fill it.
+Slot Arrangement defines what the cut needs before deciding which exact shot should fill it.
 
 ### 3. Source dialogue as story anchors
 
@@ -143,7 +143,7 @@ Sequence selection uses Beam Search. VLM transition scores are computed lazily o
 
 ### 6. Candidate-constrained revision
 
-The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. Planner then compiles a frame-exact `RenderPlan`; Renderer can reuse that plan for BGM-only and dialogue variants.
+The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. The Planners stage then compiles a frame-exact `RenderPlan`; Renderer can reuse that plan for BGM-only and dialogue variants.
 
 ## Quick start
 
@@ -153,7 +153,7 @@ The Revision Editor reviews the sequence and replaces weak shots only within the
 - [uv](https://docs.astral.sh/uv/)
 - FFmpeg and FFprobe
 - LLM and VLM services with OpenAI-compatible APIs
-- An API key for Bailian ASR
+- DeepSeek and Alibaba Cloud Model Studio API keys for the default configuration, or one Model Studio key for the all-DashScope option
 
 On macOS:
 
@@ -175,13 +175,20 @@ Copy the environment template:
 cp .env.example .env
 ```
 
-Then fill in:
+The default configuration prioritizes cost: it uses DeepSeek for the text LLM and DashScope for the VLM and ASR, so fill in both API keys:
 
 ```dotenv
-DASHSCOPE_API_KEY=your_api_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
 
 # Optional: authenticates Demucs model downloads
 HF_TOKEN=
+```
+
+For a simpler setup, run the LLM, VLM, and ASR through DashScope: under `[llm]` in `config.toml`, comment out the default DeepSeek `model`, `base_url`, and `api_key_env`, then uncomment the adjacent three-line `qwen3.7-max` alternative. In that case, `.env` only needs:
+
+```dotenv
+DASHSCOPE_API_KEY=your_dashscope_api_key
 ```
 
 The CLI automatically loads `.env` next to `config.toml` without overriding variables already present in the process environment.
@@ -244,7 +251,7 @@ Common optional arguments:
 | `--video-material`, `--music-material` | Select analysed video and music by exact Material Name |
 | `--max-clip-duration` | Maximum duration for an individual candidate clip |
 | `--audio-mode` | `bgm_only` or `dialogue` |
-| `--overwrite` | Replace an existing output and start a fresh planning run |
+| `--overwrite` | Replace artifacts in the selected output directory; immutable ASTER Run history is not retained |
 
 The three stages are also independently callable:
 
@@ -274,7 +281,7 @@ uv run cutmaster render \
 `plan` also accepts explicit analysis-result paths: `--analysis-result` for
 video and `--music-analysis-result` for music. For compatibility, a raw track
 may still be passed with `--audio`; Analyser then builds or reuses its Music
-Memory before Planner starts.
+Memory before the Planners stage starts.
 
 ### Python API
 
@@ -300,7 +307,7 @@ result = Orchestrator(config).run(request)
 print(result.output_video)
 ```
 
-External integrations should use `Orchestrator` for a full run or the public `Analyser`, `Planner`, and `Renderer` stage services.
+External integrations should use `Orchestrator` for a full run or the public `Analyser`, `Planners`, and `Renderer` stage services.
 
 ## Configuration
 
@@ -308,12 +315,14 @@ The default configuration lives in [`config.toml`](config.toml) and follows the 
 
 | Section | Owner | Main controls |
 |---|---|---|
-| `[llm]`, `[vlm]` | Runtime | Models, endpoints, timeouts, retries, and concurrency |
+| `[llm]`, `[vlm]` | Runtime | Models, endpoints, timeouts, retries, concurrency, and input/cached-input/output prices |
 | `[analyser.*]` | Analyser | Material Library, ASR, shot/scene annotation, complete-track music analysis, and material caching |
-| `[planners.*]` | Planner | Slot, anchor, retrieval, Beam, review, and source-window controls |
+| `[planners.*]` | Planners | Arrangement, anchor, retrieval, Beam, review, and source-window controls |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
 The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `1800` seconds. Every field and default is documented inline in `config.toml`.
+
+All model prices use CNY per million tokens. Every call snapshots the active prices in its usage artifact, so later configuration changes never reprice historical calls. Uncached input, cache-hit input, and output are charged separately; reasoning tokens are already part of output tokens and are not charged twice.
 
 ## Artifacts
 
@@ -322,20 +331,24 @@ Each run keeps auditable intermediate artifacts under `output_dir`:
 | Artifact | Meaning |
 |---|---|
 | `result.json` | Final result, timings, and artifact paths |
+| `model_usage.json` | Workflow token and cost totals for `current_run` and `cumulative`, grouped by task and model |
 | `analyser/analysis_result.json` | Formal index of the selected Video Material Memory |
 | `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json` | Source and reconstructed dialogue data |
 | `analyser/music/music_analysis_result.json` | Formal index of the selected Music Memory |
 | `analyser/music/music_memory.json` | Complete-track beats, accents, energy, and section analysis |
-| `planners/planning_result.json` | Planner stage result and planning summary |
+| `planners/planners_result.json` | Planners stage result and ASTER coordination summary |
 | `planners/render_plan.json` | Immutable frame-exact handoff to Renderer |
-| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | Target-duration Music Profile and other planning artifacts |
-| `planners/diagnostics/` | Beam diagnostics, planning history, and model-call traces |
+| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | Target-duration Music Profile and other ASTER artifacts |
+| `planners/diagnostics/` | Beam diagnostics, ASTER repair history, and model-call traces |
+| `planners/diagnostics/model_usage.json` | Per-call price snapshots and current/cumulative Planners usage |
 | `renderer/montage.mp4` | Reusable silent visual montage |
 | `renderer/output.mp4` | Final rendered video |
 | `renderer/render_request.json`, `render_result.json` | Render request and result |
 | `cutmaster.log` | Structured runtime log |
 
 The Material Library manifest and managed source copies live under the configured `.cutmaster/materials/` root. Each video Material's analysis directory stores `video_description.json`, `video_summary.json`, and `analysis_history.json`; each music Material's analysis directory stores `music_memory.json`. CLI callers resolve these caches by Material Name and do not need to retain their internal paths.
+
+Each Video Material analysis directory also stores `model_usage.json`. `current_run` contains only requests issued by the current process and is zero for a complete cache reuse; `cumulative` preserves token and cost totals across runs in that task directory. These statistics remain local CutMaster artifacts and do not need to be reported by a Benchmark Adapter.
 
 ## Source layout
 
@@ -346,10 +359,10 @@ src/cutmaster/
 │   ├── analyser.py                  # public Analyser service
 │   ├── material_analyst.py          # M
 │   └── tools/                       # Material Library, ASR, dialogue reconstruction, video cache, complete-track music analysis
+│       ├── scene_segmenter.py        # Scene-VLM semantic segmentation
+│       └── ...
 ├── planners/
-│   ├── planner.py                   # public planning service
-│   ├── plan_compiler.py             # frame timeline and RenderPlan compiler
-│   ├── source_window_optimizer.py   # source-window optimization
+│   ├── planners.py                  # public Planners service
 │   ├── aster_team.py                # ASTER team orchestrator
 │   ├── arrangement_architect.py     # A
 │   ├── story_editor.py              # S
@@ -357,6 +370,9 @@ src/cutmaster/
 │   ├── edit_composer.py             # E
 │   ├── revision_editor.py           # R
 │   └── tools/                       # Music Profile projection, retrieval, validation, scoring, feedback
+│       ├── plan_compiler.py         # frame timeline and RenderPlan compiler
+│       ├── source_window_optimizer.py # source-window optimization
+│       └── ...
 ├── renderer/                        # independent audio and frame-exact rendering
 ├── prompting/                       # prompts and response-contract registry
 ├── configuration/                   # configuration models and loading

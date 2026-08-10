@@ -18,7 +18,7 @@ from cutmaster.runtime.observability import (
 
 def test_dialogue_anchor_stage_is_part_of_log_taxonomy() -> None:
     assert "orchestrator" in VALID_COMPONENTS
-    assert "planner" in VALID_COMPONENTS
+    assert "planners" in VALID_COMPONENTS
     assert "aster.story" in VALID_COMPONENTS
     assert "dialogue_audio" in VALID_COMPONENTS
     log_event(

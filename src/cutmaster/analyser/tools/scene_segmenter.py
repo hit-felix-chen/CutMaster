@@ -1,4 +1,4 @@
-"""Scene-VLM style semantic Scene segmentation over PySceneDetect Shots."""
+"""Scene-VLM semantic scene segmentation over PySceneDetect shots."""
 
 from __future__ import annotations
 

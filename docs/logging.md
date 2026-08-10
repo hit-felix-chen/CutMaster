@@ -13,7 +13,7 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 ```text
 2026-07-25 14:20:31.482+08:00 | INFO     | analyser | stage.start | duration_sec=7668.400 stage=shot_detection | Full-video Shot detection started
 2026-07-25 14:22:08.104+08:00 | INFO     | model | model.complete | elapsed_sec=3.412 modality=text_and_images model=qwen3-vl-plus operation=shot_annotation response_chars=1248 | Model request completed
-2026-07-25 14:24:18.991+08:00 | WARNING  | aster.composition | validation.reject | attempt=1 error_type=NoFeasiblePathError failed_slots=["slot_04"] stage=chronology_preflight | Planning attempt was infeasible; replanning with diagnostics
+2026-07-25 14:24:18.991+08:00 | WARNING  | aster.composition | validation.reject | attempt=1 error_type=NoFeasiblePathError failed_slots=["slot_04"] stage=chronology_preflight | ASTER attempt was infeasible; retrying coordination with diagnostics
 ```
 
 要求：
@@ -47,7 +47,7 @@ analyser
 dialogue
 dialogue_audio
 music
-planner
+planners
 aster.arrangement
 aster.story
 aster.timeline
@@ -131,8 +131,8 @@ prompt_chars
 - 终端：使用同一格式，默认从 `INFO` 开始。
 - `tqdm` 进度条：只输出到终端/stdout-stderr；不写入 `cutmaster.log`。
 - benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，因此可以包含日志与进度条。
-- `analysis_history.json`、`planning_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
-- `planning_calls.json`：按任务和调用组织规划阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
+- `analysis_history.json`、`planners_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
+- `planners_calls.json`：按任务和调用组织 Planners 阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
 - `shot_annotations/`：按 Segment 保存可断点复用的有序 Shot 结构化标注数组。
 
 ## 代码约束

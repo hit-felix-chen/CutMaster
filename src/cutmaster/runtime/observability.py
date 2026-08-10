@@ -47,7 +47,7 @@ VALID_COMPONENTS = frozenset(
         "renderer",
         "asr",
         "model",
-        "planner",
+        "planners",
     }
 )
 VALID_EVENTS = frozenset(
@@ -92,7 +92,7 @@ _COMPONENT_BY_MODULE = {
     "music_analysis": "music",
     "music": "music",
     "orchestrator": "orchestrator",
-    "planner": "planner",
+    "planners": "planners",
     "media": "aster.media",
     "renderer": "renderer",
     "revision_editor": "aster.revision",
@@ -100,7 +100,6 @@ _COMPONENT_BY_MODULE = {
     "script_reviewer": "aster.revision",
     "segment_media": "aster.media",
     "sequence_selector": "aster.composition",
-    "slot_planner": "aster.arrangement",
     "story_editor": "aster.story",
     "timeline_scout": "aster.timeline",
     "workflow_context": "model",

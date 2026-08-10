@@ -1,3 +1,5 @@
+"""Compile an ASTER script into the renderer-facing plan."""
+
 from __future__ import annotations
 
 import json
@@ -5,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig
-from cutmaster.contracts.planning import PlanningRequest, RenderPlan
-from cutmaster.planners.source_window_optimizer import (
+from cutmaster.contracts.planners import PlannersRequest, RenderPlan
+from cutmaster.planners.tools.source_window_optimizer import (
     optimize_script_source_windows,
 )
 from cutmaster.runtime.media_probe import media_duration
@@ -152,7 +154,7 @@ def write_script(path: Path, items: list[dict[str, Any]]) -> None:
 
 def compile_render_plan(
     *,
-    request: PlanningRequest,
+    request: PlannersRequest,
     raw_script: list[dict[str, Any]],
     music_profile: dict[str, Any],
     video_description: dict[str, Any],
@@ -183,7 +185,7 @@ def compile_render_plan(
         background_music=request.audio_path,
         fps=config.renderer.fps,
         clips=clips,
-        planning_metadata={
+        planners_metadata={
             "prompt": request.prompt,
             "prompt_type": request.prompt_type,
             "video_title": request.video_title or request.video_path.stem,

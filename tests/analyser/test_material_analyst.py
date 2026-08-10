@@ -26,7 +26,7 @@ from cutmaster.analyser.material_analyst import (
     _validate_shot_annotation,
     _analyse_video_material,
 )
-from cutmaster.analyser.scene_segmenter import (
+from cutmaster.analyser.tools.scene_segmenter import (
     _validate_window_decisions,
     build_scene_windows,
     build_segments_from_scene_boundaries,
@@ -396,7 +396,7 @@ def test_scene_boundary_windows_are_checkpointed_independently(
         for shot in shots
     }
     monkeypatch.setattr(
-        "cutmaster.analyser.scene_segmenter.prepare_scene_frames",
+        "cutmaster.analyser.tools.scene_segmenter.prepare_scene_frames",
         lambda *_args, **_kwargs: frame_map,
     )
 

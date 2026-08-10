@@ -1,4 +1,4 @@
-"""Contracts emitted by planning and consumed by rendering."""
+"""Contracts emitted by the Planners stage and consumed by rendering."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _file_sha256(path: Path) -> str:
 
 
 @dataclass(frozen=True)
-class PlanningRequest:
+class PlannersRequest:
     video_path: Path
     audio_path: Path
     prompt: str
@@ -62,10 +62,13 @@ class MediaReference:
             raise FileNotFoundError(f"Planned media is missing: {path}")
         stat = path.stat()
         if stat.st_size != self.size_bytes or stat.st_mtime_ns != self.mtime_ns:
-            raise ValueError(f"Planned media has changed since planning: {path}")
+            raise ValueError(
+                f"Planned media has changed since the Planners stage ran: {path}"
+            )
         if self.sha256 and _file_sha256(path) != self.sha256:
             raise ValueError(
-                f"Planned media fingerprint has changed since planning: {path}"
+                "Planned media fingerprint has changed since the Planners stage ran: "
+                f"{path}"
             )
 
 
@@ -79,7 +82,7 @@ class RenderPlan:
     duration_sec: float
     clips: list[dict[str, Any]]
     dialogue_anchors: list[dict[str, Any]]
-    planning_metadata: dict[str, Any]
+    planners_metadata: dict[str, Any]
     schema_version: str = "1.0"
 
     @classmethod
@@ -90,7 +93,7 @@ class RenderPlan:
         background_music: Path,
         fps: int,
         clips: list[dict[str, Any]],
-        planning_metadata: dict[str, Any],
+        planners_metadata: dict[str, Any],
     ) -> "RenderPlan":
         anchors = [
             dict(item["dialogue_anchor"])
@@ -105,7 +108,7 @@ class RenderPlan:
             "total_frames": total_frames,
             "clips": clips,
             "dialogue_anchors": anchors,
-            "planning_metadata": planning_metadata,
+            "planners_metadata": planners_metadata,
         }
         canonical = json.dumps(
             payload,
@@ -122,7 +125,7 @@ class RenderPlan:
             duration_sec=total_frames / fps if fps else 0.0,
             clips=[dict(item) for item in clips],
             dialogue_anchors=anchors,
-            planning_metadata=dict(planning_metadata),
+            planners_metadata=dict(planners_metadata),
         )
         plan.validate(validate_media=False)
         return plan
@@ -177,7 +180,7 @@ class RenderPlan:
 
 
 @dataclass(frozen=True)
-class PlanningResult:
+class PlannersResult:
     status: str
     render_plan: str
     music_profile: str
@@ -186,8 +189,8 @@ class PlanningResult:
     candidate_pool: str
     raw_script: str
     selection_diagnostics: str
-    planning_history: str
-    planning_calls: str
+    planners_history: str
+    planners_calls: str
     target_output_length_sec: float
     planned_output_length_sec: float
     num_raw_clips: int
@@ -197,6 +200,7 @@ class PlanningResult:
     music_memory: str | None = None
     model_usage: str | None = None
     model_usage_summary: dict[str, Any] = field(default_factory=dict)
+    model_usage_cumulative_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "1.0"
 
     def to_dict(self) -> dict[str, Any]:
@@ -211,13 +215,13 @@ class PlanningResult:
         return path
 
     @classmethod
-    def read(cls, path: Path) -> "PlanningResult":
+    def read(cls, path: Path) -> "PlannersResult":
         return cls(**json.loads(path.read_text(encoding="utf-8")))
 
 
 __all__ = [
     "MediaReference",
-    "PlanningRequest",
-    "PlanningResult",
+    "PlannersRequest",
+    "PlannersResult",
     "RenderPlan",
 ]

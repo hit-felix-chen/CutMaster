@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 
 from cutmaster.analyser import Analyser
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.analyser import AnalysisRequest, MusicAnalysisRequest
-from cutmaster.contracts.planning import PlanningRequest
+from cutmaster.contracts.planners import PlannersRequest
 from cutmaster.contracts.renderer import RenderRequest
 from cutmaster.contracts.workflow import WorkflowRequest, WorkflowResult
-from cutmaster.planners import Planner
+from cutmaster.planners import Planners
 from cutmaster.renderer import Renderer
 from cutmaster.runtime.artifact_layout import ArtifactLayout
 from cutmaster.runtime.model_gateway import merge_usage_summaries
@@ -38,7 +39,7 @@ class Orchestrator:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.analyser = Analyser(config)
-        self.planner = Planner(config)
+        self.planners = Planners(config)
         self.renderer = Renderer(config.renderer)
 
     def run(self, request: WorkflowRequest) -> WorkflowResult:
@@ -81,8 +82,8 @@ class Orchestrator:
                 material_name=request.music_material_name,
             )
         )
-        planning = self.planner.plan(
-            PlanningRequest(
+        planners_result = self.planners.plan(
+            PlannersRequest(
                 video_path=Path(analysis.source_video),
                 audio_path=Path(music_analysis.source_audio),
                 prompt=request.prompt,
@@ -111,42 +112,68 @@ class Orchestrator:
             "analyser": analysis.elapsed_sec + music_analysis.elapsed_sec,
             "analyser.video": analysis.elapsed_sec,
             "analyser.music": music_analysis.elapsed_sec,
-            "planners": planning.wall_clock_sec,
+            "planners": planners_result.wall_clock_sec,
             "renderer": rendered.wall_clock_sec,
             **{
                 f"planners.{name}": value
-                for name, value in planning.stage_timings_sec.items()
+                for name, value in planners_result.stage_timings_sec.items()
             },
             **{
                 f"renderer.{name}": value
                 for name, value in rendered.stage_timings_sec.items()
             },
         }
+        analyser_current = analysis.model_usage_summary
+        analyser_cumulative = analysis.model_usage_cumulative_summary
+        planners_current = planners_result.model_usage_summary
+        planners_cumulative = planners_result.model_usage_cumulative_summary
+        current_usage = merge_usage_summaries(
+            [analyser_current, planners_current]
+        )
+        cumulative_usage = merge_usage_summaries(
+            [analyser_cumulative, planners_cumulative]
+        )
+        model_usage = {
+            "schema_version": "1.0",
+            "currency": "CNY",
+            "price_unit": "yuan_per_million_tokens",
+            "updated_at": datetime.now().astimezone().isoformat(),
+            "current_run": current_usage,
+            "cumulative": cumulative_usage,
+            "stages": {
+                "analyser": {
+                    "current_run": analyser_current,
+                    "cumulative": analyser_cumulative,
+                    "artifact": analysis.model_usage,
+                },
+                "planners": {
+                    "current_run": planners_current,
+                    "cumulative": planners_cumulative,
+                    "artifact": planners_result.model_usage,
+                },
+            },
+        }
+        layout.workflow_model_usage.write_text(
+            json.dumps(model_usage, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         result = WorkflowResult(
             status="success",
             analysis_result=str(layout.analysis_result),
-            planning_result=str(layout.planning_result),
+            planners_result=str(layout.planners_result),
             render_result=str(layout.render_result),
             render_plan=str(layout.render_plan),
             output_video=rendered.output_video,
             material_directory=analysis.material_directory,
             target_output_length_sec=request.target_output_length_sec,
             actual_output_length_sec=rendered.duration_sec,
-            num_raw_clips=planning.num_raw_clips,
-            num_planned_clips=planning.num_planned_clips,
+            num_raw_clips=planners_result.num_raw_clips,
+            num_planned_clips=planners_result.num_planned_clips,
             dialogue_audio_included=request.audio_mode == "dialogue",
             stage_timings_sec=timings,
             wall_clock_sec=time.monotonic() - started,
-            model_usage={
-                "analyser": analysis.model_usage_summary,
-                "planners": planning.model_usage_summary,
-                "total": merge_usage_summaries(
-                    [
-                        analysis.model_usage_summary,
-                        planning.model_usage_summary,
-                    ]
-                ),
-            },
+            model_usage=model_usage,
+            model_usage_artifact=str(layout.workflow_model_usage),
             music_analysis_result=str(layout.music_analysis_result),
             video_material_name=analysis.material_name,
             music_material_name=music_analysis.material_name,

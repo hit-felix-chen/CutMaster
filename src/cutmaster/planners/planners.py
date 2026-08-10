@@ -1,4 +1,4 @@
-"""Public service coordinating the complete ASTER planning stage."""
+"""Public service coordinating the complete ASTER Planners stage."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from typing import Any
 
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.contracts.analyser import AnalysisResult, MusicAnalysisResult
-from cutmaster.contracts.planning import PlanningRequest, PlanningResult
+from cutmaster.contracts.planners import PlannersRequest, PlannersResult
 from cutmaster.planners.aster_team import ASTERTeam
-from cutmaster.planners.plan_compiler import (
+from cutmaster.planners.tools.plan_compiler import (
     compile_render_plan,
     write_script,
 )
@@ -33,28 +33,34 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 def _validate_request(
-    request: PlanningRequest,
+    request: PlannersRequest,
     analysis: AnalysisResult,
     music_analysis: MusicAnalysisResult,
 ) -> None:
     analysis.validate()
     music_analysis.validate()
     if request.video_path.resolve() != Path(analysis.source_video).resolve():
-        raise ValueError("Planning source video does not match the analysis result")
+        raise ValueError(
+            "Planners-stage source video does not match the analysis result"
+        )
     if not request.audio_path.is_file():
         raise FileNotFoundError(f"BGM not found: {request.audio_path}")
     if request.audio_path.resolve() != Path(music_analysis.source_audio).resolve():
-        raise ValueError("Planning BGM does not match the music analysis result")
+        raise ValueError("Planners-stage BGM does not match the music analysis result")
     if (
         request.video_material_name
         and request.video_material_name != analysis.material_name
     ):
-        raise ValueError("Planning video Material Name does not match the analysis result")
+        raise ValueError(
+            "Planners-stage video Material Name does not match the analysis result"
+        )
     if (
         request.music_material_name
         and request.music_material_name != music_analysis.material_name
     ):
-        raise ValueError("Planning music Material Name does not match the analysis result")
+        raise ValueError(
+            "Planners-stage music Material Name does not match the analysis result"
+        )
     if not request.prompt.strip():
         raise ValueError("Prompt must not be empty")
     if request.target_output_length_sec <= 0:
@@ -65,7 +71,7 @@ def _validate_request(
         raise ValueError("Maximum clip duration must be positive")
 
 
-class Planner:
+class Planners:
     """Make all semantic and frame-timing edit decisions."""
 
     def __init__(self, config: AppConfig) -> None:
@@ -73,10 +79,10 @@ class Planner:
 
     def plan(
         self,
-        request: PlanningRequest,
+        request: PlannersRequest,
         analysis: AnalysisResult,
         music_analysis: MusicAnalysisResult,
-    ) -> PlanningResult:
+    ) -> PlannersResult:
         _validate_request(request, analysis, music_analysis)
         output_dir = request.output_dir.resolve()
         diagnostics_dir = output_dir / "diagnostics"
@@ -86,13 +92,13 @@ class Planner:
             raise FileExistsError(
                 f"Render plan already exists; pass --overwrite: {render_plan_path}"
             )
-        planning_history_path = diagnostics_dir / "planning_history.json"
-        planning_calls_path = diagnostics_dir / "planning_calls.json"
+        planners_history_path = diagnostics_dir / "planners_history.json"
+        planners_calls_path = diagnostics_dir / "planners_calls.json"
         model_usage_path = diagnostics_dir / "model_usage.json"
         if request.overwrite:
             for stale_path in (
-                planning_history_path,
-                planning_calls_path,
+                planners_history_path,
+                planners_calls_path,
                 model_usage_path,
             ):
                 if stale_path.exists():
@@ -103,7 +109,7 @@ class Planner:
         candidate_pool_path = output_dir / "candidate_pool.json"
         raw_script_path = output_dir / "script_raw.json"
         selection_path = diagnostics_dir / "selection_diagnostics.json"
-        result_path = output_dir / "planning_result.json"
+        result_path = output_dir / "planners_result.json"
 
         started = time.monotonic()
         timings: dict[str, float] = {}
@@ -111,10 +117,10 @@ class Planner:
         video_summary = analysis.load_video_summary()
         music_memory = music_analysis.load_music_memory()
         context = WorkflowContext(
-            planning_history_path,
-            model_call_tree_path=planning_calls_path,
+            planners_history_path,
+            model_call_tree_path=planners_calls_path,
             model_usage_path=model_usage_path,
-            stage_name="planning",
+            stage_name="planners",
         )
         context.set_artifact("video_description", video_description)
         context.set_artifact("video_summary", video_summary)
@@ -128,7 +134,7 @@ class Planner:
         )
         timings["music_profile"] = time.monotonic() - stage_started
 
-        planning_seconds = 0.0
+        arrangement_seconds = 0.0
         anchor_seconds = 0.0
         retrieval_seconds = 0.0
         selection_seconds = 0.0
@@ -137,29 +143,29 @@ class Planner:
         beam_path: list[dict[str, Any]] = []
         pairwise_scores: dict[str, dict[str, Any]] = {}
         selection: dict[str, Any] = {}
-        max_replans = self.config.planners.slot_planning.replan_max_rounds
-        for planning_attempt in range(1, max_replans + 2):
+        max_replans = self.config.planners.arrangement_architect.replan_max_rounds
+        for aster_attempt in range(1, max_replans + 2):
             stage_started = time.monotonic()
             log_event(
                 "INFO",
                 "aster.arrangement",
                 "stage.start",
-                "Slot planning started",
-                stage="slot_planning",
-                attempt=planning_attempt,
+                "Slot arrangement started",
+                stage="slot_arrangement",
+                attempt=aster_attempt,
             )
             slots = team.arrange(request, music_profile)
             context.set_artifact("edit_plan", slots)
             _write_json(edit_plan_path, slots)
             elapsed = time.monotonic() - stage_started
-            planning_seconds += elapsed
+            arrangement_seconds += elapsed
             log_event(
                 "INFO",
                 "aster.arrangement",
                 "stage.complete",
-                "Slot planning completed",
-                stage="slot_planning",
-                attempt=planning_attempt,
+                "Slot arrangement completed",
+                stage="slot_arrangement",
+                attempt=aster_attempt,
                 slots=len(slots),
                 elapsed_sec=elapsed,
             )
@@ -194,7 +200,7 @@ class Planner:
                     candidate_pool,
                 )
                 selection_seconds += time.monotonic() - stage_started
-                selection["planning_attempt"] = planning_attempt
+                selection["aster_attempt"] = aster_attempt
                 break
             except (NoFeasiblePathError, ValueError) as exc:
                 elapsed = max(0.0, time.monotonic() - stage_started)
@@ -205,8 +211,8 @@ class Planner:
                 if not isinstance(exc, NoFeasiblePathError) and attempt_stage != "retrieval":
                     raise
                 failure = build_prompt_failure(
-                    PromptFailureCode.PLANNING_ATTEMPT_INFEASIBLE,
-                    attempt=planning_attempt,
+                    PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE,
+                    attempt=aster_attempt,
                     stage=attempt_stage,
                     error_type=type(exc).__name__,
                     error_message=error_summary(exc),
@@ -232,27 +238,27 @@ class Planner:
                     if slot["slot_id"] in failed_slot_ids
                 ]
                 team.record_failure(
-                    attempt=planning_attempt,
+                    attempt=aster_attempt,
                     error=str(exc),
                     diagnostics=diagnostics,
                     failed_slots=failed_slots,
                 )
-                if planning_attempt > max_replans:
+                if aster_attempt > max_replans:
                     context.save_model_call_tree(status="failed")
                     raise
                 log_event(
                     "WARNING",
                     "aster.composition",
                     "validation.reject",
-                    "Planning attempt was infeasible; replanning with diagnostics",
+                    "ASTER attempt was infeasible; retrying with diagnostics",
                     failed_slots=sorted(failed_slot_ids),
                     **failure,
                 )
         else:
-            raise RuntimeError("Planning loop ended without a feasible path")
+            raise RuntimeError("ASTER loop ended without a feasible path")
 
         _write_json(candidate_pool_path, candidate_pool)
-        timings["slot_planning"] = planning_seconds
+        timings["slot_arrangement"] = arrangement_seconds
         timings["dialogue_anchor_selection"] = anchor_seconds
         timings["candidate_retrieval"] = retrieval_seconds
 
@@ -285,7 +291,7 @@ class Planner:
         )
         render_plan.write(render_plan_path)
         timings["plan_compilation"] = time.monotonic() - stage_started
-        result = PlanningResult(
+        result = PlannersResult(
             status="success",
             render_plan=str(render_plan_path.resolve()),
             music_profile=str(music_profile_path.resolve()),
@@ -294,8 +300,8 @@ class Planner:
             candidate_pool=str(candidate_pool_path.resolve()),
             raw_script=str(raw_script_path.resolve()),
             selection_diagnostics=str(selection_path.resolve()),
-            planning_history=str(planning_history_path.resolve()),
-            planning_calls=str(planning_calls_path.resolve()),
+            planners_history=str(planners_history_path.resolve()),
+            planners_calls=str(planners_calls_path.resolve()),
             target_output_length_sec=request.target_output_length_sec,
             planned_output_length_sec=render_plan.duration_sec,
             num_raw_clips=len(raw_script),
@@ -305,13 +311,16 @@ class Planner:
             music_memory=music_analysis.music_memory,
             model_usage=str(model_usage_path.resolve()),
             model_usage_summary=context.model_usage_summary(),
+            model_usage_cumulative_summary=context.model_usage_summary(
+                include_prior=True
+            ),
         )
         result.write(result_path)
         log_event(
             "SUCCESS",
-            "planner",
+            "planners",
             "stage.complete",
-            "Planning completed with an immutable render plan",
+            "Planners completed an immutable render plan",
             plan_id=render_plan.plan_id,
             clips=len(render_plan.clips),
             duration_sec=render_plan.duration_sec,
@@ -320,4 +329,4 @@ class Planner:
         return result
 
 
-__all__ = ["Planner"]
+__all__ = ["Planners"]

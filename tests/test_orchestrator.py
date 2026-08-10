@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from cutmaster.contracts.analyser import AnalysisResult, MusicAnalysisResult
-from cutmaster.contracts.planning import PlanningResult
+from cutmaster.contracts.planners import PlannersResult
 from cutmaster.contracts.renderer import RenderResult
 from cutmaster.contracts.workflow import WorkflowRequest
 from cutmaster.orchestrator import Orchestrator
@@ -34,6 +34,17 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
                 analysis_history=str(tmp_path / "material" / "analysis_history.json"),
                 elapsed_sec=1.0,
                 material_name="Source",
+                model_usage="material/model_usage.json",
+                model_usage_summary={
+                    "request_count": 1,
+                    "total_tokens": 10,
+                    "total_cost_yuan": 0.01,
+                },
+                model_usage_cumulative_summary={
+                    "request_count": 2,
+                    "total_tokens": 30,
+                    "total_cost_yuan": 0.03,
+                },
             )
 
         def analyse_music(self, request):
@@ -48,13 +59,13 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
                 elapsed_sec=0.5,
             )
 
-    class FakePlanner:
+    class FakePlanners:
         def __init__(self, _config) -> None:
             pass
 
         def plan(self, request, _analysis, _music_analysis):
             calls.append(("planners", request.output_dir))
-            return PlanningResult(
+            return PlannersResult(
                 status="success",
                 render_plan=str(root / "planners" / "render_plan.json"),
                 music_profile="music_profile.json",
@@ -63,14 +74,25 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
                 candidate_pool="candidate_pool.json",
                 raw_script="script_raw.json",
                 selection_diagnostics="selection_diagnostics.json",
-                planning_history="planning_history.json",
-                planning_calls="planning_calls.json",
+                planners_history="planners_history.json",
+                planners_calls="planners_calls.json",
                 target_output_length_sec=2.0,
                 planned_output_length_sec=2.0,
                 num_raw_clips=2,
                 num_planned_clips=2,
-                stage_timings_sec={"slot_planning": 0.5},
+                stage_timings_sec={"slot_arrangement": 0.5},
                 wall_clock_sec=2.0,
+                model_usage="planners/model_usage.json",
+                model_usage_summary={
+                    "request_count": 1,
+                    "total_tokens": 20,
+                    "total_cost_yuan": 0.02,
+                },
+                model_usage_cumulative_summary={
+                    "request_count": 3,
+                    "total_tokens": 50,
+                    "total_cost_yuan": 0.05,
+                },
             )
 
     class FakeRenderer:
@@ -95,7 +117,7 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
             )
 
     monkeypatch.setattr("cutmaster.orchestrator.Analyser", FakeAnalyser)
-    monkeypatch.setattr("cutmaster.orchestrator.Planner", FakePlanner)
+    monkeypatch.setattr("cutmaster.orchestrator.Planners", FakePlanners)
     monkeypatch.setattr("cutmaster.orchestrator.Renderer", FakeRenderer)
 
     result = Orchestrator(SimpleNamespace(renderer=object())).run(
@@ -121,3 +143,9 @@ def test_orchestrator_only_composes_three_stage_services(tmp_path, monkeypatch) 
     assert json.loads((root / "result.json").read_text())["render_plan"] == str(
         root / "planners" / "render_plan.json"
     )
+    usage = json.loads((root / "model_usage.json").read_text())
+    assert usage["current_run"]["total_tokens"] == 30
+    assert usage["current_run"]["total_cost_yuan"] == 0.03
+    assert usage["cumulative"]["total_tokens"] == 80
+    assert usage["cumulative"]["total_cost_yuan"] == 0.08
+    assert result.model_usage_artifact == str(root / "model_usage.json")

@@ -535,7 +535,7 @@ def select_dialogue_anchors(
             "Video summary is required for dialogue anchor selection"
         )
     package = prompt_registry.build(
-        PromptStage.PLANNER,
+        PromptStage.PLANNERS,
         PromptTask.DIALOGUE_ANCHOR_SELECTION,
         DialogueAnchorSelectionDetails(
             slots=slots,

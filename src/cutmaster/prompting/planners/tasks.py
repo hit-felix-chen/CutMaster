@@ -23,7 +23,7 @@ SCORE_SCHEMA = {
 
 
 @dataclass(frozen=True)
-class SlotPlanningDetails:
+class SlotArrangementDetails:
     target_duration_sec: float
     target_clip_duration_sec: float
     allowed_segment_ids: list[str]
@@ -74,7 +74,7 @@ class ScriptReviewDetails:
     candidate_pool: dict[str, list[dict[str, Any]]]
 
 
-def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
+def _slot_arrangement(details: SlotArrangementDetails) -> PromptPackage:
     common_required = [
         "narrative_role",
         "content_description",
@@ -149,7 +149,7 @@ def _slot_planning(details: SlotPlanningDetails) -> PromptPackage:
 
     targeted = details.mode == "targeted"
     if details.mode not in {"full", "targeted"}:
-        raise ValueError(f"Unknown slot planning mode: {details.mode}")
+        raise ValueError(f"Unknown Slot arrangement mode: {details.mode}")
     if targeted:
         target_schemas = [
             slot_schema(
@@ -191,7 +191,7 @@ authoritative visual clip duration because it already incorporates beat-aligned 
 adjustments. Do not return or modify any other Slot.
 
 Use the maintained request, compact music profile, and original structured source story context
-from the first planning call. Treat existing_slot_plan as authoritative for all unaffected Slots. Each
+from the first Arrangement Architect call. Treat existing_slot_plan as authoritative for all unaffected Slots. Each
 replacement must fit chronologically between its previous_fixed_slot and next_fixed_slot and may
 use only that Slot's allowed_segment_ids. Multiple replacement Slots must remain in strictly
 increasing source order, with every Slot's maximum Segment index strictly lower than the next
@@ -218,7 +218,7 @@ Preserve enough source-timeline room for every later Slot; do not push a replace
 interval boundary when an equally strong, more evenly spaced Segment is available.
 
 Do not change output timing or add or remove Slots. Dialogue anchors are not part of this response:
-when a replanned Slot moves away from an anchored source Segment, the application invalidates the
+when a redesigned Slot moves away from an anchored source Segment, the application invalidates the
 old anchor and runs dialogue-anchor selection again after this repair. Do not preserve a poor
 Segment assignment merely because existing_slot_plan shows an anchor there. Do not use title
 cards, opening or end credits, production logos, legal cards, or blank frames unless explicitly
@@ -275,8 +275,8 @@ credits, production logos, legal cards, or blank frames unless the maintained re
 requires them.
 {retry_note}"""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
-        task=PromptTask.SLOT_PLANNING,
+        stage=PromptStage.PLANNERS,
+        task=PromptTask.SLOT_ARRANGEMENT,
         prompt_version="3.3",
         operation=(
             "Arrangement Architect targeted repair"
@@ -294,11 +294,11 @@ requires them.
             "request",
             "music_profile",
             "source_story_context",
-            "planning_feedback",
+            "planners_feedback",
         ),
         modality=PromptModality.TEXT,
         output_artifact=(
-            "targeted_slot_replan"
+            "targeted_slot_redesign"
             if targeted
             else "edit_plan_unaligned"
         ),
@@ -496,7 +496,7 @@ title cards, and speech over unrelated imagery.
 {json.dumps(details.dialogue_constraints_by_slot, ensure_ascii=False)}
 </dialogue_constraints_by_slot>"""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
+        stage=PromptStage.PLANNERS,
         task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
         prompt_version="4.1",
         operation="Story Editor original-dialogue anchoring",
@@ -587,7 +587,7 @@ that must not be selected again.
 {json.dumps(details.source_segments_by_slot, ensure_ascii=False)}
 </available_source_segments_by_slot>"""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
+        stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_RETRIEVAL,
         prompt_version="2.0",
         operation=details.operation,
@@ -709,7 +709,7 @@ Visual Slot Relevance Likert:
 {json.dumps(details.candidates, ensure_ascii=False)}
 </candidates>"""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
+        stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_VISUAL_SCORING,
         prompt_version="2.0",
         operation=details.operation,
@@ -809,7 +809,7 @@ Scores:
 {json.dumps(details.pair_specs, ensure_ascii=False)}
 </candidate_pairs>"""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
+        stage=PromptStage.PLANNERS,
         task=PromptTask.PAIRWISE_SCORING,
         prompt_version="1.0",
         operation=details.operation,
@@ -881,7 +881,7 @@ for variety. All output uses direct hard cuts between source fragments. Precompu
 continuity scores will reject a patch subset that degrades the weighted full-path score. Use only
 candidate IDs supplied in the maintained candidate pool."""
     return PromptPackage(
-        stage=PromptStage.PLANNER,
+        stage=PromptStage.PLANNERS,
         task=PromptTask.SCRIPT_REVIEW,
         prompt_version="1.0",
         operation="Revision Editor script review",
@@ -906,32 +906,32 @@ candidate IDs supplied in the maintained candidate pool."""
 
 
 prompt_registry.register(
-    PromptStage.PLANNER,
-    PromptTask.SLOT_PLANNING,
-    _slot_planning,
+    PromptStage.PLANNERS,
+    PromptTask.SLOT_ARRANGEMENT,
+    _slot_arrangement,
 )
 prompt_registry.register(
-    PromptStage.PLANNER,
+    PromptStage.PLANNERS,
     PromptTask.DIALOGUE_ANCHOR_SELECTION,
     _dialogue_anchor_selection,
 )
 prompt_registry.register(
-    PromptStage.PLANNER,
+    PromptStage.PLANNERS,
     PromptTask.CANDIDATE_RETRIEVAL,
     _candidate_retrieval,
 )
 prompt_registry.register(
-    PromptStage.PLANNER,
+    PromptStage.PLANNERS,
     PromptTask.CANDIDATE_VISUAL_SCORING,
     _candidate_visual_scoring,
 )
 prompt_registry.register(
-    PromptStage.PLANNER,
+    PromptStage.PLANNERS,
     PromptTask.PAIRWISE_SCORING,
     _pairwise_scoring,
 )
 prompt_registry.register(
-    PromptStage.PLANNER,
+    PromptStage.PLANNERS,
     PromptTask.SCRIPT_REVIEW,
     _script_review,
 )

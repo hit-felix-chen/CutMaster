@@ -2,9 +2,9 @@
 
 from cutmaster.analyser import Analyser
 from cutmaster.orchestrator import Orchestrator
-from cutmaster.planners import Planner
+from cutmaster.planners import Planners
 from cutmaster.renderer import Renderer
 
 __version__ = "0.1.0"
 
-__all__ = ["Analyser", "Orchestrator", "Planner", "Renderer"]
+__all__ = ["Analyser", "Orchestrator", "Planners", "Renderer"]

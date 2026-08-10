@@ -11,7 +11,7 @@ from cutmaster.runtime.observability import log_event
 
 
 class SegmentMediaReader:
-    """Planner video access backed by reusable analysed Segment clips."""
+    """ASTER video access backed by reusable analysed Segment clips."""
 
     def __init__(
         self,

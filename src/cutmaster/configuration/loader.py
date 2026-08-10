@@ -9,6 +9,7 @@ from cutmaster.configuration.schema import (
     ASRConfig,
     AnalyserConfig,
     AppConfig,
+    ArrangementArchitectConfig,
     BeamSearchConfig,
     CandidateRetrievalConfig,
     DialogueAnchorConfig,
@@ -21,7 +22,6 @@ from cutmaster.configuration.schema import (
     ScriptReviewConfig,
     ShotAnnotationConfig,
     ShotDetectionConfig,
-    SlotPlanningConfig,
     SourceWindowOptimizationConfig,
     VLMConfig,
 )
@@ -38,6 +38,9 @@ MODEL_CONFIG_KEYS = {
     "timeout_sec",
     "max_retries",
     "max_concurrency",
+    "input_price_yuan_per_million_tokens",
+    "cached_input_price_yuan_per_million_tokens",
+    "output_price_yuan_per_million_tokens",
 }
 
 ANALYSER_SCHEMA: dict[str, set[str]] = {
@@ -71,7 +74,7 @@ ANALYSER_SCHEMA: dict[str, set[str]] = {
 }
 
 PLANNERS_SCHEMA: dict[str, set[str]] = {
-    "slot_planning": {"target_clip_duration_sec", "replan_max_rounds"},
+    "arrangement_architect": {"target_clip_duration_sec", "replan_max_rounds"},
     "dialogue_anchors": {"max_anchors", "min_anchor_duration_sec"},
     "candidate_retrieval": {
         "candidates_per_slot",
@@ -231,6 +234,15 @@ def _llm_config(section: dict[str, Any]) -> LLMConfig:
         timeout_sec=float(section.get("timeout_sec", 180.0)),
         max_retries=int(section.get("max_retries", 3)),
         max_concurrency=int(section.get("max_concurrency", 4)),
+        input_price_yuan_per_million_tokens=float(
+            section.get("input_price_yuan_per_million_tokens", 0.0)
+        ),
+        cached_input_price_yuan_per_million_tokens=float(
+            section.get("cached_input_price_yuan_per_million_tokens", 0.0)
+        ),
+        output_price_yuan_per_million_tokens=float(
+            section.get("output_price_yuan_per_million_tokens", 0.0)
+        ),
     )
 
 
@@ -248,6 +260,15 @@ def _vlm_config(section: dict[str, Any]) -> VLMConfig:
         timeout_sec=float(section.get("timeout_sec", 180.0)),
         max_retries=int(section.get("max_retries", 3)),
         max_concurrency=int(section.get("max_concurrency", 4)),
+        input_price_yuan_per_million_tokens=float(
+            section.get("input_price_yuan_per_million_tokens", 0.0)
+        ),
+        cached_input_price_yuan_per_million_tokens=float(
+            section.get("cached_input_price_yuan_per_million_tokens", 0.0)
+        ),
+        output_price_yuan_per_million_tokens=float(
+            section.get("output_price_yuan_per_million_tokens", 0.0)
+        ),
     )
 
 
@@ -312,7 +333,7 @@ def _validate_values(config: AppConfig) -> None:
         "analyser.scene_segmentation.context_shots": analyser.scene_segmentation.context_shots,
         "analyser.scene_segmentation.focus_shots": analyser.scene_segmentation.focus_shots,
         "analyser.scene_segmentation.frames_per_shot": analyser.scene_segmentation.frames_per_shot,
-        "planners.slot_planning.target_clip_duration_sec": planners.slot_planning.target_clip_duration_sec,
+        "planners.arrangement_architect.target_clip_duration_sec": planners.arrangement_architect.target_clip_duration_sec,
         "planners.dialogue_anchors.max_anchors": planners.dialogue_anchors.max_anchors,
         "planners.dialogue_anchors.min_anchor_duration_sec": planners.dialogue_anchors.min_anchor_duration_sec,
         "planners.candidate_retrieval.candidates_per_slot": planners.candidate_retrieval.candidates_per_slot,
@@ -337,16 +358,34 @@ def _validate_values(config: AppConfig) -> None:
         raise ValueError(
             f"Config values must be positive: {sorted(invalid_positive)}"
         )
-    if planners.slot_planning.target_clip_duration_sec < 1.5:
+    if planners.arrangement_architect.target_clip_duration_sec < 1.5:
         raise ValueError(
-            "planners.slot_planning.target_clip_duration_sec must be at least 1.5"
+            "planners.arrangement_architect.target_clip_duration_sec must be at least 1.5"
         )
     non_negative = {
         "llm.temperature": config.llm.temperature,
         "llm.max_retries": config.llm.max_retries,
+        "llm.input_price_yuan_per_million_tokens": (
+            config.llm.input_price_yuan_per_million_tokens
+        ),
+        "llm.cached_input_price_yuan_per_million_tokens": (
+            config.llm.cached_input_price_yuan_per_million_tokens
+        ),
+        "llm.output_price_yuan_per_million_tokens": (
+            config.llm.output_price_yuan_per_million_tokens
+        ),
         "vlm.temperature": config.vlm.temperature,
         "vlm.max_retries": config.vlm.max_retries,
-        "planners.slot_planning.replan_max_rounds": planners.slot_planning.replan_max_rounds,
+        "vlm.input_price_yuan_per_million_tokens": (
+            config.vlm.input_price_yuan_per_million_tokens
+        ),
+        "vlm.cached_input_price_yuan_per_million_tokens": (
+            config.vlm.cached_input_price_yuan_per_million_tokens
+        ),
+        "vlm.output_price_yuan_per_million_tokens": (
+            config.vlm.output_price_yuan_per_million_tokens
+        ),
+        "planners.arrangement_architect.replan_max_rounds": planners.arrangement_architect.replan_max_rounds,
         "planners.script_review.review_rounds": planners.script_review.review_rounds,
         "planners.source_window_optimization.search_margin_sec": planners.source_window_optimization.search_margin_sec,
         "planners.source_window_optimization.min_boundary_distance_sec": planners.source_window_optimization.min_boundary_distance_sec,
@@ -434,7 +473,7 @@ def load_config(path: Path) -> AppConfig:
     asr = _section(data, "analyser", "asr")
     scene = _section(data, "analyser", "scene_segmentation")
     annotation = _section(data, "analyser", "shot_annotation")
-    slot = _section(data, "planners", "slot_planning")
+    arrangement = _section(data, "planners", "arrangement_architect")
     anchors = _section(data, "planners", "dialogue_anchors")
     retrieval = _section(data, "planners", "candidate_retrieval")
     beam = _section(data, "planners", "beam_search")
@@ -495,11 +534,13 @@ def load_config(path: Path) -> AppConfig:
             ),
         ),
         planners=PlannersConfig(
-            slot_planning=SlotPlanningConfig(
+            arrangement_architect=ArrangementArchitectConfig(
                 target_clip_duration_sec=float(
-                    slot.get("target_clip_duration_sec", 4.0)
+                    arrangement.get("target_clip_duration_sec", 4.0)
                 ),
-                replan_max_rounds=int(slot.get("replan_max_rounds", 3)),
+                replan_max_rounds=int(
+                    arrangement.get("replan_max_rounds", 3)
+                ),
             ),
             dialogue_anchors=DialogueAnchorConfig(
                 max_anchors=int(anchors.get("max_anchors", 4)),

@@ -13,7 +13,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 class PromptStage(StrEnum):
     ANALYSER = "analyser"
-    PLANNER = "planner"
+    PLANNERS = "planners"
 
 
 class PromptTask(StrEnum):
@@ -22,7 +22,7 @@ class PromptTask(StrEnum):
     SHOT_ANNOTATION = "shot_annotation"
     SEGMENT_SUMMARY = "segment_summary"
     VIDEO_SUMMARY = "video_summary"
-    SLOT_PLANNING = "slot_planning"
+    SLOT_ARRANGEMENT = "slot_arrangement"
     DIALOGUE_ANCHOR_SELECTION = "dialogue_anchor_selection"
     CANDIDATE_RETRIEVAL = "candidate_retrieval"
     CANDIDATE_VISUAL_SCORING = "candidate_visual_scoring"

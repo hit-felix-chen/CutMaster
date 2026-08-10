@@ -13,7 +13,7 @@ class PromptFailureCode(StrEnum):
     MODEL_REQUEST_FAILED = "model_request_failed"
     MODEL_RETRY_EXHAUSTED = "model_retry_exhausted"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
-    PLANNING_ATTEMPT_INFEASIBLE = "planning_attempt_infeasible"
+    PLANNERS_STAGE_ATTEMPT_INFEASIBLE = "planners_stage_attempt_infeasible"
     RESPONSE_VALIDATION_FAILED = "response_validation_failed"
     CANDIDATE_RETRIEVAL_FAILED = "candidate_retrieval_failed"
     INSUFFICIENT_NON_OVERLAPPING_CAPACITY = (
@@ -96,7 +96,7 @@ PROMPT_FAILURE_CATALOG: dict[
         ),
         repair_requirement=(
             "Stop automatic retries and surface the accumulated validation or provider "
-            "diagnostics to the caller for replanning or configuration repair."
+            "diagnostics to the caller for ASTER redesign or configuration repair."
         ),
     ),
     PromptFailureCode.MODEL_RETRY_SCHEDULED: PromptFailureDefinition(
@@ -120,9 +120,9 @@ PROMPT_FAILURE_CATALOG: dict[
             "payload so it fits the provider limit, then submit it again."
         ),
     ),
-    PromptFailureCode.PLANNING_ATTEMPT_INFEASIBLE: PromptFailureDefinition(
+    PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE: PromptFailureDefinition(
         diagnosis=(
-            "Planning attempt {attempt} became infeasible during {stage}: "
+            "ASTER attempt {attempt} became infeasible during {stage}: "
             "{error_message}"
         ),
         repair_requirement=(
@@ -225,7 +225,7 @@ PROMPT_FAILURE_CATALOG: dict[
                 "than required. The per-Slot deficits are {shortages}."
             ),
             repair_requirement=(
-                "Replan every deficient Slot with different source evidence and enough "
+                "Redesign every deficient Slot with different source evidence and enough "
                 "non-overlapping capacity, then retrieve and visually validate the "
                 "missing candidates."
             ),

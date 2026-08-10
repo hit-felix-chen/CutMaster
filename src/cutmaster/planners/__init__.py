@@ -1,5 +1,5 @@
-"""Public API for the complete ASTER planning stage."""
+"""Public API for the complete ASTER Planners stage."""
 
-from cutmaster.planners.planner import Planner
+from cutmaster.planners.planners import Planners
 
-__all__ = ["Planner"]
+__all__ = ["Planners"]

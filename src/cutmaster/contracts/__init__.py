@@ -6,10 +6,10 @@ from cutmaster.contracts.analyser import (
     MusicAnalysisRequest,
     MusicAnalysisResult,
 )
-from cutmaster.contracts.planning import (
+from cutmaster.contracts.planners import (
     MediaReference,
-    PlanningRequest,
-    PlanningResult,
+    PlannersRequest,
+    PlannersResult,
     RenderPlan,
 )
 from cutmaster.contracts.renderer import RenderRequest, RenderResult
@@ -21,8 +21,8 @@ __all__ = [
     "MusicAnalysisRequest",
     "MusicAnalysisResult",
     "MediaReference",
-    "PlanningRequest",
-    "PlanningResult",
+    "PlannersRequest",
+    "PlannersResult",
     "RenderPlan",
     "RenderRequest",
     "RenderResult",

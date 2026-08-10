@@ -4,10 +4,21 @@ CutMaster turns long-form footage into a finished montage through a three-stage
 **CutMaster Workflow**. Its editorial intelligence is organized as the
 **MASTER Editing Team** within the first two stages.
 
+## Implementation status
+
+The current backend implements the three-stage workflow, reusable video and
+music Materials, name-based selection, Material Fingerprint verification, and
+single-video/single-music editing. The project-layer concepts **Material
+Reference**, **Edit Project**, **Project Material Set**, immutable **ASTER Run**
+history, project-level **Frozen Edit**, and **Guided Revision** are proposed
+frontend/domain designs and are not implemented yet. Definitions and examples
+for those proposed concepts describe the intended contract, not current backend
+behaviour.
+
 ## Language
 
 **CutMaster Workflow**:
-The three-stage process **Analyser → Planner → Renderer**. The stages respectively
+The three-stage process **Analyser → Planners → Renderer**. The stages respectively
 build reusable material understanding, decide the edit, and realize the frozen
 edit as a video.
 _Avoid_: MASTER Editing Team, six-stage agent chain, pipeline
@@ -17,10 +28,10 @@ The first workflow stage. It uses the **Material Analyst** to produce reusable
 **Material Memory** from source video and music assets.
 _Avoid_: Material Analyst when naming the stage, preprocessing
 
-**Planner**:
-The second workflow stage. It uses the **ASTER Planning Team** to make and freeze
+**Planners**:
+The second workflow stage. It uses the **ASTER Team** to make and freeze
 all editorial decisions before rendering.
-_Avoid_: ASTER Planning Team when naming the stage, planning module
+_Avoid_: ASTER Team when naming the stage, monolithic editor
 
 **Renderer**:
 The final, deterministic workflow stage that realizes a frozen edit as one video
@@ -29,13 +40,13 @@ _Avoid_: Production, Rendering Agent, editing agent
 
 **MASTER Editing Team**:
 CutMaster's six-role editorial intelligence: one **Material Analyst** followed by
-the five-agent **ASTER Planning Team**. The **Renderer** is not a member.
+the five-agent **ASTER Team**. The **Renderer** is not a member.
 _Avoid_: CutMaster Workflow, Renderer, six-stage workflow
 
-**ASTER Planning Team**:
-The planning team formed by the **Arrangement Architect**, **Story Editor**,
+**ASTER Team**:
+The Planners-stage team formed by the **Arrangement Architect**, **Story Editor**,
 **Timeline Scout**, **Edit Composer**, and **Revision Editor**.
-_Avoid_: Planner when referring to the team, planning module
+_Avoid_: Planners when referring to the team, monolithic editor
 
 **Editorial Agent**:
 A role-bounded decision maker that owns one editorial responsibility and may use
@@ -44,13 +55,13 @@ _Avoid_: LLM call, prompt stage
 
 **Material Analyst**:
 The M agent that converts source video and music assets into reusable
-**Material Memory** before edit-specific planning begins.
+**Material Memory** before edit-specific decisions begin.
 _Avoid_: Analyser when referring to the agent, preprocessing
 
 **Arrangement Architect**:
 The A agent that defines the montage's Slot arrangement, pacing, emotional
 progression, and narrative structure.
-_Avoid_: Slot Planner, Rhythm Planner
+_Avoid_: Slot Scheduler, Rhythm Scheduler
 
 **Story Editor**:
 The S agent that uses selected original dialogue to anchor story events,
@@ -112,27 +123,33 @@ A Material whose current source bytes no longer match its recorded
 only be deleted and added again as a new Material.
 _Avoid_: Updated Material, stale cache, replacement
 
-**Material Reference**:
-A dependency held by an **Edit Project**, Planning Run, or **Frozen Edit** on one
-exact Material. A referenced Material cannot be deleted until those dependent
-edits are removed.
+**Material Reference** *(Proposed; reference persistence is not implemented)*:
+A future dependency held by an **Edit Project**, **ASTER Run**, or **Frozen
+Edit** on one exact Material. Once the project layer is implemented, a
+referenced Material will not be deletable until those dependent edits are
+removed. The current low-level Material Library deletion API accepts the
+reference-check result from its caller.
 _Avoid_: Source path, copied asset, soft reference
 
-**Edit Project**:
-A creative workspace that groups its project materials, Planning Runs,
+**Edit Project** *(Proposed; not implemented)*:
+A future creative workspace that groups its project materials, **ASTER Runs**,
 **Frozen Edits**, and rendered variants around one editing goal.
 _Avoid_: Workflow Run, Material Memory, output directory
 
-**Project Material Set**:
-The type-specific collection of video or music **Material References** owned by
-an **Edit Project**. The initial product permits exactly one video and one music
-Material, while the concept remains valid when multiple sources are supported.
+**Project Material Set** *(Proposed; not implemented)*:
+The future type-specific collection of video or music **Material References**
+owned by an **Edit Project**. The current backend accepts exactly one video and
+one music Material per workflow request; the proposed collection keeps the
+domain extensible when multiple sources are supported.
 _Avoid_: Material Library, single source path, Frozen Edit
 
-**Planning Run**:
-An immutable attempt within an **Edit Project** that freezes its Material
-References, creative request, planning settings, and model usage and produces an
-initial **Frozen Edit**. Any input change creates another Planning Run.
+**ASTER Run** *(Proposed immutable project history; not implemented)*:
+A future immutable attempt within an **Edit Project** that freezes its Material
+References, creative request, arrangement settings, and model usage and
+produces an initial **Frozen Edit**. In the proposed project layer, any input
+change creates another ASTER Run. The current backend writes one set of
+Planners artifacts to the requested output directory and may overwrite it when
+explicitly requested.
 _Avoid_: Edit Project, overwritten plan, Guided Revision
 
 **Material Memory**:
@@ -151,7 +168,7 @@ musical structure such as tempo, beats, accents, energy, and sections.
 _Avoid_: Music Profile, BGM preprocessing, project music
 
 **Slot**:
-One planned interval on the output timeline with an editorial purpose, target
+One arranged interval on the output timeline with an editorial purpose, target
 duration, emotional intent, and visual requirements.
 _Avoid_: Clip, scene
 
@@ -165,20 +182,22 @@ The validated set of source-timeline alternatives from which the final visual
 choice for each unanchored Slot may be made.
 _Avoid_: Search results, retrieved clips
 
-**Frozen Edit**:
-A complete, versioned set of source choices and output timing that the
-**Renderer** can realize without editorial discretion.
+**Frozen Edit** *(Proposed project entity; not implemented)*:
+A future complete, versioned set of source choices and output timing that the
+**Renderer** can realize without editorial discretion. The current executable
+equivalent is `RenderPlan`, but it is not yet managed as project history.
 _Avoid_: Final video, mutable timeline, render cache
 
-**Guided Revision**:
-A user-directed replacement of one Slot's selected passage with another member
-of its existing **Candidate Space**. It preserves Slot timing and planning
-constraints and produces a new **Frozen Edit**.
-_Avoid_: Freeform timeline editing, re-planning, Revision Editor
+**Guided Revision** *(Proposed; not implemented)*:
+A future user-directed replacement of one Slot's selected passage with another
+member of its existing **Candidate Space**. It will preserve Slot timing and
+arrangement constraints and produce a new **Frozen Edit**.
+_Avoid_: Freeform timeline editing, rerunning ASTER coordination, Revision Editor
 
 **Music Profile**:
-A Planning Run-specific projection of **Music Memory** onto its requested output
-duration, used by the **Arrangement Architect** to shape pacing.
+A Planners-invocation-specific projection of **Music Memory** onto its requested
+output duration, used by the **Arrangement Architect** to shape pacing. It will
+belong to an **ASTER Run** once project history is implemented.
 _Avoid_: Music Memory, source music analysis, reusable material
 
 ## Flagged ambiguities
@@ -189,9 +208,9 @@ sequence assembly, and **Revision Editor** owns final review. The unqualified
 term “Editor” should not name an agent.
 
 **Revision**:
-The **Revision Editor** performs automatic revision during planning, while a
-person performs a **Guided Revision** after reviewing a frozen result. Use the
-qualified term to distinguish them.
+The **Revision Editor** performs automatic revision during ASTER coordination.
+The proposed project layer will let a person perform a **Guided Revision**
+after reviewing a frozen result. Use the qualified term to distinguish them.
 
 ## Example dialogue
 
@@ -208,17 +227,19 @@ qualified term to distinguish them.
 > **Developer:** Is the Renderer the last member of the MASTER Editing Team?
 >
 > **Domain expert:** No. MASTER makes the editorial decisions across the Analyser
-> and Planner stages; the Renderer deterministically realizes the frozen plan.
+> and Planners stages; the Renderer deterministically realizes the frozen plan.
 
 > **Developer:** Can a person drag any source clip onto the output timeline?
 >
-> **Domain expert:** No. A Guided Revision may replace a Slot only with an
-> existing member of its Candidate Space, producing a new Frozen Edit.
+> **Domain expert:** Not in the current backend. The proposed Guided Revision
+> will replace a Slot only with an existing member of its Candidate Space,
+> producing a new Frozen Edit.
 
 > **Developer:** Can two projects using the same song share their Music Profile?
 >
-> **Domain expert:** They share one Music Memory. Each Planning Run derives its
-> own Music Profile because its requested output duration may differ.
+> **Domain expert:** They share one Music Memory. Each Planners invocation
+> derives its own Music Profile because its requested output duration may
+> differ; the future project layer will associate it with an ASTER Run.
 
 > **Developer:** What happens when I upload the same file twice with the same
 > candidate name?
@@ -249,15 +270,18 @@ qualified term to distinguish them.
 
 > **Developer:** Can a Material be deleted while a Frozen Edit uses it?
 >
-> **Domain expert:** No. Its Material Reference protects it; the dependent edit
-> must be removed first.
+> **Domain expert:** The current low-level deletion API relies on its caller to
+> supply the reference check. Once the proposed project layer is implemented,
+> its Material Reference will protect it until the dependent edit is removed.
 
 > **Developer:** Is an Edit Project permanently limited to one video and song?
 >
-> **Domain expert:** No. Its Project Material Sets are collections; the initial
-> product constrains each set to one Material until multi-source editing exists.
+> **Domain expert:** The current backend accepts one video and one song. The
+> proposed Project Material Sets are collections so the future project contract
+> can expand without changing this domain concept.
 
-> **Developer:** Does changing the prompt update the previous Planning Run?
+> **Developer:** Does changing the prompt update the previous ASTER Run?
 >
-> **Domain expert:** No. It creates another immutable Planning Run, and the
-> previous run remains available with its original result and usage.
+> **Domain expert:** Today, `--overwrite` replaces artifacts in the selected
+> output directory. The proposed project layer will instead create another
+> immutable ASTER Run and retain the previous result and usage.

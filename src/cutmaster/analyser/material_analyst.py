@@ -27,7 +27,7 @@ from cutmaster.contracts.material import MaterialAnalysisResult
 from cutmaster.runtime.shot_detection import detect_source_cuts
 from cutmaster.analyser.tools.dialogue import postprocess_dialogues
 from cutmaster.analyser.tools.music_analysis import analyze_music_memory
-from cutmaster.analyser.scene_segmenter import (
+from cutmaster.analyser.tools.scene_segmenter import (
     SCENE_SEGMENTATION_VERSION,
     build_segments_from_scene_boundaries,
     detect_scene_boundaries,
@@ -43,7 +43,7 @@ from cutmaster.configuration.schema import (
     VLMConfig,
 )
 from cutmaster.runtime.observability import log_event
-from cutmaster.runtime.model_gateway import empty_usage_summary
+from cutmaster.runtime.model_gateway import empty_usage_summary, load_usage_summary
 from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.prompting.failure_catalog import (
     PromptFailureCode,
@@ -1349,6 +1349,10 @@ def _cache_result(material_directory: Path) -> MaterialAnalysisResult | None:
             else None
         ),
         model_usage_summary=empty_usage_summary(),
+        model_usage_cumulative_summary=load_usage_summary(
+            material_directory / "model_usage.json",
+            cumulative=True,
+        ),
         analysis_reused=True,
     )
 
@@ -1842,6 +1846,9 @@ def _analyse_video_material(
         video_summary=video_summary,
         model_usage_path=model_usage_path,
         model_usage_summary=context.model_usage_summary(),
+        model_usage_cumulative_summary=context.model_usage_summary(
+            include_prior=True
+        ),
     )
 
 

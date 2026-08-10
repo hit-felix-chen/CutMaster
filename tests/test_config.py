@@ -16,6 +16,9 @@ base_url = "https://example.invalid/v1"
 api_key_env = "CUTMASTER_TEST_KEY"
 enable_thinking = false
 max_concurrency = 2
+input_price_yuan_per_million_tokens = 1.5
+cached_input_price_yuan_per_million_tokens = 0.15
+output_price_yuan_per_million_tokens = 6.0
 
 [vlm]
 model = "test-vlm"
@@ -23,6 +26,9 @@ base_url = "https://vision.example.invalid/v1"
 api_key_env = "CUTMASTER_TEST_KEY"
 enable_thinking = true
 max_concurrency = 3
+input_price_yuan_per_million_tokens = 2.5
+cached_input_price_yuan_per_million_tokens = 0.5
+output_price_yuan_per_million_tokens = 10.0
 
 [analyser.material_analysis]
 material_cache_dir = "materials"
@@ -42,7 +48,7 @@ shot_sample_frames = 5
 max_images_per_request = 200
 max_shots_per_request = 16
 
-[planners.slot_planning]
+[planners.arrangement_architect]
 target_clip_duration_sec = 4.5
 replan_max_rounds = 2
 
@@ -94,9 +100,15 @@ threads = 2
     assert config.llm.model == "test-llm"
     assert config.llm.enable_thinking is False
     assert config.llm.max_concurrency == 2
+    assert config.llm.input_price_yuan_per_million_tokens == 1.5
+    assert config.llm.cached_input_price_yuan_per_million_tokens == 0.15
+    assert config.llm.output_price_yuan_per_million_tokens == 6.0
     assert config.vlm.model == "test-vlm"
     assert config.vlm.enable_thinking is True
     assert config.vlm.max_concurrency == 3
+    assert config.vlm.input_price_yuan_per_million_tokens == 2.5
+    assert config.vlm.cached_input_price_yuan_per_million_tokens == 0.5
+    assert config.vlm.output_price_yuan_per_million_tokens == 10.0
     assert config.analyser.material_analysis.material_cache_dir == tmp_path / "materials"
     assert config.analyser.shot_detection.adaptive_threshold == 2.5
     assert config.analyser.scene_segmentation.context_shots == 20
@@ -105,8 +117,8 @@ threads = 2
     assert config.analyser.shot_annotation.shot_sample_frames == 5
     assert config.analyser.shot_annotation.max_images_per_request == 200
     assert config.analyser.shot_annotation.max_shots_per_request == 16
-    assert config.planners.slot_planning.target_clip_duration_sec == 4.5
-    assert config.planners.slot_planning.replan_max_rounds == 2
+    assert config.planners.arrangement_architect.target_clip_duration_sec == 4.5
+    assert config.planners.arrangement_architect.replan_max_rounds == 2
     assert (
         config.planners.candidate_retrieval.protagonist_visibility_likert_threshold
         == 4
@@ -241,6 +253,30 @@ api_key = "secret"
     )
 
     with pytest.raises(ValueError, match=r"\[llm\]\.enable_thinking"):
+        load_config(path)
+
+
+def test_model_prices_must_be_non_negative(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+input_price_yuan_per_million_tokens = -1
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.asr]
+api_key = "secret"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be non-negative"):
         load_config(path)
 
 

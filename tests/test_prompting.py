@@ -18,7 +18,7 @@ from cutmaster.prompting.failure_catalog import (
 )
 from cutmaster.prompting.planners import (
     DialogueAnchorSelectionDetails,
-    SlotPlanningDetails,
+    SlotArrangementDetails,
 )
 
 
@@ -53,12 +53,12 @@ def test_registry_exposes_every_model_task() -> None:
         (PromptStage.ANALYSER, PromptTask.SHOT_ANNOTATION),
         (PromptStage.ANALYSER, PromptTask.SEGMENT_SUMMARY),
         (PromptStage.ANALYSER, PromptTask.VIDEO_SUMMARY),
-        (PromptStage.PLANNER, PromptTask.SLOT_PLANNING),
-        (PromptStage.PLANNER, PromptTask.DIALOGUE_ANCHOR_SELECTION),
-        (PromptStage.PLANNER, PromptTask.CANDIDATE_RETRIEVAL),
-        (PromptStage.PLANNER, PromptTask.CANDIDATE_VISUAL_SCORING),
-        (PromptStage.PLANNER, PromptTask.PAIRWISE_SCORING),
-        (PromptStage.PLANNER, PromptTask.SCRIPT_REVIEW),
+        (PromptStage.PLANNERS, PromptTask.SLOT_ARRANGEMENT),
+        (PromptStage.PLANNERS, PromptTask.DIALOGUE_ANCHOR_SELECTION),
+        (PromptStage.PLANNERS, PromptTask.CANDIDATE_RETRIEVAL),
+        (PromptStage.PLANNERS, PromptTask.CANDIDATE_VISUAL_SCORING),
+        (PromptStage.PLANNERS, PromptTask.PAIRWISE_SCORING),
+        (PromptStage.PLANNERS, PromptTask.SCRIPT_REVIEW),
     }
 
 
@@ -102,11 +102,11 @@ def test_segment_summary_prompt_requires_one_concise_summary() -> None:
     assert package.context_keys == ()
 
 
-def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
+def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
     package = prompt_registry.build(
-        PromptStage.PLANNER,
-        PromptTask.SLOT_PLANNING,
-        SlotPlanningDetails(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
             target_duration_sec=60.0,
             target_clip_duration_sec=4.0,
             allowed_segment_ids=["segment_0001", "segment_0002"],
@@ -143,11 +143,11 @@ def test_slot_planning_contract_leaves_slot_count_to_model() -> None:
         "request",
         "music_profile",
         "source_story_context",
-        "planning_feedback",
+        "planners_feedback",
     )
 
 
-def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None:
+def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> None:
     constraints = {
         "slot_02": {
             "desired_duration_sec": 3.0,
@@ -161,9 +161,9 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
         },
     }
     package = prompt_registry.build(
-        PromptStage.PLANNER,
-        PromptTask.SLOT_PLANNING,
-        SlotPlanningDetails(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
             target_duration_sec=20.0,
             target_clip_duration_sec=4.0,
             allowed_segment_ids=[],
@@ -221,7 +221,7 @@ def test_targeted_slot_planning_contract_batches_exact_requested_slots() -> None
 
 def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     package = prompt_registry.build(
-        PromptStage.PLANNER,
+        PromptStage.PLANNERS,
         PromptTask.DIALOGUE_ANCHOR_SELECTION,
         DialogueAnchorSelectionDetails(
             slots=[

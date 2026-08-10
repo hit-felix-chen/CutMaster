@@ -1,2 +1,1 @@
-"""Internal tools shared by the ASTER planning agents."""
-
+"""Internal tools shared by the ASTER agents."""

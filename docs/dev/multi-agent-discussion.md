@@ -13,7 +13,7 @@ ASTER = Arrangement Architect
 
 M 负责建立与具体剪辑任务无关的 Material Memory；ASTER 是共享同一规划状态的
 五智能体剪辑团队。完整工作流由 `Orchestrator` 启动，素材分析、规划和渲染也可
-分别通过 `Analyser`、`Planner`、`Renderer` 独立执行。ASTER 内部协作由
+分别通过 `Analyser`、`Planners`、`Renderer` 独立执行。ASTER 内部协作由
 `ASTERTeam` 编排。
 
 ## 设计目标
@@ -68,7 +68,7 @@ Material Memory
 
 模型原始 Prompt、隐藏推理过程和未经解析的响应不属于业务状态。只有通过响应契约
 和本地校验的结构化结果才能进入共享状态。`ASTERTeam` 是唯一有权协调角色调用、
-提交修订和发起新 planning revision 的组件。
+提交修订和发起新 ASTER repair round 的组件。
 
 ## M — Material Analyst
 
@@ -139,7 +139,7 @@ composition_score = 0.60 × unary_score + 0.40 × pairwise_score
 ```
 
 时间重叠是硬约束。Beam Search 无解时不会发明新时间戳，而是返回诊断并启动新的
-规划 revision。
+ASTER repair round。
 
 ## R — Revision Editor
 
@@ -159,8 +159,8 @@ Agent 拥有编辑决策和业务责任；Tool 提供确定性能力：
 
 | Agent                 | 典型 Tool                                       |
 | --------------------- | ----------------------------------------------- |
-| Material Analyst      | ASR、Shot detection、缓存、视频摘要校验         |
-| Arrangement Architect | Music analysis、Beat alignment、Slot validation |
+| Material Analyst      | ASR、Shot detection、完整音乐分析、缓存、视频摘要校验 |
+| Arrangement Architect | Music Profile projection、Beat alignment、Slot validation |
 | Story Editor          | 台词连续性、同步范围与 Anchor 冲突校验          |
 | Timeline Scout        | Segment media、容量检查、运动分析、视觉验证     |
 | Edit Composer         | Chronology preflight、视觉评分、Beam Search     |
@@ -168,7 +168,7 @@ Agent 拥有编辑决策和业务责任；Tool 提供确定性能力：
 
 Agent 可以同时使用 LLM、VLM 和确定性工具；“Agent”不等于一次模型调用。
 Plan Compiler 位于 ASTER 修订之后，负责固化源窗口和输出帧时间线；Renderer
-只实现该计划，不属于任何 Planner Agent 的私有工具，也不调用模型。
+只实现该计划，不属于任何 ASTER Agent 的私有工具，也不调用模型。
 
 ## 生命周期
 

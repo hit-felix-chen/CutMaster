@@ -16,7 +16,7 @@ CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它�
   <img src="assets/framework.png" alt="CutMaster MASTER 多智能体剪辑架构示意图" width="100%">
 </p>
 
-<p align="center"><em>CutMaster 从长视频素材与用户意图出发，由 MASTER 团队协同完成素材理解、剪辑规划、序列优化与最终渲染。</em></p>
+<p align="center"><em>CutMaster 从长视频素材与用户意图出发，由 MASTER 团队协同完成素材理解、剪辑决策、序列优化与最终渲染。</em></p>
 
 ## MASTER Editing Team
 
@@ -35,11 +35,11 @@ CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 
 ```text
 M       = Analyser
-ASTER   = Planning team
+ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-`Orchestrator` 是完整工作流入口；`Analyser`、`Planner` 和 `Renderer` 也可以独立调用。`ASTERTeam` 是五个规划智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
+`Orchestrator` 是完整工作流入口；`Analyser`、`Planners` 和 `Renderer` 也可以独立调用。`ASTERTeam` 是五个剪辑智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
 
 ## 架构
 
@@ -75,14 +75,14 @@ CLI
 └── Orchestrator
     ├── Analyser
     │   └── MaterialAnalystAgent
-    ├── Planner
-    │   └── ASTERTeam
-    │   ├── ArrangementArchitectAgent
-    │   ├── StoryEditorAgent
-    │   ├── TimelineScoutAgent
-    │   ├── EditComposerAgent
-    │   └── RevisionEditorAgent
-    │   └── plan compiler / source-window optimization
+    ├── Planners
+    │   ├── ASTERTeam
+    │   │   ├── ArrangementArchitectAgent
+    │   │   ├── StoryEditorAgent
+    │   │   ├── TimelineScoutAgent
+    │   │   ├── EditComposerAgent
+    │   │   └── RevisionEditorAgent
+    │   └── plan compiler / source-window optimization tools
     └── Renderer
         ├── dialogue audio preparation
         └── frame-exact rendering
@@ -91,8 +91,8 @@ CLI
 ### 智能体与工具的边界
 
 - **Agent 负责决策**：理解素材、规划结构、选择故事锚点、构造候选空间、组接序列和复核脚本。
-- **Tool 负责能力**：ASR、素材库、完整音乐分析、媒体读取、Music Profile 投影、运动计算、视觉评分和规划反馈等非智能体能力分别位于 `analyser/tools/` 与 `planners/tools/`。
-- **Planner 交付精确计划**：源窗口优化、Beat 微调和输出帧分配都属于剪辑决策，最终固化为不可变的 `RenderPlan`。
+- **Tool 负责能力**：ASR、素材库、完整音乐分析、媒体读取、Music Profile 投影、运动计算、视觉评分和 ASTER 协作反馈等非智能体能力分别位于 `analyser/tools/` 与 `planners/tools/`。
+- **Planners 交付精确计划**：源窗口优化、Beat 微调和输出帧分配都属于剪辑决策，最终固化为不可变的 `RenderPlan`。
 - **Renderer 负责执行**：只按照 `RenderPlan` 准备人声、执行 FFmpeg 渲染和混音，不访问 LLM/VLM，也不修改规划。
 - **共享基础设施保持中立**：配置、契约、Prompt 注册和运行时能力分别位于 `configuration/`、`contracts/`、`prompting/` 与 `runtime/`。
 
@@ -102,7 +102,7 @@ CLI
 
 Material Library 保存视频和音乐的只读托管副本，并用唯一的 **Material Name** 作为公开身份。未显式指定名称时，CLI 使用源文件的 filename stem 作为候选名；同一素材类型内，同一候选名称族与相同 SHA-256 再次添加时直接复用已有 Material 及其分析结果，同名但内容不同时则依次分配 `Name (2)`、`Name (3)`。即使文件内容相同，只要显式使用了不同候选名，也会建立两个可独立选择的 Material。
 
-SHA-256 仅作为内部一致性校验，不拼入 Material Name，也不作为 CLI 选择参数。若托管源文件与记录的指纹不一致，该 Material 会被阻止进入分析、规划和渲染；当前素材只支持添加和删除，不支持就地替换。
+SHA-256 仅作为内部一致性校验，不拼入 Material Name，也不作为 CLI 选择参数。若托管源文件与记录的指纹不一致，该 Material 会被阻止进入分析、规划和渲染。底层 Material Library 支持添加和删除，但删除尚未暴露给 CLI 或前端；不支持就地替换。
 
 已完成的 Material Memory 会直接复用；中断的视频分析只能在字幕与分析规格未变时继续，防止不同输入的 checkpoint 被混合。
 
@@ -110,14 +110,14 @@ Material Analyst 对视频使用 PySceneDetect 提取完整 Shot 边界并把 AS
 
 ### 2. 音乐驱动的 Slot 编排
 
-完整曲目的分析由 Analyser 中的 Material Analyst 完成。Planner 不重新解码和分析音乐；Arrangement Architect 从可复用 Music Memory 出发，根据本次目标时长进行截断或循环投影，生成 Planning 专属的 Music Profile，再把时间线编排为一组 Slot。每个 Slot 同时表达：
+完整曲目的分析由 Analyser 中的 Material Analyst 完成。Planners 不重新解码和分析音乐；Arrangement Architect 从可复用 Music Memory 出发，根据本次目标时长进行截断或循环投影，生成当前 Planners 调用专属的 Music Profile，再把时间线编排为一组 Slot。每个 Slot 同时表达：
 
 - 时间预算与节奏位置；
 - 叙事功能和目标内容；
 - 情绪、镜头尺度与运动倾向；
 - 与前后 Slot 的结构关系。
 
-Slot Planning 决定“成片需要什么”，而不是直接决定“使用哪个镜头”。
+Slot Arrangement 决定“成片需要什么”，而不是直接决定“使用哪个镜头”。
 
 ### 3. 原声台词作为故事锚点
 
@@ -141,7 +141,7 @@ Edit Composer 同时考虑：
 
 ### 6. 候选约束下的最终修订
 
-Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeline Scout 临时生成未经验证的片段。Planner 随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划生成纯 BGM 或带原声版本。
+Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeline Scout 临时生成未经验证的片段。Planners 随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划生成纯 BGM 或带原声版本。
 
 ## 快速开始
 
@@ -151,7 +151,7 @@ Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeli
 - [uv](https://docs.astral.sh/uv/)
 - FFmpeg 与 FFprobe
 - 支持 OpenAI-compatible 接口的 LLM/VLM 服务
-- 百炼 ASR 所需的 API Key
+- 默认配置所需的 DeepSeek 与阿里云百炼 API Key；也可以让所有模型服务统一使用百炼
 
 macOS 可使用：
 
@@ -173,13 +173,20 @@ uv sync
 cp .env.example .env
 ```
 
-填写：
+默认配置以成本优先：文本 LLM 使用 DeepSeek，VLM 与 ASR 使用 DashScope，需要填写两个 API Key：
 
 ```dotenv
-DASHSCOPE_API_KEY=your_api_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
 
 # 可选：用于认证 Demucs 模型下载
 HF_TOKEN=
+```
+
+如果更希望配置简单，可以让 LLM、VLM 和 ASR 全部使用 DashScope：在 `config.toml` 的 `[llm]` 中注释默认的 DeepSeek `model`、`base_url` 和 `api_key_env`，再解除紧随其后的 `qwen3.7-max` 三行备选配置。此时 `.env` 只需填写：
+
+```dotenv
+DASHSCOPE_API_KEY=your_dashscope_api_key
 ```
 
 CLI 会自动读取与 `config.toml` 同目录的 `.env`，且不会覆盖进程中已有的环境变量。
@@ -234,7 +241,7 @@ uv run python -m cutmaster run --help
 | `--video-material`, `--music-material` | 按精确 Material Name 选择已完成分析的视频和音乐素材 |
 | `--max-clip-duration` | 限制单个候选片段的最长时长 |
 | `--audio-mode` | `bgm_only` 或 `dialogue` |
-| `--overwrite` | 覆盖已有输出并启动新一轮规划 |
+| `--overwrite` | 覆盖所选输出目录中的已有产物；不保留不可变 ASTER Run 历史 |
 
 三个阶段也可以独立运行：
 
@@ -258,7 +265,7 @@ uv run cutmaster plan \
 uv run cutmaster render --plan artifacts/cutmaster/planners/render_plan.json --audio-mode dialogue --output-dir artifacts/cutmaster/renderer
 ```
 
-`plan` 也接受显式分析结果路径：视频使用 `--analysis-result`，音乐使用 `--music-analysis-result`。为兼容原有调用，音乐还可以直接通过 `--audio` 传入；此时 Analyser 会先建立或复用对应的 Music Memory，再进入 Planner。
+`plan` 也接受显式分析结果路径：视频使用 `--analysis-result`，音乐使用 `--music-analysis-result`。为兼容原有调用，音乐还可以直接通过 `--audio` 传入；此时 Analyser 会先建立或复用对应的 Music Memory，再进入 Planners。
 
 ### Python API
 
@@ -285,7 +292,7 @@ result = Orchestrator(config).run(request)
 print(result.output_video)
 ```
 
-外部调用方和 Benchmark Adapter 应通过 `Orchestrator` 使用完整入口，或通过 `Analyser`、`Planner`、`Renderer` 调用单独阶段，不应依赖内部 Agent 或 Tool。
+外部调用方和 Benchmark Adapter 应通过 `Orchestrator` 使用完整入口，或通过 `Analyser`、`Planners`、`Renderer` 调用单独阶段，不应依赖内部 Agent 或 Tool。
 
 ## 配置
 
@@ -293,9 +300,9 @@ print(result.output_video)
 
 | 配置段 | 所有者 | 主要内容 |
 |---|---|---|
-| `[llm]`, `[vlm]` | Runtime | 模型、接口、超时、重试和并发 |
+| `[llm]`, `[vlm]` | Runtime | 模型、接口、超时、重试、并发，以及输入/缓存输入/输出单价 |
 | `[analyser.*]` | Analyser | Material Library、ASR、切镜、Scene/Shot 标注、完整音乐分析和素材缓存 |
-| `[planners.slot_planning]` | Arrangement Architect | 目标镜头长度与重规划轮数 |
+| `[planners.arrangement_architect]` | Arrangement Architect | 目标镜头长度与定向修复轮数 |
 | `[planners.dialogue_anchors]` | Story Editor | 锚点数量和最短时长 |
 | `[planners.candidate_retrieval]` | Timeline Scout | 候选数量、检索轮次和视觉验证 |
 | `[planners.beam_search]` | Edit Composer | Beam Search 宽度 |
@@ -305,6 +312,8 @@ print(result.output_video)
 
 默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `1800` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
 
+模型单价统一使用“元/百万 token”。每次模型调用都会把当时的单价快照写入 usage artifact；因此修改配置只影响之后的新调用，不会用新价格重算历史费用。缓存命中输入、未缓存输入和输出分别计费，reasoning token 已包含在输出 token 中，不会重复计费。
+
 ## 输出产物
 
 一次运行按阶段保存产物：
@@ -312,19 +321,24 @@ print(result.output_video)
 | 产物 | 含义 |
 |---|---|
 | `result.json` | 完整运行结果、耗时和产物路径 |
+| `model_usage.json` | 工作流级 token 与费用汇总，分别包含 `current_run` 和 `cumulative`，并按任务、模型拆分 |
 | `analyser/analysis_result.json` | 本次使用的 Video Material Memory 正式索引 |
 | `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json` | 原始与重建后的台词数据 |
 | `analyser/music/music_analysis_result.json` | 本次使用的 Music Memory 正式索引 |
 | `analyser/music/music_memory.json` | 完整源曲目的节拍、重音、能量与段落分析 |
-| `planners/render_plan.json` | Planner 交付给 Renderer 的不可变、帧精确计划 |
-| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | 本次目标时长的 Music Profile 与其他 Planning 中间产物 |
-| `planners/diagnostics/` | Beam 诊断、规划历史和模型调用树 |
+| `planners/planners_result.json` | Planners 阶段结果与 ASTER 协作摘要 |
+| `planners/render_plan.json` | Planners 交付给 Renderer 的不可变、帧精确计划 |
+| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | 本次目标时长的 Music Profile 与其他 ASTER 中间产物 |
+| `planners/diagnostics/` | Beam 诊断、ASTER 修复历史和模型调用树 |
+| `planners/diagnostics/model_usage.json` | Planners 的逐调用价格快照、本次运行与累计 usage |
 | `renderer/montage.mp4` | 可跨音频版本复用的无声蒙太奇 |
 | `renderer/output.mp4` | 当前 Render 的最终视频 |
 | `renderer/render_request.json`, `render_result.json` | 渲染请求与结果 |
 | `cutmaster.log` | 结构化运行日志 |
 
 Material Library 的清单与托管素材位于配置指定的 `.cutmaster/materials/`。每个视频 Material 的分析目录保存 `video_description.json`、`video_summary.json` 和 `analysis_history.json`，每个音乐 Material 的分析目录保存 `music_memory.json`；CLI 通过 Material Name 解析这些缓存，而不要求调用方持有缓存路径。
+
+Video Material 分析目录还保存自己的 `model_usage.json`。其中 `current_run` 仅统计当前进程实际发起的请求；完全复用分析缓存时它为零。`cumulative` 则保留该任务目录历次运行的总 token 和总费用。统计数据只作为 CutMaster 本地产物落盘，不要求 Benchmark Adapter 读取或报告。
 
 ## 源码结构
 
@@ -335,10 +349,10 @@ src/cutmaster/
 │   ├── analyser.py                  # Analyser 公共服务
 │   ├── material_analyst.py          # M
 │   └── tools/                       # Material Library、ASR、台词重建、视频缓存、完整音乐分析
+│       ├── scene_segmenter.py        # Scene-VLM 语义分段
+│       └── ...
 ├── planners/
-│   ├── planner.py                   # Planner 公共服务
-│   ├── plan_compiler.py             # 帧时间线与 RenderPlan 编译
-│   ├── source_window_optimizer.py   # 源区间优化
+│   ├── planners.py                  # Planners 公共服务
 │   ├── aster_team.py                # ASTER 团队编排器
 │   ├── arrangement_architect.py     # A
 │   ├── story_editor.py              # S
@@ -346,6 +360,9 @@ src/cutmaster/
 │   ├── edit_composer.py             # E
 │   ├── revision_editor.py           # R
 │   └── tools/                       # Music Profile 投影、检索、验证、评分、反馈
+│       ├── plan_compiler.py         # 帧时间线与 RenderPlan 编译
+│       ├── source_window_optimizer.py # 源区间优化
+│       └── ...
 ├── renderer/                        # 独立音频准备与帧精确渲染
 ├── prompting/                       # Prompt 与响应契约注册
 ├── configuration/                   # 配置模型与加载

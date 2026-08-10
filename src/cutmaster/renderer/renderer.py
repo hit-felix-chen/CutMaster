@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import DialogueAudioConfig, RendererConfig
-from cutmaster.contracts.planning import RenderPlan
+from cutmaster.contracts.planners import RenderPlan
 from cutmaster.contracts.renderer import RenderRequest, RenderResult
 from cutmaster.renderer.dialogue_audio import prepare_dialogue_audio
 from cutmaster.renderer.ffmpeg import (

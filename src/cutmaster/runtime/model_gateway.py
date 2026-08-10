@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
@@ -26,6 +28,27 @@ TOKEN_USAGE_FIELDS = (
     "uncached_prompt_tokens",
     "reasoning_tokens",
 )
+COST_USAGE_FIELDS = (
+    "uncached_input_cost_yuan",
+    "cached_input_cost_yuan",
+    "output_cost_yuan",
+    "total_cost_yuan",
+)
+USAGE_COUNT_FIELDS = (
+    "request_count",
+    "reported_usage_count",
+    "unreported_usage_count",
+    "priced_usage_count",
+    "unpriced_usage_count",
+)
+
+
+def _empty_usage_bucket() -> dict[str, Any]:
+    return {
+        **{field_name: 0 for field_name in USAGE_COUNT_FIELDS},
+        **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
+        **{field_name: 0.0 for field_name in COST_USAGE_FIELDS},
+    }
 
 
 @dataclass(frozen=True)
@@ -54,11 +77,11 @@ class ModelResponse:
 
 def empty_usage_summary() -> dict[str, Any]:
     return {
-        "request_count": 0,
-        "reported_usage_count": 0,
-        "unreported_usage_count": 0,
-        **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
+        **_empty_usage_bucket(),
+        "currency": "CNY",
+        "price_unit": "yuan_per_million_tokens",
         "by_model": {},
+        "by_task": {},
     }
 
 
@@ -67,26 +90,51 @@ def merge_usage_summaries(
 ) -> dict[str, Any]:
     merged = empty_usage_summary()
     for summary in summaries:
-        for field_name in (
-            "request_count",
-            "reported_usage_count",
-            "unreported_usage_count",
-            *TOKEN_USAGE_FIELDS,
-        ):
+        for field_name in (*USAGE_COUNT_FIELDS, *TOKEN_USAGE_FIELDS):
             merged[field_name] += int(summary.get(field_name) or 0)
-        for model, values in (summary.get("by_model") or {}).items():
-            target = merged["by_model"].setdefault(
-                str(model),
-                {
-                    "request_count": 0,
-                    "reported_usage_count": 0,
-                    "unreported_usage_count": 0,
-                    **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
-                },
-            )
-            for field_name in target:
-                target[field_name] += int(values.get(field_name) or 0)
+        for field_name in COST_USAGE_FIELDS:
+            merged[field_name] += float(summary.get(field_name) or 0.0)
+        for group_name in ("by_model", "by_task"):
+            for key, values in (summary.get(group_name) or {}).items():
+                target = merged[group_name].setdefault(
+                    str(key),
+                    _empty_usage_bucket(),
+                )
+                for field_name in (*USAGE_COUNT_FIELDS, *TOKEN_USAGE_FIELDS):
+                    target[field_name] += int(values.get(field_name) or 0)
+                for field_name in COST_USAGE_FIELDS:
+                    target[field_name] += float(values.get(field_name) or 0.0)
+    for field_name in COST_USAGE_FIELDS:
+        merged[field_name] = round(merged[field_name], 12)
+    for group_name in ("by_model", "by_task"):
+        for values in merged[group_name].values():
+            for field_name in COST_USAGE_FIELDS:
+                values[field_name] = round(values[field_name], 12)
     return merged
+
+
+def load_usage_summary(
+    path: Path,
+    *,
+    cumulative: bool = True,
+) -> dict[str, Any]:
+    """Read a usage artifact while remaining compatible with schema 1.0."""
+
+    if not path.is_file():
+        return empty_usage_summary()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty_usage_summary()
+    if not isinstance(payload, dict):
+        return empty_usage_summary()
+    scope = "cumulative" if cumulative else "current_run"
+    scoped = payload.get(scope)
+    if isinstance(scoped, dict) and isinstance(scoped.get("summary"), dict):
+        return dict(scoped["summary"])
+    if cumulative and isinstance(payload.get("summary"), dict):
+        return dict(payload["summary"])
+    return empty_usage_summary()
 
 
 def _usage_dict(usage: Any) -> dict[str, Any]:

@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, TypeVar
 
 from cutmaster.runtime.model_gateway import (
+    COST_USAGE_FIELDS,
     TOKEN_USAGE_FIELDS,
+    USAGE_COUNT_FIELDS,
     ModelUsage,
     empty_usage_summary,
     generate_text,
@@ -35,7 +38,7 @@ class WorkflowContext:
         *,
         model_call_tree_path: Path | None = None,
         model_usage_path: Path | None = None,
-        stage_name: str = "planning",
+        stage_name: str = "planners",
     ) -> None:
         self._lock = RLock()
         self.path = path
@@ -143,6 +146,19 @@ class WorkflowContext:
                     "temperature": config.temperature,
                     "max_tokens": config.max_tokens,
                     "image_count": image_count,
+                    "pricing": {
+                        "currency": "CNY",
+                        "unit": "yuan_per_million_tokens",
+                        "input": (
+                            config.input_price_yuan_per_million_tokens
+                        ),
+                        "cached_input": (
+                            config.cached_input_price_yuan_per_million_tokens
+                        ),
+                        "output": (
+                            config.output_price_yuan_per_million_tokens
+                        ),
+                    },
                 },
                 "attempts": [],
             }
@@ -319,33 +335,74 @@ class WorkflowContext:
     @staticmethod
     def _summarize_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
         summary = empty_usage_summary()
+
+        def empty_bucket() -> dict[str, Any]:
+            return {
+                **{field_name: 0 for field_name in USAGE_COUNT_FIELDS},
+                **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
+                **{field_name: 0.0 for field_name in COST_USAGE_FIELDS},
+            }
+
+        def add_attempt(
+            bucket: dict[str, Any],
+            usage: Any,
+            pricing: Any,
+        ) -> None:
+            bucket["request_count"] += 1
+            if not isinstance(usage, dict):
+                bucket["unreported_usage_count"] += 1
+                return
+            bucket["reported_usage_count"] += 1
+            for field_name in TOKEN_USAGE_FIELDS:
+                bucket[field_name] += int(usage.get(field_name) or 0)
+            if not isinstance(pricing, dict):
+                bucket["unpriced_usage_count"] += 1
+                return
+            bucket["priced_usage_count"] += 1
+            million = Decimal(1_000_000)
+            input_cost = (
+                Decimal(int(usage.get("uncached_prompt_tokens") or 0))
+                * Decimal(str(pricing.get("input") or 0.0))
+                / million
+            )
+            cached_cost = (
+                Decimal(int(usage.get("cached_prompt_tokens") or 0))
+                * Decimal(str(pricing.get("cached_input") or 0.0))
+                / million
+            )
+            output_cost = (
+                Decimal(int(usage.get("completion_tokens") or 0))
+                * Decimal(str(pricing.get("output") or 0.0))
+                / million
+            )
+            bucket["uncached_input_cost_yuan"] += float(input_cost)
+            bucket["cached_input_cost_yuan"] += float(cached_cost)
+            bucket["output_cost_yuan"] += float(output_cost)
+            bucket["total_cost_yuan"] += float(
+                input_cost + cached_cost + output_cost
+            )
+
         for call in calls:
             model_name = str((call.get("model") or {}).get("name") or "unknown")
+            task_name = str(call.get("task") or "unknown")
+            pricing = (call.get("model") or {}).get("pricing")
             model_summary = summary["by_model"].setdefault(
                 model_name,
-                {
-                    "request_count": 0,
-                    "reported_usage_count": 0,
-                    "unreported_usage_count": 0,
-                    **{field_name: 0 for field_name in TOKEN_USAGE_FIELDS},
-                },
+                empty_bucket(),
             )
+            task_summary = summary["by_task"].setdefault(task_name, empty_bucket())
             for attempt in call.get("attempts") or []:
-                summary["request_count"] += 1
-                model_summary["request_count"] += 1
                 usage = attempt.get("usage")
-                count_field = (
-                    "reported_usage_count" if isinstance(usage, dict)
-                    else "unreported_usage_count"
-                )
-                summary[count_field] += 1
-                model_summary[count_field] += 1
-                if not isinstance(usage, dict):
-                    continue
-                for field_name in TOKEN_USAGE_FIELDS:
-                    value = int(usage.get(field_name) or 0)
-                    summary[field_name] += value
-                    model_summary[field_name] += value
+                add_attempt(summary, usage, pricing)
+                add_attempt(model_summary, usage, pricing)
+                add_attempt(task_summary, usage, pricing)
+        for bucket in [
+            summary,
+            *summary["by_model"].values(),
+            *summary["by_task"].values(),
+        ]:
+            for field_name in COST_USAGE_FIELDS:
+                bucket[field_name] = round(float(bucket[field_name]), 12)
         return summary
 
     def model_usage_summary(self, *, include_prior: bool = False) -> dict[str, Any]:
@@ -364,10 +421,20 @@ class WorkflowContext:
                 *(self._usage_call(call) for call in self._model_calls),
             ]
             payload = {
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "stage": self._model_stage_name,
                 "started_at": self._model_call_tree_started_at,
                 "updated_at": datetime.now().astimezone().isoformat(),
+                "currency": "CNY",
+                "price_unit": "yuan_per_million_tokens",
+                "current_run": {
+                    "summary": self._summarize_calls(
+                        [self._usage_call(call) for call in self._model_calls]
+                    ),
+                    "call_ids": [call["call_id"] for call in self._model_calls],
+                },
+                "cumulative": {"summary": self._summarize_calls(calls)},
+                # Compatibility aliases for existing readers. `summary` is cumulative.
                 "summary": self._summarize_calls(calls),
                 "calls": calls,
             }

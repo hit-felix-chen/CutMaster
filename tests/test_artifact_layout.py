@@ -7,7 +7,7 @@ def test_artifact_layout_creates_three_stage_directories(tmp_path) -> None:
     assert layout.analyser_dir.is_dir()
     assert layout.music_analyser_dir.is_dir()
     assert layout.planners_dir.is_dir()
-    assert layout.planning_diagnostics_dir.is_dir()
+    assert layout.planners_diagnostics_dir.is_dir()
     assert layout.renderer_dir.is_dir()
     assert layout.analysis_result == layout.analyser_dir / "analysis_result.json"
     assert layout.music_analysis_result == (

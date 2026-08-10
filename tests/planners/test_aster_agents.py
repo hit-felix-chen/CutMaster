@@ -87,7 +87,7 @@ def _video_description():
     }
 
 
-def test_planner_warns_when_visual_shot_annotations_are_missing(
+def test_aster_team_warns_when_visual_shot_annotations_are_missing(
     monkeypatch,
 ) -> None:
     events: list[dict] = []
@@ -98,8 +98,8 @@ def test_planner_warns_when_visual_shot_annotations_are_missing(
             "visual_annotation_failure": "data_inspection_failed",
         }
     )
-    planner = ASTERTeam.__new__(ASTERTeam)
-    planner.context = SimpleNamespace(
+    aster_team = ASTERTeam.__new__(ASTERTeam)
+    aster_team.context = SimpleNamespace(
         get_artifact=lambda name: (
             video_description if name == "video_description" else None
         )
@@ -111,7 +111,7 @@ def test_planner_warns_when_visual_shot_annotations_are_missing(
         ),
     )
 
-    planner._warn_about_missing_shot_annotations()
+    aster_team._warn_about_missing_shot_annotations()
 
     assert len(events) == 1
     assert events[0]["reason_code"] == "provider_data_inspection_failed"
@@ -122,7 +122,7 @@ def test_planner_warns_when_visual_shot_annotations_are_missing(
     assert events[0]["missing_shot_ids_preview"] == ["shot_00001"]
 
 
-def test_slot_planning_story_context_excludes_shot_descriptions() -> None:
+def test_slot_arrangement_story_context_excludes_shot_descriptions() -> None:
     video_description = {
         "source": {"title": "Example"},
         "segments": [
@@ -513,7 +513,7 @@ def test_candidate_retrieval_does_not_request_replacements_for_fixed_anchor(
             "fixed_candidate": fixed,
         }
     ]
-    context = WorkflowContext(tmp_path / "planning_history.json")
+    context = WorkflowContext(tmp_path / "planners_history.json")
     context.set_artifact("video_description", _video_description())
     monkeypatch.setattr(
         "cutmaster.planners.timeline_scout.add_kinetic_features",
@@ -1224,22 +1224,22 @@ def test_replanned_anchor_segment_triggers_global_anchor_refresh(
             "fixed_candidate": {"candidate_id": "new_anchor_2"},
         },
     ]
-    planner = ASTERTeam.__new__(ASTERTeam)
-    planner.config = SimpleNamespace(
+    aster_team = ASTERTeam.__new__(ASTERTeam)
+    aster_team.config = SimpleNamespace(
         llm=LLMConfig(model="test", base_url="", api_key="test")
     )
-    planner.context = WorkflowContext(tmp_path / "history.json")
+    aster_team.context = WorkflowContext(tmp_path / "history.json")
     refresh_calls: list[list[dict]] = []
 
     def refresh(slots):
         refresh_calls.append(slots)
         return refreshed_slots
 
-    planner.arrangement_architect = SimpleNamespace(
+    aster_team.arrangement_architect = SimpleNamespace(
         repair=lambda *_args: (redesigned_slots, {"slot_01"})
     )
-    planner.story_editor = SimpleNamespace(anchor=refresh)
-    result, reset_slot_ids = planner._redesign_slots_and_refresh_anchors(
+    aster_team.story_editor = SimpleNamespace(anchor=refresh)
+    result, reset_slot_ids = aster_team._redesign_slots_and_refresh_anchors(
         original_slots,
         [{"slot_id": "slot_01", "reason": "visually_static"}],
     )

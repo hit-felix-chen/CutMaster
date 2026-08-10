@@ -1,6 +1,10 @@
 import pytest
 
-from cutmaster.planners.plan_compiler import adapt_script, align_cut_boundaries, script_duration
+from cutmaster.planners.tools.plan_compiler import (
+    adapt_script,
+    align_cut_boundaries,
+    script_duration,
+)
 from cutmaster.timecode import format_time, parse_range, parse_time
 
 
