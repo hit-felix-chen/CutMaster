@@ -58,8 +58,10 @@ def test_project_crud_brief_search_sort_and_workspace_are_application_backed(
         "runs": [],
     }
 
-    deleted = client.delete(f"/api/projects/{project_id}", headers=key())
-    assert deleted.status_code == 204
+    delete_key = key()
+    deleted = client.delete(f"/api/projects/{project_id}", headers=delete_key)
+    replayed_delete = client.delete(f"/api/projects/{project_id}", headers=delete_key)
+    assert deleted.status_code == replayed_delete.status_code == 204
     not_found = client.get(f"/api/projects/{project_id}")
     assert not_found.status_code == 404
     assert not_found.json()["code"] == "resource_not_found"
@@ -154,3 +156,7 @@ def test_project_setup_atomically_saves_materials_and_brief(
             }
         ],
     }
+    card = client.get("/api/projects").json()["items"][0]
+    assert card["latest_run_state"] is None
+    assert card["selected_materials"] == workspace.json()["materials"]
+    assert card["preview_url"] is None

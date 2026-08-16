@@ -382,7 +382,17 @@ describe('live ASTER execution progress', () => {
       }),
     )
     const client = queryClient()
-    client.setQueryData(['activity'], { items: [{ attempt, job }] })
+    client.setQueryData(['activity'], {
+      pages: [
+        {
+          items: [{ attempt, job }],
+          limit: 100,
+          offset: 0,
+          has_more: false,
+        },
+      ],
+      pageParams: [0],
+    })
     render(
       <QueryClientProvider client={client}>
         <ActivityBoard />
@@ -396,7 +406,7 @@ describe('live ASTER execution progress', () => {
     await flushPromises()
     expect(activityRequests).toBe(1)
     expect(client.getQueryData(['activity'])).toMatchObject({
-      items: [{ attempt: { status: 'running' } }],
+      pages: [{ items: [{ attempt: { status: 'running' } }] }],
     })
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getByRole('heading', { name: 'Running' })).toBeVisible()

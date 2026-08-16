@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
 
 from cutmaster.domain.ids import AttemptId, FrozenEditId, RenderVariantId
+from cutmaster.workflow.contracts.rendering import AudioMode
 
 
 @dataclass(frozen=True)
 class CreateRenderVariantCommand:
     command_id: str
     edit_id: FrozenEditId
-    specification: Mapping[str, Any]
+    audio_mode: AudioMode
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.audio_mode, str):
+            raise TypeError("audio_mode must be a string")
+        if self.audio_mode not in {"dialogue", "bgm_only"}:
+            raise ValueError(f"Unsupported audio_mode: {self.audio_mode!r}")
 
 
 @dataclass(frozen=True)
@@ -50,4 +56,3 @@ __all__ = [
     "RecoverRenderVariantCommand",
     "VerifyRenderVariantCommand",
 ]
-

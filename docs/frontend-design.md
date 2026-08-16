@@ -6,19 +6,22 @@ first CutMaster frontend. Domain language remains authoritative in
 ADRs.
 
 **Implementation status:** the React/Vite client, FastAPI peer adapter,
-`cutmaster serve`, SPA packaging, and the first managed Web slice are
-implemented. Projects, the combined Project Setup, Material browsing and Memory
-Explorer, Activity, and Settings read real Application data. Web **Start
-editing** creates a durable ASTER Run and dispatches real Planners work to an
-isolated subprocess; Run detail is polled until the resulting Frozen Edit is
-available. The Frozen Edit Review route and projection, source-sequence Review,
-page-local Revision Draft, and atomic Guided Revision are implemented. Newly
-completed Runs retain a versioned Candidate Bundle; historical edits without
-one degrade explicitly to read-only Review. SSE, Web Import & Analyse,
-automatic Renderer Preview/Variant creation, other managed workers, the general
-supervisor, and guarded Data Root Migration remain proposed. Present-tense
-interaction language for those later flows specifies intended product behaviour
-rather than an existing route.
+`cutmaster serve`, SPA packaging, and the managed local Web workspace are
+implemented. Projects, the combined Project Setup, Material import/analysis and
+Memory Explorer, Activity, Settings/Setup, Review, Render Variants, and Outputs
+all use real Application data and commands. A shared local supervisor runs real
+Analyser, Planners, and Renderer subprocesses with durable FIFO/capacity
+scheduling, per-owner serialization, cooperative Stop, and orphan recovery.
+ASTER Retry, complete-agent-boundary Resume, Run again, deletion, and usage are
+implemented. Every Frozen Edit requires a complete, integrity-checked Candidate
+Bundle; missing, damaged, or incomplete Review data is unavailable rather than
+degraded to a read-only compatibility mode. Strict
+Render Specifications, automatic Dialogue Preview, durable SSE with replay and
+resync, provider connection tests/local writes, structured Activity navigation,
+and guarded Data Root Migration are implemented. Persistent notifications, the
+Activity log drawer, Direct Bundle bulk cleanup/retention, generated OpenAPI
+TypeScript drift CI, multi-user/cloud operation, and broader provider/media
+ports remain later work.
 
 ## Product boundary
 
@@ -26,10 +29,10 @@ rather than an existing route.
   on the same machine.
 - Authentication, tenant isolation, cloud object storage, quotas, and
   distributed job execution are outside the first-release scope.
-- Implemented ASTER Planners jobs run in a local subprocess independently of
-  an open browser tab. Web-managed analysis and Renderer jobs will follow the
-  same boundary when their Proposed workers are implemented; current Review
-  reads and Guided Revision are synchronous Application operations.
+- Material Analysis, ASTER Planners, Renderer, and Data Root Migration jobs run
+  in local subprocesses independently of an open browser tab. Review reads and
+  Guided Revision validation remain synchronous Application operations; the
+  resulting default Dialogue Preview is dispatched asynchronously.
 
 ### Display target
 
@@ -289,24 +292,32 @@ Memory. It has two read-only tabs:
 The music modal does not invent Story or Dialogue views, expose the managed
 audio path, or allow Music Memory to be edited.
 
-### Import and analysis lifecycle (Proposed Web flow)
+### Import and analysis lifecycle (implemented)
 
 The confirming action for a new source is **Import & Analyse**. Once the
-type-scoped Material Name is available, the frontend uploads the file; the
-backend calculates and binds its Material Fingerprint, then immediately queues
-Material Analysis. The action explicitly warns that analysis invokes configured
-models and records usage.
+type-scoped Material Name is available, the frontend sends a multipart upload;
+the backend calculates and binds its Material Fingerprint, then immediately
+queues the real Material Analysis worker. Video accepts one optional SRT in the
+same command. Name collision, invalid file, storage, and subtitle blockers use
+stable Problem codes, and the action explicitly warns that analysis invokes
+configured models and records usage.
 
 A newly imported Material moves through:
 
 ```text
-Uploading -> Queued -> Analysing -> Ready
+Uploading -> Queued -> Analysing -> Ready/Reused
                          |
+                         +-> Stopping -> Interrupted
                          +-> Failed
 ```
 
 A failed analysis keeps the immutable Material and exposes **Retry Analysis**;
-the source is not uploaded again. An Edit Project may reference a queued or
+the source is not uploaded again. An Interrupted analysis exposes **Resume**
+when its compatible analysis checkpoint is available. Queued work stops
+immediately; Running work becomes Stopping until Analyser reaches a cooperative
+model/media boundary. The summary drawer exposes Attempt history and the valid
+recovery action, and a terminal unreferenced Material may be deleted through
+the two-step guarded confirmation. An Edit Project may reference a queued or
 analysing Material, but Start editing remains unavailable until its required
 video and music Materials are Ready.
 
@@ -321,6 +332,12 @@ states that ASR will run. The subtitle selection is locked when analysis starts
 and cannot later replace dialogue in a completed Material Memory. Correcting it
 requires deleting an unreferenced Material and importing it again. Music import
 has no subtitle control.
+
+Ready video cards request a bounded analyser-produced JPEG thumbnail and Ready
+music cards request an SVG waveform derived from the stored energy curve. List
+and card projections never inline or eagerly download the complete source
+video/audio. Missing or invalid preview artifacts degrade to the card fallback
+without making the Material itself unusable.
 
 ## Projects landing page
 
@@ -345,8 +362,8 @@ wizard. Its first-release tabs are:
 1. **Project Setup** — selected video and music Material References, Editing
    Intent, Target Duration, save state, and the Start editing action.
 2. **Runs** — ASTER execution status and Frozen Edit results.
-3. **Outputs** — rendered video variants and export actions; this workflow is
-   still Proposed.
+3. **Outputs** — implemented rendered Variant status, playback, download,
+   Finder, recovery, and permanent-deletion actions.
 
 An empty project completes Material selection and the Creative Brief on the
 same Project Setup page. Closing the page does not cancel background work, and
@@ -423,7 +440,7 @@ field for existing CLI and Benchmark calls. Shot pacing and all other agent
 controls come from the active system configuration and are snapshotted by an
 ASTER Run where relevant.
 
-## ASTER Runs and Review (implemented), render variants (Proposed Web flow)
+## ASTER Runs, Review, and Render Variants (implemented)
 
 Every accepted **Start editing** command creates a new immutable ASTER Run. The
 Run snapshots its Material References, Creative Brief, and effective non-secret
@@ -432,15 +449,14 @@ that Run; starting again creates another Run with an independent managed
 artifact directory.
 
 Within one Project, Runs receive a stable creation-order label such as `Run 01`,
-`Run 02`, and `Run 03`. The Runs tab polls a lightweight SQLite projection every
-two seconds while any Run is nonterminal; it does not reload Material details or
-wait for Material leases. The list and detail page derive their visible status
-from the current Execution Attempt, so they agree with Activity while retaining
-the Run's separate lifecycle state. Run detail shows Editing Intent, Target
-Duration, the implemented A/S/T/E/R milestone lane, heartbeat freshness,
-failure state, and resulting Frozen Edits. Each Frozen Edit links to its
-implemented Review route. SSE, Retry/Resume, and Render Variant creation remain
-Proposed.
+`Run 02`, and `Run 03`. One global SSE connection invalidates the lightweight
+SQLite projections; bounded polling remains a fallback if that connection is
+unavailable. The list, detail page, and Activity derive their visible status
+from the same current Execution Attempt while retaining the Run's separate
+lifecycle state. Run detail shows Editing Intent, Target Duration, the real
+A/S/T/E/R milestone lane, heartbeat freshness, generic localized failure state,
+persisted model usage, resulting Frozen Edits, and the valid Retry, Resume, Run
+again, Stop, or Delete action. Each Frozen Edit links to its Review route.
 
 One ASTER Run may produce multiple Renderer variants without repeating
 material analysis or ASTER coordination. For example, BGM-only and dialogue
@@ -450,12 +466,13 @@ Previous Runs and their outputs remain inspectable and renderable.
 The implemented ASTER worker claims the exact durable job, sends heartbeats,
 executes the real Planners use case from the Run snapshot, atomically publishes
 `projects/<project-id>/runs/<run-id>/plan.json`, and commits that RenderPlan as
-the sole immutable timeline payload of a new Frozen Edit. For newly completed
-Runs it also publishes a versioned, integrity-checked Candidate Bundle used by
-Review and Guided Revision. The Run becomes `Complete` at that boundary.
-Automatically starting Renderer and creating a **Dialogue Preview** remain
-Proposed; a current completed Run therefore has a Frozen Edit but no implied
-rendered output.
+the sole immutable timeline payload of a new Frozen Edit. It also publishes the
+versioned, integrity-checked Candidate Bundle required by Review and Guided
+Revision. The Run becomes `Complete` only after both artifacts satisfy that
+contract.
+The Web flow then creates and dispatches the default **Dialogue Preview** as an
+independent Render Variant. Preview failure never changes the completed Run or
+Frozen Edit.
 
 Frozen Edit is the product-history identity and RenderPlan is its exact
 Renderer contract. SQLite stores identity, Run ownership, lineage, and a
@@ -471,14 +488,14 @@ Neither the Project nor the ASTER Run persists a mutable **current** or
 the newest Frozen Edit by its Run-local creation sequence; selecting another
 version is navigation state reflected in the page URL, not a change to project
 history. A newly applied Guided Revision navigates directly to its child Frozen
-Edit without starting Renderer. Render and export actions always show the
+Edit and dispatches that child's default Dialogue Preview. Render and export actions always show the
 explicit `Edit NN` target, and the first release has no separate **Mark as
 final** action.
 
 ASTER Run execution state and Review readiness are separate. The Run is
-`Complete` as soon as Planners successfully produces its initial Frozen Edit.
-The following automatic Dialogue Preview lifecycle remains Proposed: its child
-preview would move independently through `Queued`,
+`Complete` as soon as Planners successfully produces its initial valid Frozen
+Edit and required Candidate Bundle.
+Its automatic Dialogue Preview moves independently through `Queued`,
 `Rendering`, `Ready`, `Failed`, `Interrupted`, or `Unavailable`, while the Run
 row presents a useful composite such as **Complete · Rendering preview**,
 **Ready for review**, **Complete · Preview failed**, or **Complete · Preview
@@ -488,7 +505,7 @@ Preview or repairing an unavailable one creates another Renderer Execution
 Attempt for that same Render Variant; it never reruns ASTER or creates another
 Run. The ASTER Run itself is `Failed` only when Planners fails.
 
-### Output retention and export (Proposed Web flow)
+### Output retention and export (implemented)
 
 Every completed Render Variant has one managed master file beneath the
 Application Data Root. That file remains attached to the immutable project
@@ -567,12 +584,13 @@ across the bottom:
 ```
 
 The implemented Review projection loads the immutable RenderPlan, version
-lineage, Slot sequence, Dialogue cues, music beats when available, and any
-existing Render Variants. New managed Runs also publish a versioned Candidate
-Bundle containing the validated Candidate Space and deterministic Review
-inputs. A historical Frozen Edit created before Candidate Bundle persistence
-still opens with its full selected sequence, but the page marks it read-only and
-does not infer or fabricate replacement candidates.
+lineage, Slot sequence, Dialogue cues, music beats when available, any existing
+Render Variants, and the required versioned Candidate Bundle containing the
+validated Candidate Space and deterministic Review inputs. The bundle must be
+present, pass all recorded integrity checks, and contain the selected candidate
+for every required Slot. Any missing, damaged, or incomplete Review artifact
+returns `review_artifact_unavailable`; the page does not infer or fabricate
+candidates and does not open in a read-only fallback mode.
 
 Its canonical browser route is
 `/projects/:project_id/runs/:run_id/review/:edit_id`. Optional `variant` and
@@ -580,8 +598,7 @@ Its canonical browser route is
 changing which Frozen Edit is being reviewed. The breadcrumb always links to
 the exact Run route rather than relying on browser history alone.
 
-Once the Proposed Render Variant commands are added, deleting the selected
-Render Variant returns Review to the same explicit
+Deleting the selected Render Variant returns Review to the same explicit
 Frozen Edit with no Variant selected; it does not silently switch to a sibling.
 The player becomes an empty state with **Render Dialogue Preview** and **Create
 BGM-only Variant** actions. If the deleted Variant was the only preview, the
@@ -594,9 +611,9 @@ that Run's persisted Candidate Space, including source time, visual evidence,
 and available scores. The Inspector and timeline are expanded by default but
 may be collapsed to enlarge the player. Choosing an alternative adds it to an
 unsaved Revision Draft held only by the current Review page; it does not call a
-draft API, render immediately, or rerun ASTER. When the Candidate Bundle is not
-available, the selected candidate remains inspectable but replacement controls
-are absent.
+draft API, render immediately, or rerun ASTER. An unavailable Candidate Bundle
+prevents Review from opening; it never leaves a partially inspectable candidate
+view.
 
 Story Anchor Slots are locked during Guided Revision. The first release does
 not support freeform reordering, arbitrary source trimming, changing Slot
@@ -610,8 +627,8 @@ without rendering. There is no draft persistence or background autosave, so
 refreshing or losing the browser process cannot recover those replacements.
 **Save revision** sends the complete replacement set as one command, validates
 it atomically, deterministically compiles one new RenderPlan, commits one
-immutable derived Frozen Edit, and navigates to that child Review. It does not
-rerun ASTER or automatically start Renderer. A validation or compilation
+immutable derived Frozen Edit, navigates to that child Review, and dispatches
+its default Dialogue Preview. It does not rerun ASTER. A validation or compilation
 failure creates no partial history and leaves the page dirty so the user can
 correct and save again.
 
@@ -625,9 +642,8 @@ Browser refresh or close uses the platform's unload confirmation. A successful
 **Save revision**, **Reset changes**, or explicit discard returns the page to a
 clean state. The source Frozen Edit always remains unchanged.
 
-Guided Revision may start from any Candidate-Bundle-backed Frozen Edit in the
-same ASTER Run, including one that already has newer descendants. A historical
-edit without that bundle remains read-only. Frozen Edits receive stable
+Guided Revision may start from any valid Frozen Edit in the same ASTER Run,
+including one that already has newer descendants. Frozen Edits receive stable
 Run-local creation labels such as `Edit 01`, `Edit 02`, and `Edit 03`; each
 derived entry also shows **Based on Edit 01**. The first release presents these
 versions as a creation-ordered list with parent labels rather than a graphical
@@ -639,18 +655,21 @@ overwrites or hides a sibling branch.
 Long-running work is represented as structured milestones rather than an
 estimated overall percentage. The managed ASTER worker persists real
 Arrangement Architect, Story Editor, Timeline Scout, Edit Composer, and
-Revision Editor boundaries in Job progress; Run detail and Activity poll that
-same projection. Proposed Material Analysis will show the Material Analyst, and
-automatic preview generation will add Renderer as a separate final milestone.
+Revision Editor boundaries in Job progress. Material Analysis shows the real
+Material Analyst operation and bounded counts when available; Render Variants
+show Renderer as a separate lifecycle. Run detail and Activity observe the same
+Attempt/Job projection through global SSE with a polling fallback.
 
 Each milestone has one of `Queued`, `Running`, `Retrying`, `Stopping`,
 `Interrupted`, `Complete`, `Failed`, or `Reused`. It shows the current operation
 and elapsed time, and may show a real bounded count such as annotated Shots
 when the backend provides one. Cache hits appear as `Reused`, not as instant
 fresh analysis. The same job state is visible in its Project or Material
-context and in the global Activity page. Failure details expose the reason,
-attempt history, and allowed recovery action without presenting an invented
-completion percentage.
+context and in the global Activity page. Failure details expose attempt history
+and the allowed recovery action without presenting an invented completion
+percentage. User-facing failure details use stable, localized operation/status
+copy; raw persisted worker exception text is not rendered in Material, Run,
+Render, or Activity UI.
 
 The global Activity page groups work by immediate user relevance:
 
@@ -671,16 +690,19 @@ generic Task. The implemented Activity projection supplies structured owner
 navigation context, and selecting a row goes directly to the exact Material,
 Run, or Render Variant context without making the client guess missing parent
 IDs. A richer right-side drawer with Attempt history and concise logs remains
-Proposed. The main list does not expose the low-level event stream.
+Proposed. The main list does not expose the low-level event stream. **Load
+more** advances the Activity cursor instead of silently truncating history at a
+fixed first page.
 
 Activity history is retained with its owning domain object and disappears only
 through that object's defined deletion cascade. The first release has no
 standalone **Clear history** command. Older records use paginated loading.
 
-### In-app notifications
+### In-app notifications (Proposed P2)
 
-The first release uses application notifications rather than requesting
-browser or operating-system notification permission. Complete work produces a
+Persistent application notifications described in this section are not yet
+implemented. The intended local product uses application notifications rather
+than requesting browser or operating-system notification permission. Complete work produces a
 short success toast. Failed or Interrupted work produces a persistent notice
 with the valid Retry or Resume action, while the Activity badge retains running
 and unhandled-failure counts.
@@ -731,6 +753,13 @@ ASTER Run, or Render Variant and reuses safe work. `Failed` is reserved for
 internal errors and exhausted recovery. Stopping never deletes the parent
 domain object or its artifacts.
 
+For ASTER, safe work means only an identity-bound checkpoint after a complete
+A/S/T/E/R agent boundary, plus an internal replan-pending checkpoint that stores
+sanitized feedback before the next Arrangement Architect pass. It never means
+continuing in the middle of an agent instruction, provider request, or media
+operation. Retry starts the immutable Run snapshot without claiming this partial
+continuation.
+
 ## Deletion and Material References
 
 A Material may be deleted only when it has no Material References. The
@@ -780,9 +809,8 @@ second click is an explicit destructive **Delete permanently** action.
 
 Direct Workflow Bundles are never deleted automatically and do not appear as
 Project or Activity records. Settings → Storage shows their count and total
-size, provides **Open in Finder**, and offers **Delete all direct bundles**.
-That bulk action uses the same two-click confirmation pattern, skips active or
-locked bundles, and reports how many bundles were deleted and skipped.
+size and provides **Open in Finder**. **Delete all direct bundles**, active-lock
+skipping, and any automatic retention policy remain Proposed P2 work.
 
 ## Settings and model setup
 
@@ -790,16 +818,21 @@ Settings manages product-level model connections for the local application. It
 offers presets for **Cost Saving** (DeepSeek LLM with DashScope VLM and ASR),
 **Simple** (all services through DashScope), and a custom OpenAI-compatible
 connection. First launch routes to Setup when a required credential is missing.
+Setup and Settings both persist the selected provider profile through the real
+Application service and offer bounded, per-capability LLM/VLM/ASR connection
+tests rather than a simulated success state.
 
 Settings also contains an **Appearance** section for the immediate `zh-CN` /
 `en-US` language switch and `Dark` / `Light` / `System` colour-mode selection.
 These controls update browser presentation preferences and do not submit a
 managed Application command.
 
-API keys are written only to the local environment file and are never stored in
+API keys are written only to the sibling local `.env` file and are never stored in
 browser storage, logs, project records, or ASTER Run snapshots. After saving,
-the frontend reveals only configured state and a short suffix. Separate
-connection tests cover LLM, VLM, and ASR.
+the frontend reveals only configured state, source, writability, and a short
+suffix. Secret fields support keep/set/clear semantics; the Application writes
+the file atomically with owner-only permissions and preserves process-environment
+precedence. Separate connection tests cover LLM, VLM, and ASR.
 
 The repository-level `.env` and `config.toml` are bootstrap configuration, not
 Application Data Root contents. They remain in the CutMaster project directory
@@ -838,18 +871,17 @@ that changing settings never reconfigures active or historical work.
 
 ## Technical architecture
 
-**Status: Web adapter, client, Project Setup, managed ASTER planning, Frozen
-Edit Review, and atomic Guided Revision implemented over the Application Layer;
-SSE, automatic Renderer Preview/Variant creation, and other managed long-job
-transports remain proposed.**
+**Status: Implemented over the Application Layer, including managed Material
+Analysis, ASTER planning, Renderer/Outputs, shared supervision, durable SSE,
+provider Setup, Activity navigation, and Data Root Migration.**
 
 The first frontend uses React, TypeScript, and Vite as a client-side
 single-page application. The existing framework-independent CutMaster
 Application Layer already exposes domain commands and queries to CLI and
-Benchmark. FastAPI is the Web peer adapter: REST handles implemented commands
-and queries, including asynchronous Start editing acceptance. Run detail uses
-REST polling today; proposed Server-Sent Events will later stream one-way job
-updates. The local application is
+Benchmark. FastAPI is the Web peer adapter: REST handles commands and
+authoritative queries, while one global Server-Sent Events connection carries
+durable invalidation and progress events. Bounded REST polling is the fallback
+when SSE is unavailable. The local application is
 launched through `cutmaster serve` and opens in the user's
 browser. It will not use server-side rendering.
 
@@ -869,19 +901,21 @@ infrastructure independently.
 
 The implemented `settings` service owns Effective Configuration reads,
 validated local-overlay saves, and storage reporting. Model-connection UI,
-bulk cleanup, and Data Root Migration are proposed additions. Locale and Colour
-Mode remain browser presentation preferences and therefore do not call this
-Application service.
+credential writes, per-capability connection tests, and the macOS Data Root
+Finder action are implemented. Direct Bundle bulk cleanup/retention are
+proposed additions; Data Root Migration is implemented. Locale and
+Colour Mode remain browser presentation preferences and therefore do not call
+this Application service.
 
 Every implemented adapter calls `CutMasterApplication.open(config_path)` and therefore
 resolves the same Application Data Root and Material Catalog. Service groups
 are initialized lazily: direct CLI and Benchmark calls do not initialize
 unrelated managed services. The `serve` command activates the services required
-by the implemented Web slice, including the ASTER Run subprocess dispatcher.
-It does not yet supervise Material Analysis or Renderer jobs. Review reads and
-Guided Revision are synchronous Application operations outside the supervisor;
-automatic preview rendering waits for the Proposed Renderer worker and general
-supervisor.
+by the Web workspace, including the shared supervisor and Material Analysis,
+ASTER, Renderer, and Data Root Migration workers. Review reads and Guided
+Revision validation are synchronous Application operations outside the
+supervisor; automatic preview rendering is dispatched as a managed Renderer
+Attempt after the Frozen Edit commit.
 
 ### Web adapter contract
 
@@ -908,9 +942,9 @@ including another domain Retry or Resume, receives a new ID. Reusing one ID
 with a different canonical payload is rejected as an idempotency conflict
 rather than guessed or executed.
 
-The implemented Start editing command returns `202 Accepted` with Run, Attempt,
-and job projections; its `Idempotency-Key` maps to the durable Application
-command receipt. Proposed SSE events will carry the same correlation values.
+Managed long-running commands return `202 Accepted` with their domain, Attempt,
+and job projections; each `Idempotency-Key` maps to a durable Application
+command receipt. SSE events carry the same correlation values.
 Buttons become disabled after the first click, but correctness does not depend
 on the browser successfully disabling a double-click.
 
@@ -926,10 +960,10 @@ browser.
 HTTP status codes preserve their meaning: malformed or invalid input is 4xx,
 missing resources are 404, state/name/idempotency conflicts are 409, and an
 unavailable service may be 503. A command that already returned `202 Accepted`
-reports later execution failure through its Attempt and Run projections, not a
-second HTTP response; proposed SSE will later shorten the refresh latency.
+reports later execution failure through its Attempt and resource projections,
+not a second HTTP response; SSE normally shortens the refresh latency.
 
-#### SSE update transport (Proposed)
+#### SSE update transport (implemented)
 
 Each running SPA opens exactly one global SSE stream for all Projects,
 Materials, Runs, Attempts, and Variants; pages never create their own streams.
@@ -950,13 +984,14 @@ children, while entity details and commands use the entity's canonical ID:
 ```text
 PUT  /api/projects/{project_id}/setup   # implemented atomic setup save
 POST /api/projects/{project_id}/runs    # implemented Start editing
-GET  /api/runs/{run_id}                 # implemented polling projection
+GET  /api/runs/{run_id}                 # authoritative projection / polling fallback
 
-POST /api/runs/{run_id}/retry                    # Proposed
-GET  /api/frozen-edits/{edit_id}                  # Proposed
+POST /api/runs/{run_id}/retry                    # implemented
+POST /api/runs/{run_id}/resume                   # implemented
+POST /api/runs/{run_id}/run-again                # implemented
 GET  /api/frozen-edits/{edit_id}/review            # Implemented
 POST /api/frozen-edits/{edit_id}/revisions         # Implemented atomically
-POST /api/frozen-edits/{edit_id}/render-variants  # Proposed
+POST /api/frozen-edits/{edit_id}/render-variants  # implemented
 ```
 
 The frontend never constructs deep routes containing the entire ownership
@@ -998,12 +1033,12 @@ State has one owner according to its lifetime:
   and normalized filters, never Material Names or filesystem paths.
 - Component state or a focused `useReducer` owns unsaved Project Setup fields,
   the page-local Revision Draft, and temporary modal interaction.
-- Small React contexts own only application-wide facilities such as locale and
-  colour mode; the proposed SSE transport will add one shared connection there.
+- Small React contexts own only application-wide facilities such as locale,
+  colour mode, and the one shared SSE connection.
   Locale and colour-mode providers restore their browser-local preferences;
   they never duplicate server-owned product state.
 
-Once implemented, SSE events will invalidate or narrowly refresh the
+SSE events invalidate or narrowly refresh the
 corresponding TanStack Query keys; they will not copy durable entities into
 another client-side store. Unsaved forms and revisions never enter the query
 cache. The first release uses neither Redux nor Zustand, and introduces a global
@@ -1078,9 +1113,9 @@ error; those historical files are neither migrated, rewritten, nor deleted.
 
 ### Application data root
 
-**Implemented:** default/custom root resolution and managed SQLite, Material,
-Project, Direct Bundle, and log namespaces. **Proposed:** the Settings UI and
-guarded migration of a non-empty root.
+**Implemented:** default/custom root resolution, managed SQLite/Material/
+Project/Direct Bundle/log namespaces, Settings UI, and guarded migration of a
+non-empty root.
 
 The frontend keeps its managed local state under one **Application Data Root**.
 The default is `.cutmaster/` inside the CutMaster project directory, preserving
@@ -1101,16 +1136,16 @@ CutMaster/.cutmaster/                 # default Application Data Root
 └── logs/                              # application and job logs
 ```
 
-The proposed Settings page shows the selected path with an **Open in Finder** action. A
-custom path changes the whole Application Data Root; Materials, project state,
+The Settings page shows the selected path and, on macOS, exposes a real **Open
+in Finder** action backed by the fixed Application Data Root. A custom path
+change moves the whole Application Data Root; Materials, project state,
 job state, and artifacts cannot be assigned unrelated roots independently.
 The Storage section separately reports database, Materials, Projects, Direct
 Workflow Bundles, and logs so non-project CLI output remains visible as disk
 usage without appearing in product history.
 
-The proposed migration flow behaves as follows. When the current root contains no managed data, selecting a custom path changes
-it directly. Once managed data exists, Settings replaces direct editing with a
-**Move CutMaster Data** operation. After confirming no Attempt is active,
+The implemented migration flow exposes a **Move CutMaster Data** operation in
+Settings. After confirming no Attempt is active,
 migration pauses queued-job dispatch, copies the database and every canonical
 managed filesystem artifact—including manifest-referenced `media/` data—to the
 destination, verifies the copied state, and only then atomically switches the
@@ -1127,27 +1162,30 @@ while the supervisor pauses dispatch, move with the durable database, and
 resume from the same queue after a successful switch. If migration fails, they
 remain queued under the original root.
 
-For the duration of the copy and verification, CutMaster enters a global
-read-only maintenance mode. Browsing, playback, and Material Memory inspection
-remain available, but import, Creative Brief Save, Run creation, Retry, Resume,
-Variant creation, and every create, rename, delete, or settings mutation are
-blocked. A persistent header reports migration progress. Success switches the
-root and reloads application state; cancellation or failure exits maintenance
-mode against the unchanged original root and restores queued dispatch and all
-writes.
+For the duration of the copy and verification, CutMaster enters global
+maintenance. All business API reads and writes are blocked immediately with a
+typed 503 so no screen can show stale state from the generation being copied;
+health and migration status/control remain available for the persistent
+progress surface. Success switches the pointer and requires a safe backend
+restart before business APIs reopen. Cancellation or failure exits maintenance
+against the unchanged original root and restores queued dispatch and all
+operations.
+
+Migration never deletes the old Data Root after a successful switch. The old
+copy remains for deliberate manual recovery/cleanup; CutMaster does not expose
+an automatic old-root deletion action.
 
 ### Direct and managed execution
 
 The Application Layer implements two boundaries. Managed product services
-create durable SQLite domain records and Execution Attempts. The implemented
-Web adapter drives Project, Material query, Project Setup, Activity, Settings,
-and ASTER Run use cases. Start editing is an implemented managed long-job
-command: it creates the immutable Run/Attempt/job records and dispatches a
-subprocess that executes the real Planners use case. Web-managed Material
-Analysis and Renderer dispatch paths remain **Proposed**. Frozen Edit Review
-and atomic Guided Revision are implemented synchronously; automatic Preview and
-Variant creation remain Proposed. The synchronous Direct surface is implemented
-and preserves the `analyse`,
+create durable SQLite domain records and Execution Attempts. The Web adapter
+drives Project, Material import/analysis, Project Setup, Activity,
+Settings/Setup, ASTER Run, Review, Render Variant/Outputs, and Data Root
+Migration use cases. Its long-running commands dispatch real Analyser,
+Planners, Renderer, or migration subprocesses through the shared supervisor.
+Frozen Edit Review and atomic Guided Revision validation are synchronous;
+automatic Dialogue Preview dispatch is managed asynchronously. The synchronous
+Direct surface preserves the `analyse`,
 `analyse-music`, `plan`, `render`, and `run` CLI commands without implicitly
 creating Project or SQLite history.
 
@@ -1160,8 +1198,8 @@ durable queue.
 
 When `--output-dir` is omitted, the Application allocates a unique Direct
 Workflow Bundle under `direct/` in the active Data Root. It is included in
-storage totals but is not Web project history; the proposed Data Root Migration
-will move it with the root. An explicit CLI output directory must be outside
+storage totals but is not Web project history; Data Root Migration moves it
+with the root. An explicit CLI output directory must be outside
 the Data Root and remains external. Managed artifacts are allocated only from
 an owning Project/Run/Variant identity by a managed use case; a CLI path can
 never impersonate one.
@@ -1196,24 +1234,18 @@ making the fingerprint a selector.
 ### Durable local job execution
 
 The Application persists managed Attempts, jobs, stop flags, heartbeats, state
-transitions, command receipts, and structured events in SQLite. For ASTER
-planning, the implemented Web dispatcher launches one isolated subprocess for
-the submitted job. The worker claims that exact record, calls the real Planners
-Application use case from the immutable Run snapshot, heartbeats while active,
-publishes the RenderPlan atomically, and completes the Run with its initial
-Frozen Edit. For new Runs it commits the Candidate Bundle manifest only after
-all integrity-addressed Review artifacts are published. FastAPI never performs
-that model work inside the HTTP request.
+transitions, command receipts, and structured events in SQLite. One
+`LocalJobSupervisor` claims the FIFO queue under a configured heavy-job capacity
+and per-owner serialization rule, launches isolated Material Analysis, ASTER,
+and Renderer workers, and reconciles live process leases and orphaned jobs
+without duplicate launches. FastAPI never performs model or rendering work
+inside the HTTP request.
 
-The worker records internal exceptions as `Failed` and a requested stop as
-`Interrupted`. Run state is currently recovered through the polling projection;
-SSE replay, Resume, and general orphan recovery remain Proposed. ASTER model or
-media-library failures are process-isolated from the frontend server, and the
-local implementation requires no Redis, Celery, or external queue service.
-
-The proposed general supervisor will extend the same isolation boundary to
-Material Analysis and automatic Renderer Preview/Variant jobs, including a
-preview requested after Guided Revision, with a shared heavy-job concurrency
-limit, FIFO queue visibility, safe orphan recovery, and per-owner serialization.
-None of those broader scheduling guarantees should be inferred from the current
-submission-triggered ASTER dispatcher.
+Workers record internal exceptions as `Failed` and cooperative stop as
+`Interrupted`. Analyser and Planners check cancellation at safe model/media or
+agent boundaries. ASTER Resume pins a validated secret-free checkpoint after a
+complete A/S/T/E/R boundary or the internal replan-pending boundary; it never
+continues in the middle of an instruction. Global SSE replays durable events
+with `Last-Event-ID`, emits `resync_required` for an expired cursor, and uses
+REST projections as authoritative recovery. No Redis, Celery, or external queue
+service is required for this local single-user implementation.

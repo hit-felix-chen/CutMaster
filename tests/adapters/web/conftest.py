@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from cutmaster.adapters.web import create_app
 from cutmaster.application import CutMasterApplication
 
-
 MINIMAL_CONFIG = """
 [llm]
 model = "test-llm"
@@ -37,5 +36,10 @@ def application(config_path: Path) -> CutMasterApplication:
 
 @pytest.fixture
 def client(application: CutMasterApplication) -> TestClient:
-    with TestClient(create_app(application=application)) as value:
+    # Route tests inject or exercise command dispatch explicitly.  The real
+    # lifecycle supervisor has focused integration coverage of its own and
+    # must not race these deterministic fixture transitions.
+    with TestClient(
+        create_app(application=application, enable_job_supervisor=False)
+    ) as value:
         yield value

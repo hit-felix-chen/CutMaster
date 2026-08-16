@@ -22,7 +22,7 @@ from cutmaster.infrastructure.observability.logging import error_summary, log_ev
 _SEPARATOR_SAMPLE_RATE = 44100
 
 
-def _separator_device(requested: str) -> str:
+def resolve_separator_device(requested: str) -> str:
     if requested != "auto":
         return requested
     try:
@@ -335,7 +335,7 @@ def prepare_dialogue_audio(
     )
     if not specs:
         return [dict(item) for item in script], False
-    device = _separator_device(config.separator_device)
+    device = resolve_separator_device(config.separator_device)
     cache_key = _cache_key(video_path, specs, config)
     cache_dir = output_dir / "dialogue_audio" / cache_key
     cache_dir.mkdir(parents=True, exist_ok=True)

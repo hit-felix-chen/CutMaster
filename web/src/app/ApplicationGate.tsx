@@ -1,4 +1,4 @@
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 
 import { useApplicationHealth } from '@/app/use-application-health'
 import { AppShell } from '@/components/layout/AppShell'
@@ -6,6 +6,7 @@ import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
 
 export function ApplicationGate() {
   const health = useApplicationHealth()
+  const location = useLocation()
 
   if (health.isPending) {
     return (
@@ -22,7 +23,15 @@ export function ApplicationGate() {
     )
   }
   if (Object.values(health.data.configured).some((configured) => !configured)) {
-    return <Navigate to="/setup" replace />
+    return (
+      <Navigate
+        to="/setup"
+        replace
+        state={{
+          returnTo: `${location.pathname}${location.search}${location.hash}`,
+        }}
+      />
+    )
   }
   return <AppShell />
 }

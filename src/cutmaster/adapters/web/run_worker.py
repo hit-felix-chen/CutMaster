@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import logging
 import os
 import shutil
 import tempfile
@@ -11,15 +13,26 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
-from typing import Any
-from uuid import uuid4
+from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from cutmaster.adapters.web.job_cancellation import DatabaseJobCancellationToken
+from cutmaster.adapters.web.worker_lease import (
+    add_supervisor_lease_arguments,
+    adopt_supervisor_lease,
+    validate_claimed_submission,
+)
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.direct import DirectService, PlanCommand
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     FailAttemptCommand,
     HeartbeatJobCommand,
+    JobSubmissionView,
+    RecordAttemptUsageCommand,
+)
+from cutmaster.application.jobs.usage import (
+    normalize_usage_summary,
 )
 from cutmaster.application.runs import CompleteRunCommand, RunView
 from cutmaster.application.runs.review import (
@@ -35,10 +48,22 @@ from cutmaster.configuration.effective import (
 from cutmaster.domain.attempts import TERMINAL_ATTEMPT_STATUSES
 from cutmaster.domain.ids import AttemptId, JobId, RunId
 from cutmaster.domain.runs import RunStatus
-from cutmaster.workflow.ports import ProgressReporter, ProgressUpdate
+from cutmaster.infrastructure.observability.logging import error_summary
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
+    WorkflowCancelledError,
+    raise_if_cancelled,
+)
 
+if TYPE_CHECKING:
+    from cutmaster.workflow.contracts.checkpoints import PlannersCheckpointStore
 
 RunPlanner = Callable[[CutMasterApplication, RunView, Path], Path]
+PreviewDispatcher = Callable[[object], None]
+
+LOGGER = logging.getLogger(__name__)
 
 _ASTER_AGENTS = (
     "arrangement_architect",
@@ -56,6 +81,7 @@ class _RunPlanArtifacts:
     edit_plan: Path
     music_profile: Path
     selection_diagnostics: Path
+    model_usage_summary: Mapping[str, Any]
 
 
 class ASTERJobProgressReporter(ProgressReporter):
@@ -109,6 +135,8 @@ def execute_run_job(
     worker_id: str | None = None,
     process_id: int | None = None,
     heartbeat_interval_sec: float = 10.0,
+    preview_dispatcher: PreviewDispatcher | None = None,
+    claimed_submission: JobSubmissionView | None = None,
 ) -> RunStatus | None:
     """Claim and execute exactly one queued ASTER planning Job.
 
@@ -124,13 +152,17 @@ def execute_run_job(
     if heartbeat_interval_sec <= 0:
         raise ValueError("heartbeat_interval_sec must be positive")
     resolved_process_id = os.getpid() if process_id is None else process_id
-    claimed = application.jobs.claim_next(
-        ClaimJobCommand(
-            worker_id or f"web-run-{resolved_process_id}",
-            resolved_process_id,
-            job_id,
+    if claimed_submission is None:
+        claimed = application.jobs.claim_next(
+            ClaimJobCommand(
+                worker_id or f"web-run-{resolved_process_id}",
+                resolved_process_id,
+                job_id,
+            )
         )
-    )
+    else:
+        validate_claimed_submission(claimed_submission, job_id)
+        claimed = claimed_submission
     if claimed is None:
         return None
     attempt = claimed.attempt
@@ -142,6 +174,7 @@ def execute_run_job(
             )
         )
         return RunStatus.FAILED
+    cancellation_token = DatabaseJobCancellationToken(application.jobs, job_id)
 
     run_id = RunId.parse(attempt.owner_id)
     run = application.runs.get(run_id)
@@ -154,7 +187,15 @@ def execute_run_job(
     )
     heartbeat.start()
     published_paths: list[Path] = []
+    attempt_usage: dict[str, Any] | None = None
+    checkpoint_session = None
     try:
+        cancellation_token.raise_if_cancelled()
+        if planner is None:
+            checkpoint_session = application.runs.checkpoint_session(
+                run_id,
+                attempt.attempt_id,
+            )
         application.jobs.heartbeat(
             HeartbeatJobCommand(
                 job_id,
@@ -175,33 +216,61 @@ def execute_run_job(
         )
         with tempfile.TemporaryDirectory(prefix=f"cutmaster-{run_id}-") as raw:
             workspace = Path(raw).resolve()
-            planned = (
-                _plan_run(
-                    application,
-                    run,
-                    workspace,
-                    progress_reporter=ASTERJobProgressReporter(application, job_id),
+            planned: Path | _RunPlanArtifacts | None = None
+            try:
+                if planner is None:
+                    planned = _plan_run(
+                        application,
+                        run,
+                        workspace,
+                        progress_reporter=ASTERJobProgressReporter(
+                            application,
+                            job_id,
+                        ),
+                        cancellation_token=cancellation_token,
+                        checkpoint_store=checkpoint_session,
+                    )
+                else:
+                    cancellation_token.raise_if_cancelled()
+                    planned = planner(application, run, workspace)
+                    cancellation_token.raise_if_cancelled()
+                relative_plan = _run_plan_relative_path(run)
+                source_plan = (
+                    planned.render_plan
+                    if isinstance(planned, _RunPlanArtifacts)
+                    else planned
                 )
-                if planner is None
-                else planner(application, run, workspace)
-            )
-            relative_plan = _run_plan_relative_path(run)
-            source_plan = planned.render_plan if isinstance(planned, _RunPlanArtifacts) else planned
-            published_plan = _publish_plan(
-                source_plan,
-                application.settings.effective_configuration.data_root,
-                relative_plan,
-            )
-            published_paths.append(published_plan)
-            if isinstance(planned, _RunPlanArtifacts):
-                published_paths.extend(
-                    _publish_review_bundle(planned, published_plan.parent)
+                cancellation_token.raise_if_cancelled()
+                published_plan = _publish_plan(
+                    source_plan,
+                    application.settings.effective_configuration.data_root,
+                    relative_plan,
                 )
+                published_paths.append(published_plan)
+                cancellation_token.raise_if_cancelled()
+                if isinstance(planned, _RunPlanArtifacts):
+                    published_paths.extend(
+                        _publish_review_bundle(
+                            planned,
+                            published_plan.parent,
+                            cancellation_token=cancellation_token,
+                        )
+                    )
+                cancellation_token.raise_if_cancelled()
+            finally:
+                # The temporary planners workspace is the only source for
+                # partial-call usage when planning raises or is cancelled.
+                attempt_usage = _capture_attempt_usage(workspace, planned)
 
         latest_job = application.jobs.get_job(job_id)
         if latest_job.stop_requested:
             for path in reversed(published_paths):
                 path.unlink(missing_ok=True)
+            _record_attempt_usage_best_effort(
+                application,
+                attempt.attempt_id,
+                attempt_usage,
+            )
             application.jobs.mark_interrupted(attempt.attempt_id)
             return RunStatus.INTERRUPTED
 
@@ -211,12 +280,41 @@ def execute_run_job(
                 run_id,
                 attempt.attempt_id,
                 relative_plan,
+                attempt_usage,
             )
         )
+        if checkpoint_session is not None:
+            try:
+                checkpoint_session.clear()
+            except Exception:  # noqa: BLE001 - completed Run stays authoritative
+                LOGGER.exception("Unable to clean completed ASTER checkpoint")
+        if preview_dispatcher is not None:
+            _create_and_dispatch_preview(
+                application,
+                completed.frozen_edit.edit_id,
+                preview_dispatcher,
+            )
         return completed.run.status
-    except Exception as error:
+    except WorkflowCancelledError:
         for path in reversed(published_paths):
             path.unlink(missing_ok=True)
+        _record_attempt_usage_best_effort(
+            application,
+            attempt.attempt_id,
+            attempt_usage,
+        )
+        attempt_view = application.jobs.get_attempt(attempt.attempt_id)
+        if attempt_view.status not in TERMINAL_ATTEMPT_STATUSES:
+            application.jobs.mark_interrupted(attempt.attempt_id)
+        return application.runs.get(run_id).status
+    except Exception as error:  # noqa: BLE001 - worker failure boundary
+        for path in reversed(published_paths):
+            path.unlink(missing_ok=True)
+        _record_attempt_usage_best_effort(
+            application,
+            attempt.attempt_id,
+            attempt_usage,
+        )
         _finish_failed_or_interrupted(application, job_id, attempt.attempt_id, error)
         return application.runs.get(run_id).status
     finally:
@@ -230,6 +328,8 @@ def _plan_run(
     workspace: Path,
     *,
     progress_reporter: ProgressReporter | None = None,
+    cancellation_token: CancellationToken | None = None,
+    checkpoint_store: PlannersCheckpointStore | None = None,
 ) -> _RunPlanArtifacts:
     if len(run.video_material_ids) != 1 or len(run.music_material_ids) != 1:
         raise ValueError("ASTER Run snapshot requires exactly one video and one music")
@@ -252,6 +352,8 @@ def _plan_run(
             music_material=music.name,
             target_output_length_sec=run.creative_brief.target_duration_sec,
             progress_reporter=progress_reporter,
+            cancellation_token=cancellation_token,
+            checkpoint_store=checkpoint_store,
         )
     )
     return _RunPlanArtifacts(
@@ -260,7 +362,62 @@ def _plan_run(
         edit_plan=result.edit_plan_path,
         music_profile=result.music_profile_path,
         selection_diagnostics=result.selection_diagnostics_path,
+        model_usage_summary=dict(result.model_usage_summary),
     )
+
+
+def _capture_attempt_usage(
+    workspace: Path,
+    planned: Path | _RunPlanArtifacts | None,
+) -> dict[str, Any] | None:
+    """Capture only this planners invocation's aggregate before cleanup."""
+
+    try:
+        if isinstance(planned, _RunPlanArtifacts):
+            candidate = planned.model_usage_summary
+        else:
+            # This import is intentionally on the executing worker path: the
+            # module owns provider clients and must not make Application.open
+            # eagerly import the OpenAI stack.
+            from cutmaster.infrastructure.models.openai_compatible import (
+                load_usage_summary,
+            )
+
+            usage_path = workspace / "diagnostics" / "model_usage.json"
+            if not usage_path.is_file():
+                return None
+            payload = json.loads(usage_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("schema_version") != "2.0":
+                raise ValueError("ASTER usage artifact must use schema 2.0")
+            current_run = payload.get("current_run")
+            if not isinstance(current_run, dict) or not isinstance(
+                current_run.get("summary"),
+                dict,
+            ):
+                raise ValueError("ASTER usage artifact has no current_run summary")
+            candidate = load_usage_summary(
+                usage_path,
+                cumulative=False,
+            )
+        return normalize_usage_summary(candidate)
+    except Exception:  # noqa: BLE001 - telemetry cannot mask the Run outcome
+        LOGGER.exception("Unable to capture ASTER Attempt model usage")
+        return None
+
+
+def _record_attempt_usage_best_effort(
+    application: CutMasterApplication,
+    attempt_id: AttemptId,
+    model_usage_summary: Mapping[str, Any] | None,
+) -> None:
+    if model_usage_summary is None:
+        return
+    try:
+        application.jobs.record_attempt_usage(
+            RecordAttemptUsageCommand(attempt_id, model_usage_summary)
+        )
+    except Exception:  # noqa: BLE001 - preserve the original terminal outcome
+        LOGGER.exception("Unable to persist ASTER Attempt model usage")
 
 
 def _snapshot_secret_references(
@@ -306,9 +463,10 @@ def _publish_plan(source: Path, data_root: Path, relative_path: str) -> Path:
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as destination, resolved_source.open(
-            "rb"
-        ) as source_stream:
+        with (
+            os.fdopen(descriptor, "wb") as destination,
+            resolved_source.open("rb") as source_stream,
+        ):
             shutil.copyfileobj(source_stream, destination)
             destination.flush()
             os.fsync(destination.fileno())
@@ -322,6 +480,8 @@ def _publish_plan(source: Path, data_root: Path, relative_path: str) -> Path:
 def _publish_review_bundle(
     artifacts: _RunPlanArtifacts,
     target_directory: Path,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[Path]:
     """Publish the immutable Review inputs and manifest commit point."""
 
@@ -335,6 +495,7 @@ def _publish_review_bundle(
     try:
         entries: dict[str, dict[str, str]] = {}
         for logical_name, source in sources.items():
+            raise_if_cancelled(cancellation_token)
             if source.is_symlink() or not source.is_file():
                 raise ValueError(
                     f"Run planner did not produce a regular {logical_name} artifact"
@@ -347,6 +508,8 @@ def _publish_review_bundle(
             )
             published.append(target)
             entries[logical_name] = artifact_manifest_entry(target)
+            raise_if_cancelled(cancellation_token)
+        raise_if_cancelled(cancellation_token)
         manifest = target_directory / REVIEW_BUNDLE_FILENAME
         write_json_atomic(
             manifest,
@@ -377,7 +540,10 @@ def _publish_sibling(source: Path, directory: Path, name: str) -> Path:
     )
     temporary = Path(raw_temporary)
     try:
-        with os.fdopen(descriptor, "wb") as destination, resolved.open("rb") as source_stream:
+        with (
+            os.fdopen(descriptor, "wb") as destination,
+            resolved.open("rb") as source_stream,
+        ):
             shutil.copyfileobj(source_stream, destination)
             destination.flush()
             os.fsync(destination.fileno())
@@ -403,10 +569,8 @@ def _heartbeat_loop(
 ) -> None:
     while not stop.wait(interval_sec):
         try:
-            application.jobs.heartbeat(
-                HeartbeatJobCommand(job_id)
-            )
-        except Exception:
+            application.jobs.heartbeat(HeartbeatJobCommand(job_id))
+        except Exception:  # noqa: BLE001 - the worker owns terminal persistence
             return
 
 
@@ -423,17 +587,60 @@ def _finish_failed_or_interrupted(
     if job.stop_requested:
         application.jobs.mark_interrupted(attempt_id)
     else:
-        message = str(error).strip() or type(error).__name__
+        message = error_summary(error) or type(error).__name__
         application.jobs.mark_failed(FailAttemptCommand(attempt_id, message))
+
+
+def _create_and_dispatch_preview(
+    application: CutMasterApplication,
+    edit_id,
+    dispatcher: PreviewDispatcher,
+) -> None:
+    try:
+        command_id = str(uuid5(NAMESPACE_URL, f"cutmaster:dialogue-preview:{edit_id}"))
+        submission = application.renders.create_dialogue_preview(command_id, edit_id)
+        if submission.created:
+            dispatcher(submission)
+    except Exception:
+        # Run completion is already committed and remains authoritative. The
+        # Preview owns an independent failure lifecycle.
+        LOGGER.exception("Unable to create or dispatch the default dialogue Preview")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Execute one CutMaster Web Run Job")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
+    add_supervisor_lease_arguments(parser)
     args = parser.parse_args(argv)
     application = CutMasterApplication.open(args.config)
-    status = execute_run_job(application, JobId.parse(args.job_id))
+    job_id = JobId.parse(args.job_id)
+    exact_supervisor_grant = all(
+        value is not None
+        for value in (
+            args.attempt_id,
+            args.lease_worker_id,
+            args.lease_process_id,
+        )
+    )
+    with application.data_root_coordinator.shared(
+        allow_maintenance=exact_supervisor_grant
+    ):
+        claimed = adopt_supervisor_lease(
+            application,
+            job_id=job_id,
+            attempt_id=args.attempt_id,
+            lease_worker_id=args.lease_worker_id,
+            lease_process_id=args.lease_process_id,
+            worker_kind="run",
+        )
+        status = execute_run_job(
+            application,
+            job_id,
+            # Preview is only durably enqueued; the parent owns subprocesses.
+            preview_dispatcher=lambda _submission: None,
+            claimed_submission=claimed,
+        )
     if status in {None, RunStatus.COMPLETE, RunStatus.INTERRUPTED}:
         return 0
     return 1

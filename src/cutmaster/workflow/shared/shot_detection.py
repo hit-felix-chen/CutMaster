@@ -10,7 +10,7 @@ from scenedetect import open_video
 from scenedetect.detectors import AdaptiveDetector
 
 from cutmaster.infrastructure.observability.progress import progress_bar
-
+from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 
 ADAPTIVE_THRESHOLD = 2.0
 ADAPTIVE_MIN_CONTENT_VAL = 15.0
@@ -37,7 +37,9 @@ def detect_source_cuts(
     adaptive_min_scene_len_sec: float = ADAPTIVE_MIN_SCENE_LEN_SEC,
     duplicate_frame_threshold: float = DUPLICATE_FRAME_THRESHOLD,
     progress_label: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[list[float], float]:
+    raise_if_cancelled(cancellation_token)
     if end_sec <= start_sec:
         return [], 30.0
 
@@ -69,6 +71,7 @@ def detect_source_cuts(
                 break
             pending_progress += 1
             if progress is not None and pending_progress >= progress_batch_size:
+                raise_if_cancelled(cancellation_token)
                 progress.update(
                     min(pending_progress, max(0, progress.total - progress.n))
                 )
@@ -86,15 +89,13 @@ def detect_source_cuts(
                 continue
 
             cuts.extend(
-                float(cut.seconds)
-                for cut in detector.process_frame(position, frame)
+                float(cut.seconds) for cut in detector.process_frame(position, frame)
             )
             previous_signature = signature
+        raise_if_cancelled(cancellation_token)
     finally:
         if "progress" in locals() and progress is not None:
-            progress.update(
-                min(pending_progress, max(0, progress.total - progress.n))
-            )
+            progress.update(min(pending_progress, max(0, progress.total - progress.n)))
             progress.close()
         video.capture.release()
     return cuts, frame_rate

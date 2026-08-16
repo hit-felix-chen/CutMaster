@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from cutmaster.infrastructure.models.openai_compatible import (
     ModelUsage,
     empty_usage_summary,
     generate_text,
+    merge_usage_summaries,
     request_json_with_retries,
 )
 from cutmaster.configuration.schema import ModelConfig
@@ -39,14 +41,40 @@ class WorkflowContext:
         model_call_tree_path: Path | None = None,
         model_usage_path: Path | None = None,
         stage_name: str = "planners",
+        prior_model_usage_summary: Mapping[str, Any] | None = None,
+        prior_model_call_count: int = 0,
     ) -> None:
+        if (
+            not isinstance(prior_model_call_count, int)
+            or isinstance(prior_model_call_count, bool)
+            or prior_model_call_count < 0
+        ):
+            raise ValueError("prior_model_call_count must be non-negative")
+        if prior_model_usage_summary is None and prior_model_call_count:
+            raise ValueError(
+                "prior_model_usage_summary is required with prior model calls"
+            )
         self._lock = RLock()
         self.path = path
         self._model_call_tree_path = model_call_tree_path
         self._model_usage_path = model_usage_path
         self._model_stage_name = stage_name
         self._model_call_tree_started_at = datetime.now().astimezone().isoformat()
-        self._prior_usage_calls = self._load_prior_usage_calls()
+        self._prior_usage_summary = (
+            None
+            if prior_model_usage_summary is None
+            else merge_usage_summaries([dict(prior_model_usage_summary)])
+        )
+        self._prior_usage_calls = (
+            self._load_prior_usage_calls()
+            if prior_model_usage_summary is None
+            else []
+        )
+        self._model_call_id_offset = (
+            len(self._prior_usage_calls)
+            if prior_model_usage_summary is None
+            else prior_model_call_count
+        )
         self._model_calls: list[dict[str, Any]] = []
         self.data: dict[str, Any] = {
             "schema_version": "2.0",
@@ -133,7 +161,7 @@ class WorkflowContext:
             return None
         with self._lock:
             call = {
-                "call_id": len(self._prior_usage_calls) + len(self._model_calls) + 1,
+                "call_id": self._model_call_id_offset + len(self._model_calls) + 1,
                 "task": package.task.value,
                 "operation": package.operation,
                 "started_at": datetime.now().astimezone().isoformat(),
@@ -407,19 +435,34 @@ class WorkflowContext:
 
     def model_usage_summary(self, *, include_prior: bool = False) -> dict[str, Any]:
         with self._lock:
-            calls = list(self._model_calls)
-            if include_prior:
-                calls = [*self._prior_usage_calls, *calls]
-            return self._summarize_calls(calls)
+            current = self._summarize_calls(list(self._model_calls))
+            if not include_prior:
+                return current
+            if self._prior_usage_summary is not None:
+                return merge_usage_summaries(
+                    [dict(self._prior_usage_summary), current]
+                )
+            return self._summarize_calls(
+                [*self._prior_usage_calls, *self._model_calls]
+            )
+
+    def model_call_count(self, *, include_prior: bool = False) -> int:
+        with self._lock:
+            current = len(self._model_calls)
+            return self._model_call_id_offset + current if include_prior else current
 
     def save_model_usage(self) -> Path | None:
         if self._model_usage_path is None:
             return None
         with self._lock:
-            calls = [
-                *self._prior_usage_calls,
-                *(self._usage_call(call) for call in self._model_calls),
-            ]
+            current_calls = [self._usage_call(call) for call in self._model_calls]
+            calls = (
+                [*self._prior_usage_calls, *current_calls]
+                if self._prior_usage_summary is None
+                else current_calls
+            )
+            current_summary = self._summarize_calls(current_calls)
+            cumulative_summary = self.model_usage_summary(include_prior=True)
             payload = {
                 "schema_version": "2.0",
                 "stage": self._model_stage_name,
@@ -428,14 +471,12 @@ class WorkflowContext:
                 "currency": "CNY",
                 "price_unit": "yuan_per_million_tokens",
                 "current_run": {
-                    "summary": self._summarize_calls(
-                        [self._usage_call(call) for call in self._model_calls]
-                    ),
+                    "summary": current_summary,
                     "call_ids": [call["call_id"] for call in self._model_calls],
                 },
-                "cumulative": {"summary": self._summarize_calls(calls)},
+                "cumulative": {"summary": cumulative_summary},
                 # Compatibility aliases for existing readers. `summary` is cumulative.
-                "summary": self._summarize_calls(calls),
+                "summary": cumulative_summary,
                 "calls": calls,
             }
             self._model_usage_path.parent.mkdir(parents=True, exist_ok=True)

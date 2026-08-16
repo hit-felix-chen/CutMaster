@@ -25,14 +25,31 @@ resolution are active code, not design placeholders.
 
 The FastAPI peer adapter, React/Vite Web UI, `cutmaster serve`, and the first
 managed Web slice are implemented over the same Application Layer. Projects,
-the combined Project Setup, Materials and Memory, ASTER Run submission and
-detail polling, Activity, Settings, source-media Range streams, and SPA
-packaging are active code. Start editing creates a durable ASTER Run and an
-isolated subprocess executes its real Planners work, then commits its RenderPlan
-and Candidate Bundle. Frozen Edit Review, historical read-only Review, and
-atomic Guided Revision are implemented. **Proposed:** Web-managed Material
-Analysis and Renderer workers, automatic Preview/Variant creation, SSE, a
-general supervisor, and guarded **Data Root Migration**.
+the combined Project Setup, Materials and Memory, Activity, Settings, source-
+media Range streams, and SPA packaging are active code. Web Material import
+preflights names and files, accepts an optional video subtitle, runs the real
+Analyser in a managed subprocess, publishes bounded thumbnail/waveform previews,
+and supports Retry, Resume, Stop, and guarded deletion. Start editing creates a
+durable ASTER Run; real Planners work commits its RenderPlan and Candidate
+Bundle, supports Retry, Run again, deletion and persisted usage, and resumes an
+Interrupted Attempt only from a validated complete A/S/T/E/R boundary or the
+internal replan-pending boundary. It does not resume inside a model or media
+operation. Frozen Edit Review, atomic Guided
+Revision, strict Render Specifications, real Renderer Attempts, automatic
+Dialogue Preview, Render Variant/Outputs lifecycle, and managed downloads are
+implemented.
+
+One local Job Supervisor schedules Analyser, Planners, and Renderer work with a
+durable FIFO queue, concurrency capacity, per-owner serialization, heartbeat
+leases, cooperative cancellation, and orphan recovery. One global SSE stream
+projects durable events with `Last-Event-ID` replay and `resync_required` REST
+recovery. Provider presets/custom connections, first-run Setup, per-capability
+connection tests, atomic local overlay/`.env` writes, structured Activity
+navigation with paginated recent work, and guarded **Data Root Migration** are
+also implemented. Still deferred are persistent application notifications, the
+Activity log drawer, Direct Bundle bulk cleanup/retention, generated OpenAPI
+TypeScript drift checks in CI, multi-user/cloud operation, and broader provider
+and media port injection.
 
 ## Language
 
@@ -230,7 +247,7 @@ The mutable, non-unique display label of an **Edit Project**. It helps people
 recognize a workspace but is not the project's stable identity.
 _Avoid_: Material Name, project ID, filesystem directory
 
-**Application Data Root** *(Resolution and storage implemented; migration proposed)*:
+**Application Data Root** *(Resolution, storage, and migration implemented)*:
 The single local directory containing CutMaster's frontend database, Material
 Library, project artifacts, Direct Workflow Bundles, durable job state, and
 logs. It defaults to `CutMaster/.cutmaster/` and may be set to a custom local
@@ -264,14 +281,19 @@ path, or Managed Artifact Reference.
 _Avoid_: filesystem scan, absolute result fields, Managed Artifact Reference,
 RenderPlan
 
-**Data Root Migration** *(Proposed)*:
+**Data Root Migration** *(Implemented)*:
 The guarded operation for changing a non-empty **Application Data Root**. It
 requires that no Execution Attempt is active, pauses dispatch of queued work,
 copies and verifies all managed state, and atomically switches roots only after
 verification by updating the external root-location pointer. Failure leaves the
-original root active; queued jobs remain durable and resume after the switch.
-During migration the application permits read-only browsing and playback but
-blocks every managed-state mutation.
+original root active. A stable external lease fences persistent readers and
+writers across Web, CLI, Benchmark, and workers; during maintenance all business
+API reads and writes return a typed 503. Only health, migration status/control,
+and static application resources remain available. A successful pointer switch
+enters `restart_required`; the next backend start validates and opens the copied
+root. The migration never deletes the old Data Root. Cancellation and failure
+remove only manifest-owned staging files, preserve unknown destination content,
+and restore the original root and queued dispatch.
 _Avoid_: editing the path in place, partial move, separate Material migration
 
 **Project Material Set** *(Implemented in managed backend state)*:
@@ -280,24 +302,54 @@ an **Edit Project**. The first release permits one video and one music Material
 while preserving the collection boundary for future multi-source editing.
 _Avoid_: Material Library, single source path, Frozen Edit
 
-**ASTER Run** *(Managed Web planning execution implemented)*:
+**ASTER Run** *(Managed Web planning lifecycle implemented)*:
 An immutable planning record within an **Edit Project** that snapshots its
 Material References, Creative Brief, and effective non-secret configuration.
 Its Execution Attempts represent each try; successful managed completion
 records a RenderPlan reference and produces an initial **Frozen Edit**. The Web
 Start editing command dispatches this Planners work to an isolated local
 subprocess with durable Attempt/job state, heartbeats, and structured A/S/T/E/R
-agent milestones. Runs, Run detail, and Activity derive their live display state
-from the same Execution Attempt projection and poll it only while active.
-Run-level usage projection remains Proposed. Any input change creates another
-ASTER Run rather than changing an existing one.
+agent milestones. Retry creates a new Attempt for the same snapshot; Resume
+requires an Interrupted Attempt with a valid complete-agent-boundary checkpoint;
+Run again creates a new immutable Run from the historical snapshot. Safe Run
+deletion removes its owned history and artifacts. Runs, Run detail, and Activity
+derive their live state and persisted model usage from the same Execution
+Attempt projection. Any input change creates another ASTER Run rather than
+changing an existing one.
 _Avoid_: Edit Project, overwritten plan, Guided Revision
 
 **Execution Attempt** *(Implemented in SQLite-backed job state)*:
 One try to complete a Material Analysis, ASTER Run, or Render Variant without
 changing that object's inputs or identity. Retrying creates another Execution
-Attempt; changing an ASTER input creates another ASTER Run instead.
+Attempt; changing an ASTER input creates another ASTER Run instead. Long-running
+Attempts are scheduled by the shared local supervisor and report durable
+milestones. Cooperative Stop becomes Interrupted at a safe operation boundary;
+Resume may reuse only a validated operation-specific checkpoint.
 _Avoid_: ASTER Run, overwrite, rerun with changed inputs
+
+**Local Job Supervisor** *(Implemented)*:
+The single local scheduler for managed Material Analysis, ASTER Run, and Render
+Variant Attempts. It claims the durable FIFO queue subject to configured
+capacity and per-owner serialization, launches isolated workers, records
+heartbeats, cooperatively stops work, and recovers orphaned jobs after process
+loss.
+_Avoid_: ASTER-only dispatcher, browser task runner, distributed queue
+
+**ASTER Stage Checkpoint** *(Implemented)*:
+A secret- and path-free durable receipt written only after a complete
+Arrangement Architect, Story Editor, Timeline Scout, Edit Composer, or Revision
+Editor boundary. A replan-pending receipt additionally preserves sanitized
+feedback before the next Arrangement Architect pass. Resume validates and pins
+one receipt to the new Attempt; it never continues in the middle of an agent,
+model call, or media operation.
+_Avoid_: instruction-level checkpoint, raw provider response, automatic retry
+
+**Durable Event Stream** *(Implemented)*:
+The monotonically ordered SSE projection used by one global browser connection
+to observe managed changes. Reconnection supplies `Last-Event-ID`; retained
+events are replayed, while an expired cursor yields `resync_required` and a REST
+refetch. Resource queries remain the source of truth.
+_Avoid_: command channel, WebSocket state store, page-local stream
 
 **Interrupted Attempt**:
 An Execution Attempt deliberately stopped by the user at a safe boundary. Its
@@ -360,10 +412,13 @@ The validated set of source-timeline alternatives from which the final visual
 choice for each unanchored Slot may be made.
 _Avoid_: Search results, retrieved clips
 
-**Candidate Bundle** *(Implemented for newly completed managed ASTER Runs)*:
+**Candidate Bundle** *(Required for every Frozen Edit)*:
 The immutable, integrity-checked managed artifact set that preserves an ASTER
-Run's Candidate Space and deterministic Review inputs. A historical Frozen Edit
-without this bundle remains reviewable but cannot start a Guided Revision.
+Run's Candidate Space and deterministic Review inputs. A Frozen Edit is valid
+only when this bundle is present, passes integrity validation, and contains the
+selected candidate for every required Slot. Missing, damaged, or incomplete
+bundle state produces `review_artifact_unavailable`; CutMaster never infers a
+Candidate Space or falls back to read-only Review.
 _Avoid_: RenderPlan, Revision Draft, inferred candidates
 
 **RenderPlan**:
@@ -374,7 +429,8 @@ _Avoid_: Frozen Edit, final video, mutable timeline, runtime media binding
 
 **Frozen Edit** *(Implemented in managed backend state)*:
 The immutable product-history identity of one accepted edit version, belonging
-to one **ASTER Run** and owning exactly one **RenderPlan**. An ASTER Run has no
+to one **ASTER Run**, owning exactly one **RenderPlan**, and associated with the
+Run's complete, integrity-checked **Candidate Bundle**. An ASTER Run has no
 canonical current or final Frozen Edit; any version may parent many **Guided
 Revision** versions and may have many **Render Variants** without duplicating
 the timeline.
@@ -382,8 +438,8 @@ _Avoid_: RenderPlan, final video, mutable timeline, render cache
 
 **Guided Revision** *(Implemented)*:
 A user-directed replacement of a non-anchor Slot's selected passage with
-another member of its existing **Candidate Space**. It starts from any
-Candidate-Bundle-backed Frozen Edit in the same ASTER Run, preserves Slot timing,
+another member of its existing **Candidate Space**. It starts from any valid
+Frozen Edit in the same ASTER Run, preserves Slot timing,
 arrangement constraints, and Story Anchors, and produces a new child Frozen Edit
 without changing its source.
 _Avoid_: Freeform timeline editing, rerunning ASTER coordination, Revision Editor
@@ -416,13 +472,13 @@ missing or fails integrity validation. It is a product condition rather than a
 Variant identity.
 _Avoid_: Failed Attempt, deleted Render Variant, interrupted rendering
 
-**Exported Copy** *(Proposed Web UI concept)*:
+**Exported Copy** *(Implemented browser download concept)*:
 A user-downloaded copy of one Render Variant outside the Application Data Root.
 It is not project history and CutMaster does not track later moves or deletion
 of that copy.
 _Avoid_: Render Variant, managed master, new render
 
-**Dialogue Preview** *(Proposed Web product default)*:
+**Dialogue Preview** *(Implemented Web product default)*:
 The default **Render Variant**, combining background music with the selected
 Story Anchors' original dialogue; with no Story Anchors it contains background
 music only. Its state is independent of its ASTER Run: failure or permanent
@@ -433,8 +489,8 @@ _Avoid_: Frozen Edit, BGM-only variant, source-audio mix
 **Music Profile**:
 A Planners-invocation-specific projection of **Music Memory** onto its requested
 output duration, used by the **Arrangement Architect** to shape pacing.
-New managed ASTER Runs retain it inside their Candidate Bundle as a deterministic
-Review input.
+Managed ASTER Runs retain it inside their required Candidate Bundle as a
+deterministic Review input.
 _Avoid_: Music Memory, source music analysis, reusable material
 
 ## Flagged ambiguities
@@ -474,14 +530,16 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 >
 > **Domain expert:** No. Web Guided Revision replaces a non-anchor Slot only
 > with an existing member of its persisted Candidate Space and atomically
-> produces a new Frozen Edit. A historical edit without that Candidate Bundle
-> remains read-only.
+> produces a new Frozen Edit. If its required Candidate Bundle is missing,
+> damaged, or incomplete, Review fails with `review_artifact_unavailable`
+> rather than inventing a read-only compatibility mode.
 
 > **Developer:** Can two projects using the same song share their Music Profile?
 >
 > **Domain expert:** They share one Music Memory. Each Planners invocation
 > derives its own Music Profile because its requested output duration may
-> differ; a new managed ASTER Run retains that profile in its Candidate Bundle.
+> differ; every managed ASTER Run retains that profile in the Candidate Bundle
+> required by its Frozen Edits.
 
 > **Developer:** What happens when I upload the same file twice with the same
 > candidate name?

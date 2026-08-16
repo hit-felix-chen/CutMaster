@@ -1,8 +1,7 @@
 # Use React, FastAPI, and SQLite for the local frontend
 
-**Status: React, FastAPI, SQLite persistence, SPA packaging, Project Setup, and
-managed ASTER planning implemented; SSE and other managed long-job execution
-proposed.**
+**Status: Implemented, including the complete managed local job lifecycle and
+durable SSE transport.**
 
 The local CutMaster application uses a React and TypeScript SPA built with Vite
 and a FastAPI Web adapter over the implemented,
@@ -14,7 +13,7 @@ Streamlit, binary database storage, and cloud-oriented infrastructure would add
 weight without serving the first-release local single-user boundary.
 
 REST uses resource-oriented `GET` queries and explicit use-case command routes,
-not database-shaped CRUD or a universal command endpoint. Proposed SSE is read-only;
+not database-shaped CRUD or a universal command endpoint. SSE is read-only;
 FastAPI performs transport mapping while Application services own all rules.
 HTTP failures use RFC Problem Details with stable domain codes and structured
 metadata so the React client can localize errors without exposing internal

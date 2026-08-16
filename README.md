@@ -46,12 +46,14 @@ M + ASTER = MASTER
 > 当前已实现 `CutMasterApplication`、Direct/Materials 服务、
 > SQLite 管理状态、handle-only v2 Workflow 契约、Artifact Manifest，
 > 以及 FastAPI + React/Vite 本地 Web 工作台。CLI、Web 和
-> Mashup-Benchmark 均经由 Application Layer 调用真实后端。Web 已支持
-> `Start editing`，并通过独立子进程执行真实 ASTER planning、持久化
-> RenderPlan、初始 Frozen Edit 和后续新 Run 的 Candidate Bundle。Frozen Edit
-> Review、历史产物的只读降级和原子 Guided Revision 已实现；素材分析与
-> Renderer 的 Web 长任务、自动 Preview/Variant 创建、SSE、通用 supervisor
-> 和 Data Root Migration 仍为 Proposed。
+> Mashup-Benchmark 均经由 Application Layer 调用真实后端。Web 已支持素材
+> 导入、分析、预览与完整恢复动作；ASTER Run 的启动、重试、边界续跑、再次
+> 运行、删除与用量查看；Frozen Edit Review、原子 Guided Revision；以及由
+> 严格 Render Specification 驱动的 Renderer、Dialogue Preview、Render
+> Variant 和 Outputs。统一的本地任务 supervisor 负责 FIFO、容量、同属主
+> 串行化与孤儿恢复，durable SSE 支持 `Last-Event-ID` 重放与全量重同步。
+> Provider/Setup、连接测试、原子本地配置写入和受保护的 Data Root Migration
+> 也已连接真实后端，不使用模拟接口。
 
 ```mermaid
 flowchart LR
@@ -112,7 +114,7 @@ CLI
 
 Material Library 保存视频和音乐的只读托管副本。每个 Material 都有一个不透明的内部 **Material ID**，但用户与 CLI 始终通过 `(Material Type, exact Material Name)` 选择素材。未显式指定名称时，CLI 使用源文件的 filename stem；同一素材类型内 Material Name 唯一，`app.materials.add()` 遇到重名一律报冲突，系统不会自动追加 `(2)`、覆盖或替换。`analyse` 以及 `run --video/--audio` 使用 `app.materials.ensure()` 提供幂等性：只有同类型、同名、同指纹的既有绑定会返回同一个 Material ID；同名但内容不同仍会报冲突。即使文件内容相同，只要使用不同的可用名称，也会建立两个可独立选择的 Material。
 
-SHA-256 记录在 Material 清单条目中，仅作为内部一致性校验，不参与 Material ID 或目录命名，也不作为 CLI 选择参数。若托管源文件与记录的指纹不一致，该 Material 会被阻止进入分析、规划和渲染。底层 Material Library 支持添加和删除，但删除尚未暴露给 CLI 或前端；不支持就地替换。
+SHA-256 记录在 Material 清单条目中，仅作为内部一致性校验，不参与 Material ID 或目录命名，也不作为 CLI 选择参数。若托管源文件与记录的指纹不一致，该 Material 会被阻止进入分析、规划和渲染。Web Material Library 已提供受引用关系和活动 Attempt 保护的永久删除；CLI 仍以添加、确保和精确名称复用为主。不支持就地替换。
 
 已完成的 Material Memory 会直接复用；中断的视频分析只能在字幕与分析规格未变时继续，防止不同输入的 checkpoint 被混合。
 
@@ -231,16 +233,33 @@ npm --prefix web run build
 uv run cutmaster serve --config config.toml
 ```
 
-默认在 `http://127.0.0.1:8000` 打开。当前 Web 竖向切片支持真实的
-Projects、Material Library、Video/Music Memory Explorer、Activity 与
-Settings。项目内部使用 **Project Setup / Runs / Outputs** 三个标签；
-Project Setup 在同一页选择视频和音乐、填写剪辑意图与目标时长，并显式保存。
-保存后可点击 **Start editing** 创建不可变 ASTER Run；本地子进程执行真实
-Planners 调用，Run 详情页展示执行状态与生成的 Frozen Edit。点击 Frozen
-Edit 可进入真实 Review：新 Run 持久化的 Candidate Bundle 支持候选约束内的
-原子 Guided Revision；升级前没有该 Bundle 的历史 Edit 会诚实降级为只读
-Review。Import & Analyse、自动 Renderer Preview/Variant 创建、SSE 和通用
-supervisor 尚未实现，CLI 与 Benchmark 的完整生成链路不受影响。
+默认在 `http://127.0.0.1:8000` 打开。Web 工作台使用真实 Application 数据
+提供 Projects、Material Library、Video/Music Memory Explorer、Activity 和
+Settings。素材可以通过 Web 预检、导入（视频可携带可选 SRT）并排入真实
+Analyser；失败或中断后可 Retry/Resume，活动工作可 Stop，删除受引用与运行
+状态保护。视频缩略图与音乐波形是有界预览，不会把完整源媒体嵌入列表响应。
+
+项目内部使用 **Project Setup / Runs / Outputs** 三个标签。保存素材、剪辑
+意图与目标时长后，**Start editing** 创建不可变 ASTER Run，并由本地子进程
+执行真实 Planners。失败 Run 可 Retry；中断 Run 仅从已校验的完整 A/S/T/E/R
+代理边界（包括待重新规划边界）Resume；成功 Run 可 Run again，历史 Run 可在
+安全时永久删除。Run 详情和 Activity 展示统一的持久化进度与模型用量。
+
+Frozen Edit 打开真实 Review；每个 Frozen Edit 必须关联完整且通过完整性校验的
+Candidate Bundle，支持候选约束内的原子 Guided Revision。Bundle 缺失、损坏或
+selected candidate 不完整时返回 `review_artifact_unavailable`，不提供只读降级。
+严格、不可变的 Render
+Specification 驱动真实 Renderer Attempt、自动 Dialogue Preview、BGM-only
+Variant、播放、Range 下载、Finder、完整性验证、Render again 和安全删除。
+统一 `LocalJobSupervisor` 为 Analyser、Planners 和 Renderer 提供 FIFO、容量、
+同属主串行化与孤儿恢复；全局 SSE 连接通过 `Last-Event-ID` 重放 durable 事件，
+必要时触发 `resync_required` 后的 REST 重同步。
+
+Settings/首次 Setup 支持 Provider 预设或自定义 OpenAI-compatible 连接、分能力
+连接测试、原子 `.env`/本地 overlay 写入和受保护的 Data Root Migration。当前
+仍有意保留为后续工作的范围包括持久化应用内通知、Activity 日志抽屉、Direct
+Bundle 批量清理/保留策略、OpenAPI 生成的 TypeScript 漂移 CI、多用户/云部署，
+以及更完整的 provider/media port 注入。
 
 ### 命令行
 

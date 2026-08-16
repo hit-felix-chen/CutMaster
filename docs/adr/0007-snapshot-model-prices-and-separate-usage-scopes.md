@@ -1,6 +1,6 @@
 # Snapshot model prices and separate usage scopes
 
-**Status: Implemented for Workflow usage artifacts.**
+**Status: Implemented for Workflow artifacts and managed Run projections.**
 
 Every recorded LLM or VLM call snapshots the configured uncached-input,
 cache-hit-input, and output prices in CNY per million tokens. Usage artifacts
@@ -17,3 +17,9 @@ are not charged in addition to completion tokens.
 Stage artifacts retain detailed calls, and the workflow root stores an
 aggregate `model_usage.json`. Benchmark integrations are not responsible for
 collecting or publishing these statistics.
+
+Managed ASTER Attempts persist aggregate usage with their immutable Run and
+surface it in Run detail. Resumed Attempts distinguish usage created by the
+current process from cumulative usage restored from completed stage
+checkpoints; raw calls, prompts, provider responses, and credentials are not
+stored in those checkpoints or returned by the Web projection.

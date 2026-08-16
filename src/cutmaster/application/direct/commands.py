@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cutmaster.contracts.workflow import AudioMode
-from cutmaster.workflow.ports import ProgressReporter
+from cutmaster.workflow.contracts.checkpoints import PlannersCheckpointStore
+from cutmaster.workflow.ports import CancellationToken, ProgressReporter
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -16,6 +17,11 @@ class AnalyseVideoCommand:
     video_title: str = ""
     subtitle_path: Path | None = None
     material_name: str = ""
+    cancellation_token: CancellationToken | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -23,6 +29,11 @@ class AnalyseMusicCommand:
     audio_path: Path
     output_dir: Path | None = None
     material_name: str = ""
+    cancellation_token: CancellationToken | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -41,6 +52,16 @@ class PlanCommand:
     max_clip_duration_sec: float | None = None
     overwrite: bool = False
     progress_reporter: ProgressReporter | None = None
+    cancellation_token: CancellationToken | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    checkpoint_store: PlannersCheckpointStore | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, kw_only=True)

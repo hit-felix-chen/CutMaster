@@ -15,7 +15,7 @@ All three adapters obtain grouped use-case services from one
 contains no business workflow implementation itself, preventing the shared
 facade from becoming a monolithic application service. The `settings` group
 owns effective model/execution settings, atomic non-secret overlay writes, and
-storage reporting. Data Root Migration and its Settings flow are Proposed;
+storage reporting. Data Root Migration and its Settings flow are implemented;
 browser-only Locale and Colour Mode preferences remain outside Application
 state.
 
@@ -33,12 +33,11 @@ command remains a stable one-command complete-video interface for evaluation;
 it invokes the same direct Application use case without requiring Web or
 managed application state. The implemented CLI exposes the five synchronous
 stage/workflow commands plus `serve`. Web exposes Project, Material, Activity,
-Settings, managed ASTER planning, Frozen Edit Review, and atomic Guided Revision
-use cases; Start editing dispatches a real Planners subprocess and persists the
-Candidate Bundle used by subsequent Review commands. Material Analysis, automatic
-Renderer Preview/Variant creation, SSE, and the general supervisor remain
-proposed. All adapters
-open one Application Data
+Settings/Setup, the complete managed Material Analysis and ASTER Run lifecycles,
+Frozen Edit Review, atomic Guided Revision, Renderer Preview/Variant/Outputs,
+and guarded Data Root Migration. The shared local supervisor dispatches real
+Analyser, Planners, and Renderer subprocesses, and durable SSE projects their
+state to the client. All adapters open one Application Data
 Root and one Material Catalog. Missing CLI output paths allocate Direct Workflow
 Bundles under that root, explicit paths remain external, and only managed use
 cases can allocate entity-owned artifacts.

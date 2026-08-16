@@ -1,13 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Clapperboard, FolderPlus, Search, X } from 'lucide-react'
+import {
+  ArrowRight,
+  Clapperboard,
+  FolderPlus,
+  LoaderCircle,
+  MoreHorizontal,
+  Pencil,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { appRoutes } from '@/app/routes'
 import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
+import { OperationProblem } from '@/components/ui/OperationProblem'
 import { StatusBadge } from '@/components/ui/StatusBadge'
-import { api, collectionItems } from '@/features/shared/api'
+import { api, collectionItems, type ProjectSummary } from '@/features/shared/api'
 
 export function ProjectsLanding() {
   const { t, i18n } = useTranslation('common')
@@ -15,6 +26,9 @@ export function ProjectsLanding() {
   const search = searchParams.get('search') ?? ''
   const sort = searchParams.get('sort') ?? 'updated_desc'
   const [createOpen, setCreateOpen] = useState(false)
+  const [menuProjectId, setMenuProjectId] = useState<string | null>(null)
+  const [renameProject, setRenameProject] = useState<ProjectSummary | null>(null)
+  const [deleteProject, setDeleteProject] = useState<ProjectSummary | null>(null)
   const projects = useQuery({
     queryKey: ['projects', search, sort],
     queryFn: () => api.projects.list(),
@@ -92,44 +106,268 @@ export function ProjectsLanding() {
       ) : null}
       {items.length ? (
         <section className="project-grid">
-          {items.map((project) => (
-            <Link
-              className="project-card"
-              key={project.project_id}
-              to={appRoutes.projectOverview(project.project_id)}
-            >
-              <div className="project-card__preview">
-                {project.preview_url ? (
-                  <img src={project.preview_url} alt="" />
-                ) : (
-                  <Clapperboard size={38} strokeWidth={1.1} aria-hidden="true" />
-                )}
-                <span className="project-card__accent" aria-hidden="true" />
-              </div>
-              <div className="project-card__content">
-                <div className="project-card__heading">
-                  <h2>{project.name}</h2>
-                  <ArrowRight size={17} aria-hidden="true" />
-                </div>
-                <p>{project.creative_brief?.editing_intent ?? t('projects.noBrief')}</p>
-                <footer>
-                  {project.latest_run_state ? (
-                    <StatusBadge status={project.latest_run_state} />
-                  ) : (
-                    <span>{t('projects.noRuns')}</span>
-                  )}
-                  <time dateTime={project.updated_at}>
-                    {new Intl.DateTimeFormat(i18n.language, {
-                      dateStyle: 'medium',
-                    }).format(new Date(project.updated_at))}
-                  </time>
-                </footer>
-              </div>
-            </Link>
-          ))}
+          {items.map((project) => {
+            const videos = project.selected_materials?.video ?? []
+            const music = project.selected_materials?.music ?? []
+            const menuOpen = menuProjectId === project.project_id
+            return (
+              <article className="project-card" key={project.project_id}>
+                <Link
+                  className="project-card__link"
+                  to={appRoutes.projectOverview(project.project_id)}
+                >
+                  <div className="project-card__preview">
+                    <Clapperboard
+                      className="project-card__preview-fallback"
+                      size={38}
+                      strokeWidth={1.1}
+                      aria-hidden="true"
+                    />
+                    {project.preview_url ? (
+                      <img
+                        src={project.preview_url}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        onError={(event) => {
+                          event.currentTarget.hidden = true
+                        }}
+                      />
+                    ) : null}
+                    <span className="project-card__accent" aria-hidden="true" />
+                  </div>
+                  <div className="project-card__content">
+                    <div className="project-card__heading">
+                      <h2>{project.name}</h2>
+                      <ArrowRight size={17} aria-hidden="true" />
+                    </div>
+                    <p>
+                      {project.creative_brief?.editing_intent ?? t('projects.noBrief')}
+                    </p>
+                    <div className="project-card__materials">
+                      <span>
+                        {t('projects.selectedVideo')}:&nbsp;
+                        {videos.length
+                          ? videos.map((item) => item.name).join(', ')
+                          : t('projects.noVideo')}
+                      </span>
+                      <span>
+                        {t('projects.selectedMusic')}:&nbsp;
+                        {music.length
+                          ? music.map((item) => item.name).join(', ')
+                          : t('projects.noMusic')}
+                      </span>
+                    </div>
+                    <footer>
+                      {project.latest_run_state ? (
+                        <StatusBadge status={project.latest_run_state} />
+                      ) : (
+                        <span>{t('projects.noRuns')}</span>
+                      )}
+                      <time dateTime={project.updated_at}>
+                        {new Intl.DateTimeFormat(i18n.language, {
+                          dateStyle: 'medium',
+                        }).format(new Date(project.updated_at))}
+                      </time>
+                    </footer>
+                  </div>
+                </Link>
+                <button
+                  className="icon-button project-card__menu-button"
+                  type="button"
+                  aria-label={t('projects.projectActions', { name: project.name })}
+                  aria-expanded={menuOpen}
+                  onClick={() =>
+                    setMenuProjectId((current) =>
+                      current === project.project_id ? null : project.project_id,
+                    )
+                  }
+                >
+                  <MoreHorizontal size={18} aria-hidden="true" />
+                </button>
+                {menuOpen ? (
+                  <div className="project-card__menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuProjectId(null)
+                        setRenameProject(project)
+                      }}
+                    >
+                      <Pencil size={15} aria-hidden="true" />
+                      {t('projects.rename')}
+                    </button>
+                    <button
+                      className="project-card__menu-danger"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuProjectId(null)
+                        setDeleteProject(project)
+                      }}
+                    >
+                      <Trash2 size={15} aria-hidden="true" />
+                      {t('projects.delete')}
+                    </button>
+                  </div>
+                ) : null}
+              </article>
+            )
+          })}
         </section>
       ) : null}
       {createOpen ? <CreateProjectDialog onClose={() => setCreateOpen(false)} /> : null}
+      {renameProject ? (
+        <RenameProjectDialog
+          project={renameProject}
+          onClose={() => setRenameProject(null)}
+        />
+      ) : null}
+      {deleteProject ? (
+        <DeleteProjectDialog
+          project={deleteProject}
+          onClose={() => setDeleteProject(null)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function RenameProjectDialog({
+  project,
+  onClose,
+}: {
+  project: ProjectSummary
+  onClose: () => void
+}) {
+  const { t } = useTranslation('common')
+  const queryClient = useQueryClient()
+  const [name, setName] = useState(project.name)
+  const rename = useMutation({
+    mutationFn: () => api.projects.rename(project.project_id, name.trim()),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['project-workspace', project.project_id],
+        }),
+      ])
+      onClose()
+    },
+  })
+  return (
+    <div className="dialog-layer" role="presentation">
+      <form
+        className="dialog"
+        role="dialog"
+        aria-labelledby="rename-project-title"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (name.trim() && name.trim() !== project.name) rename.mutate()
+        }}
+      >
+        <header>
+          <h2 id="rename-project-title">{t('projects.renameTitle')}</h2>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label={t('common.close')}
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+        <label className="field">
+          <span>{t('projects.projectName')}</span>
+          <input
+            required
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        {rename.isError ? <OperationProblem error={rename.error} /> : null}
+        <footer>
+          <button className="button button--secondary" type="button" onClick={onClose}>
+            {t('common.cancel')}
+          </button>
+          <button
+            className="button button--primary"
+            disabled={!name.trim() || name.trim() === project.name || rename.isPending}
+            type="submit"
+          >
+            {rename.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : null}
+            {t('projects.rename')}
+          </button>
+        </footer>
+      </form>
+    </div>
+  )
+}
+
+function DeleteProjectDialog({
+  project,
+  onClose,
+}: {
+  project: ProjectSummary
+  onClose: () => void
+}) {
+  const { t } = useTranslation('common')
+  const queryClient = useQueryClient()
+  const remove = useMutation({
+    mutationFn: () => api.projects.delete(project.project_id),
+    onSuccess: async () => {
+      queryClient.removeQueries({
+        queryKey: ['project-workspace', project.project_id],
+      })
+      queryClient.removeQueries({ queryKey: ['project-runs', project.project_id] })
+      await queryClient.invalidateQueries({ queryKey: ['projects'] })
+      onClose()
+    },
+  })
+  return (
+    <div className="dialog-layer" role="presentation">
+      <div className="dialog" role="alertdialog" aria-labelledby="delete-project-title">
+        <header>
+          <h2 id="delete-project-title">{t('projects.deleteTitle')}</h2>
+          <button
+            className="icon-button"
+            type="button"
+            disabled={remove.isPending}
+            onClick={onClose}
+            aria-label={t('common.close')}
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+        <p>{t('projects.deleteBody', { name: project.name })}</p>
+        {remove.isError ? <OperationProblem error={remove.error} /> : null}
+        <footer>
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={remove.isPending}
+            onClick={onClose}
+          >
+            {t('common.cancel')}
+          </button>
+          <button
+            className="button button--danger"
+            type="button"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate()}
+          >
+            {remove.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : (
+              <Trash2 size={15} aria-hidden="true" />
+            )}
+            {t('projects.confirmDelete')}
+          </button>
+        </footer>
+      </div>
     </div>
   )
 }
@@ -179,7 +417,7 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => setName(event.target.value)}
           />
         </label>
-        {create.isError ? <ErrorState /> : null}
+        {create.isError ? <OperationProblem error={create.error} /> : null}
         <footer>
           <button className="button button--secondary" type="button" onClick={onClose}>
             {t('common.cancel')}

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from cutmaster.domain.ids import MaterialId
 from cutmaster.domain.materials import MaterialCondition, MaterialType
@@ -31,6 +32,7 @@ class MaterialDetailView:
     duration_sec: float
     source: Mapping[str, Any]
     memory_summary: Mapping[str, Any]
+    preview_available: bool
 
     @property
     def reference_count(self) -> int:
@@ -47,6 +49,22 @@ class MaterialMemoryView:
     limit: int
     offset: int
     payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class MaterialPreviewView:
+    """One bounded, path-free card preview projection."""
+
+    material_id: MaterialId
+    material_type: MaterialType
+    media_type: str
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if not self.media_type.startswith("image/"):
+            raise ValueError("Material previews must use an image media type")
+        if not self.content:
+            raise ValueError("Material preview content must not be empty")
 
 
 def frozen_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -68,6 +86,7 @@ def frozen_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
 __all__ = [
     "MaterialDetailView",
     "MaterialMemoryView",
+    "MaterialPreviewView",
     "MaterialView",
     "frozen_payload",
 ]

@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cutmaster.configuration.schema import LLMConfig
 from cutmaster.infrastructure.models.openai_compatible import (
     generate_text,
     request_json_with_retries,
 )
-from cutmaster.configuration.schema import LLMConfig
 from cutmaster.infrastructure.observability.logging import log_event
+from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.workflow.prompting.analyser import DialogueReconstructionDetails
 from cutmaster.workflow.shared.timecode import format_time, parse_time
@@ -31,7 +32,11 @@ SRT_BLOCK_RE = re.compile(
 SPEAKER_RE = re.compile(r"^(Speaker\s+\d+):\s*(.*)$", re.IGNORECASE | re.DOTALL)
 TERMINAL_RE = re.compile(r"[。！？.!?][\"'”’）)]*$")
 CJK_RE = re.compile(r"[\u3400-\u9fff]")
-def generate_boundary_decisions(prompt: str, config: LLMConfig, system_prompt: str) -> str:
+
+
+def generate_boundary_decisions(
+    prompt: str, config: LLMConfig, system_prompt: str
+) -> str:
     return generate_text(prompt, config, system_prompt).content
 
 
@@ -55,12 +60,16 @@ class Cue:
 def parse_srt(content: str) -> list[Cue]:
     cues: list[Cue] = []
     for cue_id, start, end, raw_text in SRT_BLOCK_RE.findall(content.strip()):
-        flattened = " ".join(part.strip() for part in raw_text.splitlines() if part.strip())
+        flattened = " ".join(
+            part.strip() for part in raw_text.splitlines() if part.strip()
+        )
         speaker_match = SPEAKER_RE.match(flattened)
         speaker = speaker_match.group(1) if speaker_match else None
         text = speaker_match.group(2).strip() if speaker_match else flattened.strip()
         if text:
-            cues.append(Cue(int(cue_id), parse_time(start), parse_time(end), speaker, text))
+            cues.append(
+                Cue(int(cue_id), parse_time(start), parse_time(end), speaker, text)
+            )
     if not cues:
         raise ValueError("SRT contains no usable dialogue cues")
     return cues
@@ -87,7 +96,9 @@ def candidate_passages(cues: list[Cue], max_gap_sec: float = 1.5) -> list[list[C
     return passages
 
 
-def _chunk_passages(passages: list[list[Cue]], max_chars: int = 18_000) -> list[list[list[Cue]]]:
+def _chunk_passages(
+    passages: list[list[Cue]], max_chars: int = 18_000
+) -> list[list[list[Cue]]]:
     chunks: list[list[list[Cue]]] = []
     current: list[list[Cue]] = []
     current_chars = 0
@@ -118,7 +129,13 @@ def _join_text(cues: list[Cue]) -> str:
     result = cues[0].text.strip()
     for cue in cues[1:]:
         text = cue.text.strip()
-        separator = " " if not CJK_RE.search(result + text) and result[-1:].isalnum() and text[:1].isalnum() else ""
+        separator = (
+            " "
+            if not CJK_RE.search(result + text)
+            and result[-1:].isalnum()
+            and text[:1].isalnum()
+            else ""
+        )
         result += separator + text
     return result
 
@@ -199,7 +216,9 @@ def postprocess_dialogues(
     config: LLMConfig,
     generator: Callable[[str, LLMConfig, str], str] = generate_boundary_decisions,
     context: WorkflowContext | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[Path, Path]:
+    raise_if_cancelled(cancellation_token)
     cues = parse_srt(source_srt.read_text(encoding="utf-8-sig"))
     passages = candidate_passages(cues)
     chunks = _chunk_passages(passages)
@@ -217,7 +236,10 @@ def postprocess_dialogues(
     decisions: list[list[list[int]] | None] = [None] * len(chunks)
     worker_count = max(1, min(config.max_concurrency, len(chunks)))
 
-    def process_chunk(index: int, chunk: list[list[Cue]]) -> tuple[int, list[list[int]]]:
+    def process_chunk(
+        index: int, chunk: list[list[Cue]]
+    ) -> tuple[int, list[list[int]]]:
+        raise_if_cancelled(cancellation_token)
         batch_started = time.monotonic()
         log_event(
             "DEBUG",
@@ -249,6 +271,7 @@ def postprocess_dialogues(
             package.response_contract.validate_structure(parsed)
             return _validate_decisions(parsed["merge_candidate_ids"], chunk)
 
+        raise_if_cancelled(cancellation_token)
         if context is None:
             groups = request_json_with_retries(
                 lambda: generator(
@@ -269,6 +292,7 @@ def postprocess_dialogues(
                     chunk,
                 ),
             )
+        raise_if_cancelled(cancellation_token)
         log_event(
             "DEBUG",
             "dialogue",
@@ -280,7 +304,9 @@ def postprocess_dialogues(
         )
         return index, groups
 
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dialogue-llm") as executor:
+    with ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix="dialogue-llm"
+    ) as executor:
         futures = {
             executor.submit(process_chunk, index, chunk): index
             for index, chunk in enumerate(chunks)
@@ -289,12 +315,18 @@ def postprocess_dialogues(
             index, groups = future.result()
             decisions[index] = groups
 
-    merge_groups = [group for batch in decisions if batch is not None for group in batch]
+    raise_if_cancelled(cancellation_token)
+    merge_groups = [
+        group for batch in decisions if batch is not None for group in batch
+    ]
     document = build_dialogue_document(cues, merge_groups, source_srt, config.model)
     dialogue_path = output_dir / "dialogues.json"
     merged_srt_path = output_dir / "dialogue_merged.srt"
-    dialogue_path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    dialogue_path.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     write_merged_srt(merged_srt_path, document)
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "dialogue",

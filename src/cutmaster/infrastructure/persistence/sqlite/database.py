@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from cutmaster.domain.attempts import AttemptStatus, TERMINAL_ATTEMPT_STATUSES
+from cutmaster.domain.attempts import TERMINAL_ATTEMPT_STATUSES, AttemptStatus
+from cutmaster.domain.artifacts import validate_portable_relative_file_path
 from cutmaster.domain.edits import FrozenEditOrigin
 from cutmaster.domain.ids import (
     AttemptId,
@@ -33,13 +34,22 @@ from cutmaster.infrastructure.persistence.sqlite.migrations import (
     MIGRATIONS,
 )
 
-
 JsonObject = dict[str, Any]
 _ACTIVE_ATTEMPT_STATUSES = (
     AttemptStatus.QUEUED.value,
     AttemptStatus.RUNNING.value,
     AttemptStatus.RETRYING.value,
     AttemptStatus.STOPPING.value,
+)
+_ASTER_CHECKPOINT_STAGES = frozenset(
+    {
+        "replan_pending",
+        "arrangement_architect",
+        "story_editor",
+        "timeline_scout",
+        "edit_composer",
+        "revision_editor",
+    }
 )
 
 
@@ -149,6 +159,22 @@ def _normalise_name(value: str, label: str) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
         raise ValueError(f"{label} must not contain control characters")
     return normalized
+
+
+def _checkpoint_digest(value: str, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _checkpoint_stage(value: str) -> str:
+    if not isinstance(value, str) or value not in _ASTER_CHECKPOINT_STAGES:
+        raise ValueError(f"Unsupported ASTER checkpoint stage: {value!r}")
+    return value
 
 
 def _expect_row(
@@ -285,6 +311,41 @@ class SQLiteApplicationStore:
                 (command_id, command_kind, request_digest, result_json, now),
             )
             return IdempotentResult(result, replayed=False)
+
+    def replay_idempotent(
+        self,
+        command_id: str,
+        command_kind: str,
+        request: object,
+    ) -> IdempotentResult | None:
+        """Return a matching durable receipt without executing a command.
+
+        Application services use this read-only preflight before filesystem
+        validation.  A network replay must return its original result even if
+        the referenced files or mutable Project setup changed afterwards.
+        """
+
+        command_id = _validate_command_id(command_id)
+        request_digest = _request_digest(request)
+        with self._read() as connection:
+            receipt = connection.execute(
+                """
+                SELECT command_kind, request_digest, result_json
+                FROM idempotency_receipts WHERE command_id = ?
+                """,
+                (command_id,),
+            ).fetchone()
+        if receipt is None:
+            return None
+        if (
+            receipt["command_kind"] != command_kind
+            or receipt["request_digest"] != request_digest
+        ):
+            raise IdempotencyConflict(command_id)
+        result = _parse_json(receipt["result_json"])
+        if not isinstance(result, dict):
+            raise SQLiteStoreError("Invalid idempotency receipt result")
+        return IdempotentResult(result, replayed=True)
 
     @staticmethod
     def _event(
@@ -591,6 +652,23 @@ class SQLiteApplicationStore:
             blockers = self._active_attempts_for_project(connection, str(project_id))
             if blockers:
                 raise ActiveAttemptBlocker("project", str(project_id), blockers)
+            job_rows = connection.execute(
+                """
+                SELECT DISTINCT jobs.job_id
+                FROM jobs
+                JOIN attempts ON attempts.attempt_id = jobs.attempt_id
+                LEFT JOIN runs direct_runs ON direct_runs.run_id = attempts.run_id
+                LEFT JOIN render_variants
+                  ON render_variants.render_variant_id = attempts.render_variant_id
+                LEFT JOIN frozen_edits
+                  ON frozen_edits.edit_id = render_variants.edit_id
+                LEFT JOIN runs render_runs
+                  ON render_runs.run_id = frozen_edits.run_id
+                WHERE direct_runs.project_id = ? OR render_runs.project_id = ?
+                ORDER BY jobs.job_id
+                """,
+                (str(project_id), str(project_id)),
+            ).fetchall()
             connection.execute(
                 "DELETE FROM projects WHERE project_id = ?",
                 (str(project_id),),
@@ -603,7 +681,12 @@ class SQLiteApplicationStore:
                 object_id=str(project_id),
                 command_id=command_id,
             )
-            return {"project_id": str(project_id), "deleted": True}
+            return {
+                "project_id": str(project_id),
+                "artifact_owner_relative_path": f"projects/{project_id}",
+                "job_ids": [row["job_id"] for row in job_rows],
+                "deleted": True,
+            }
 
         return self._idempotent(command_id, "projects.delete", request, action)
 
@@ -715,6 +798,10 @@ class SQLiteApplicationStore:
         command_id: str,
         project_id: ProjectId,
         configuration_snapshot: Mapping[str, Any],
+        *,
+        validated_video_material_id: MaterialId,
+        validated_music_material_id: MaterialId,
+        music_duration_sec: float,
     ) -> IdempotentResult:
         snapshot_json = _canonical_json(dict(configuration_snapshot))
         request = {
@@ -736,6 +823,19 @@ class SQLiteApplicationStore:
                     "project_materials_incomplete",
                     "The first release requires exactly one video and one music Material",
                 )
+            if videos != [str(validated_video_material_id)] or music != [
+                str(validated_music_material_id)
+            ]:
+                raise ManagedStateConflict(
+                    "project_setup_changed",
+                    "Project Materials changed while the ASTER Run was starting",
+                )
+            brief = project["creative_brief"]
+            if float(brief["target_duration_sec"]) > music_duration_sec + 1e-6:
+                raise ManagedStateConflict(
+                    "target_duration_exceeds_music_duration",
+                    "Target Duration must not exceed the selected Music Material duration",
+                )
             sequence = int(
                 connection.execute(
                     "SELECT coalesce(max(sequence), 0) + 1 FROM runs WHERE project_id = ?",
@@ -743,7 +843,6 @@ class SQLiteApplicationStore:
                 ).fetchone()[0]
             )
             run_id = str(RunId.new())
-            brief = project["creative_brief"]
             connection.execute(
                 """
                 INSERT INTO runs (
@@ -809,6 +908,130 @@ class SQLiteApplicationStore:
 
         return self._idempotent(command_id, "runs.create", request, action)
 
+    def create_run_again(
+        self,
+        command_id: str,
+        source_run_id: RunId,
+        *,
+        validated_video_material_id: MaterialId,
+        validated_music_material_id: MaterialId,
+        music_duration_sec: float,
+    ) -> IdempotentResult:
+        """Create a new Run by copying one completed immutable Run snapshot."""
+
+        request = {"source_run_id": str(source_run_id)}
+
+        def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            source = self._require_run_row(connection, str(source_run_id))
+            if source["status"] != RunStatus.COMPLETE.value:
+                raise ManagedStateConflict(
+                    "run_again_not_allowed",
+                    f"Run {source_run_id} must be complete before it can run again",
+                )
+            source_materials = connection.execute(
+                """
+                SELECT material_type, position, material_id FROM run_materials
+                WHERE run_id = ? ORDER BY material_type, position
+                """,
+                (str(source_run_id),),
+            ).fetchall()
+            videos = [
+                row["material_id"]
+                for row in source_materials
+                if row["material_type"] == MaterialType.VIDEO.value
+            ]
+            music = [
+                row["material_id"]
+                for row in source_materials
+                if row["material_type"] == MaterialType.MUSIC.value
+            ]
+            if videos != [str(validated_video_material_id)] or music != [
+                str(validated_music_material_id)
+            ]:
+                raise ManagedStateConflict(
+                    "run_snapshot_changed",
+                    "The source Run Material snapshot changed unexpectedly",
+                )
+            if float(source["target_duration_sec"]) > music_duration_sec + 1e-6:
+                raise ManagedStateConflict(
+                    "target_duration_exceeds_music_duration",
+                    "Target Duration must not exceed the snapshotted Music Material duration",
+                )
+            project_id = str(source["project_id"])
+            sequence = int(
+                connection.execute(
+                    "SELECT coalesce(max(sequence), 0) + 1 FROM runs WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()[0]
+            )
+            run_id = str(RunId.new())
+            connection.execute(
+                """
+                INSERT INTO runs (
+                    run_id, project_id, sequence, status, editing_intent,
+                    target_duration_sec, configuration_json, failure_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    run_id,
+                    project_id,
+                    sequence,
+                    RunStatus.QUEUED.value,
+                    source["editing_intent"],
+                    source["target_duration_sec"],
+                    source["configuration_json"],
+                    now,
+                    now,
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO run_materials (
+                    run_id, material_type, position, material_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        row["material_type"],
+                        row["position"],
+                        row["material_id"],
+                    )
+                    for row in source_materials
+                ],
+            )
+            attempt, job = self._insert_attempt(
+                connection,
+                operation_type="aster_planning",
+                owner_type="run",
+                owner_id=run_id,
+                command_id=command_id,
+                now=now,
+            )
+            connection.execute(
+                "UPDATE projects SET updated_at = ? WHERE project_id = ?",
+                (now, project_id),
+            )
+            self._event(
+                connection,
+                event_type="run.queued",
+                occurred_at=now,
+                object_type="run",
+                object_id=run_id,
+                command_id=command_id,
+                attempt_id=attempt["attempt_id"],
+                job_id=job["job_id"],
+                payload={"source_run_id": str(source_run_id)},
+            )
+            return {
+                "run": self._run_record(connection, run_id),
+                "attempt": attempt,
+                "job": job,
+            }
+
+        return self._idempotent(command_id, "runs.run_again", request, action)
+
     def get_run(self, run_id: RunId) -> JsonObject:
         with self._read() as connection:
             return self._run_record(connection, str(run_id))
@@ -831,11 +1054,15 @@ class SQLiteApplicationStore:
         run_id: RunId,
         attempt_id: AttemptId,
         plan_relative_path: str,
+        model_usage_summary: Mapping[str, Any] | None = None,
     ) -> IdempotentResult:
         request = {
             "run_id": str(run_id),
             "attempt_id": str(attempt_id),
             "plan_relative_path": plan_relative_path,
+            "model_usage_summary": (
+                None if model_usage_summary is None else dict(model_usage_summary)
+            ),
         }
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
@@ -858,6 +1085,12 @@ class SQLiteApplicationStore:
                 raise ManagedStateConflict(
                     "attempt_not_running",
                     f"Attempt {attempt_id} cannot complete from {attempt_row['status']}",
+                )
+            if model_usage_summary is not None:
+                self._write_attempt_model_usage(
+                    connection,
+                    str(attempt_id),
+                    model_usage_summary,
                 )
             edit_id = str(FrozenEditId.new())
             connection.execute(
@@ -1000,19 +1233,50 @@ class SQLiteApplicationStore:
         run_id: RunId,
         *,
         resume: bool,
+        resume_checkpoint_id: str | None = None,
     ) -> IdempotentResult:
         request = {"run_id": str(run_id), "resume": resume}
         command_kind = "runs.resume" if resume else "runs.retry"
+        if resume:
+            if resume_checkpoint_id is None:
+                raise ValueError("resume_checkpoint_id is required for Resume")
+            _validate_command_id(resume_checkpoint_id)
+        elif resume_checkpoint_id is not None:
+            raise ValueError("Retry cannot pin a Resume checkpoint")
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
             run = self._require_run_row(connection, str(run_id))
-            expected = (
-                RunStatus.INTERRUPTED.value if resume else RunStatus.FAILED.value
-            )
+            expected = RunStatus.INTERRUPTED.value if resume else RunStatus.FAILED.value
             if run["status"] != expected:
                 raise ManagedStateConflict(
                     "run_recovery_not_allowed",
                     f"Run {run_id} must be {expected} for this recovery action",
+                )
+            checkpoint_row = connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            checkpoint_pin: JsonObject | None = None
+            discarded_checkpoint_relative_path: str | None = None
+            if resume:
+                if checkpoint_row is None:
+                    raise ManagedStateConflict(
+                        "run_checkpoint_unavailable",
+                        "Resume requires a completed ASTER stage checkpoint; use Retry",
+                    )
+                if checkpoint_row["checkpoint_id"] != resume_checkpoint_id:
+                    raise ManagedStateConflict(
+                        "run_checkpoint_changed",
+                        "The ASTER checkpoint changed before Resume was queued",
+                    )
+                checkpoint_pin = self._run_checkpoint_record(checkpoint_row)
+            elif checkpoint_row is not None:
+                discarded_checkpoint_relative_path = str(
+                    checkpoint_row["relative_path"]
+                )
+                connection.execute(
+                    "DELETE FROM run_checkpoints WHERE run_id = ?",
+                    (str(run_id),),
                 )
             attempt, job = self._insert_attempt(
                 connection,
@@ -1022,6 +1286,15 @@ class SQLiteApplicationStore:
                 command_id=command_id,
                 now=now,
             )
+            if checkpoint_pin is not None:
+                connection.execute(
+                    """
+                    UPDATE attempts SET resume_checkpoint_json = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (_canonical_json(checkpoint_pin), attempt["attempt_id"]),
+                )
+                attempt = self._attempt_record(connection, attempt["attempt_id"])
             connection.execute(
                 """
                 UPDATE runs SET status = ?, failure_message = NULL, updated_at = ?
@@ -1043,9 +1316,149 @@ class SQLiteApplicationStore:
                 "run": self._run_record(connection, str(run_id)),
                 "attempt": attempt,
                 "job": job,
+                "discarded_checkpoint_relative_path": (
+                    discarded_checkpoint_relative_path
+                ),
             }
 
         return self._idempotent(command_id, command_kind, request, action)
+
+    def get_run_checkpoint(self, run_id: RunId) -> JsonObject | None:
+        with self._read() as connection:
+            self._require_run_row(connection, str(run_id))
+            row = connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            return None if row is None else self._run_checkpoint_record(row)
+
+    def get_attempt_resume_checkpoint(
+        self,
+        attempt_id: AttemptId,
+    ) -> JsonObject | None:
+        with self._read() as connection:
+            row = self._require_attempt_row(connection, str(attempt_id))
+            raw = row["resume_checkpoint_json"]
+            if raw is None:
+                return None
+            value = _parse_json(raw)
+            if not isinstance(value, dict):
+                raise SQLiteStoreError("Invalid pinned ASTER checkpoint receipt")
+            self._validate_checkpoint_record(value)
+            return value
+
+    def publish_run_checkpoint(
+        self,
+        *,
+        run_id: RunId,
+        source_attempt_id: AttemptId,
+        checkpoint_id: str,
+        completed_stage: str,
+        relative_path: str,
+        content_sha256: str,
+        identity_signature: str,
+        schema_version: str,
+    ) -> JsonObject:
+        _validate_command_id(checkpoint_id)
+        _checkpoint_stage(completed_stage)
+        normalized_path = validate_portable_relative_file_path(relative_path)
+        _checkpoint_digest(content_sha256, "content_sha256")
+        _checkpoint_digest(identity_signature, "identity_signature")
+        if schema_version != "1.0":
+            raise ValueError(f"Unsupported ASTER checkpoint schema: {schema_version!r}")
+        with self._transaction() as connection:
+            self._require_run_row(connection, str(run_id))
+            attempt = self._require_attempt_owner(
+                connection,
+                str(source_attempt_id),
+                "run",
+                str(run_id),
+            )
+            if attempt["status"] not in {
+                AttemptStatus.RUNNING.value,
+                AttemptStatus.RETRYING.value,
+                AttemptStatus.STOPPING.value,
+            }:
+                raise ManagedStateConflict(
+                    "run_checkpoint_attempt_inactive",
+                    "ASTER checkpoints can only be published by the active Attempt",
+                )
+            existing = connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            previous = (
+                None if existing is None else self._run_checkpoint_record(existing)
+            )
+            now = self._now()
+            created_at = now if existing is None else str(existing["created_at"])
+            connection.execute(
+                """
+                INSERT INTO run_checkpoints (
+                    run_id, checkpoint_id, source_attempt_id, completed_stage,
+                    relative_path, content_sha256, identity_signature,
+                    schema_version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    checkpoint_id = excluded.checkpoint_id,
+                    source_attempt_id = excluded.source_attempt_id,
+                    completed_stage = excluded.completed_stage,
+                    relative_path = excluded.relative_path,
+                    content_sha256 = excluded.content_sha256,
+                    identity_signature = excluded.identity_signature,
+                    schema_version = excluded.schema_version,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(run_id),
+                    checkpoint_id,
+                    str(source_attempt_id),
+                    completed_stage,
+                    normalized_path,
+                    content_sha256,
+                    identity_signature,
+                    schema_version,
+                    created_at,
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            assert current is not None
+            return {
+                "checkpoint": self._run_checkpoint_record(current),
+                "replaced_checkpoint": previous,
+            }
+
+    def clear_run_checkpoint(
+        self,
+        run_id: RunId,
+        *,
+        expected_checkpoint_id: str | None = None,
+    ) -> JsonObject | None:
+        if expected_checkpoint_id is not None:
+            _validate_command_id(expected_checkpoint_id)
+        with self._transaction() as connection:
+            self._require_run_row(connection, str(run_id))
+            row = connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                expected_checkpoint_id is not None
+                and row["checkpoint_id"] != expected_checkpoint_id
+            ):
+                return None
+            value = self._run_checkpoint_record(row)
+            connection.execute(
+                "DELETE FROM run_checkpoints WHERE run_id = ?",
+                (str(run_id),),
+            )
+            return value
 
     def delete_run(
         self,
@@ -1059,6 +1472,31 @@ class SQLiteApplicationStore:
             blockers = self._active_attempts_for_run(connection, str(run_id))
             if blockers:
                 raise ActiveAttemptBlocker("run", str(run_id), blockers)
+            render_rows = connection.execute(
+                """
+                SELECT render_variants.render_variant_id
+                FROM render_variants
+                JOIN frozen_edits
+                  ON frozen_edits.edit_id = render_variants.edit_id
+                WHERE frozen_edits.run_id = ?
+                ORDER BY render_variants.render_variant_id
+                """,
+                (str(run_id),),
+            ).fetchall()
+            job_rows = connection.execute(
+                """
+                SELECT DISTINCT jobs.job_id
+                FROM jobs
+                JOIN attempts ON attempts.attempt_id = jobs.attempt_id
+                LEFT JOIN render_variants
+                  ON render_variants.render_variant_id = attempts.render_variant_id
+                LEFT JOIN frozen_edits
+                  ON frozen_edits.edit_id = render_variants.edit_id
+                WHERE attempts.run_id = ? OR frozen_edits.run_id = ?
+                ORDER BY jobs.job_id
+                """,
+                (str(run_id), str(run_id)),
+            ).fetchall()
             connection.execute("DELETE FROM runs WHERE run_id = ?", (str(run_id),))
             connection.execute(
                 "UPDATE projects SET updated_at = ? WHERE project_id = ?",
@@ -1072,7 +1510,13 @@ class SQLiteApplicationStore:
                 object_id=str(run_id),
                 command_id=command_id,
             )
-            return {"run_id": str(run_id), "deleted": True}
+            return {
+                "run_id": str(run_id),
+                "project_id": str(run["project_id"]),
+                "render_variant_ids": [row["render_variant_id"] for row in render_rows],
+                "job_ids": [row["job_id"] for row in job_rows],
+                "deleted": True,
+            }
 
         return self._idempotent(command_id, "runs.delete", request, action)
 
@@ -1179,9 +1623,12 @@ class SQLiteApplicationStore:
         specification_digest = hashlib.sha256(
             specification_json.encode("utf-8")
         ).hexdigest()
+        audio_mode = specification_value.get("audio_mode")
+        if audio_mode not in {"dialogue", "bgm_only"}:
+            raise ValueError("Render Specification has no supported audio_mode")
         request = {
             "edit_id": str(edit_id),
-            "specification": specification_value,
+            "audio_mode": audio_mode,
         }
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
@@ -1313,8 +1760,6 @@ class SQLiteApplicationStore:
             "render_variant_id": str(render_id),
             "attempt_id": str(attempt_id),
             "master_relative_path": master_relative_path,
-            "master_size_bytes": master_size_bytes,
-            "master_sha256": master_sha256,
             "frame_count": frame_count,
             "duration_sec": duration,
         }
@@ -1335,6 +1780,7 @@ class SQLiteApplicationStore:
             if attempt["status"] not in {
                 AttemptStatus.RUNNING.value,
                 AttemptStatus.RETRYING.value,
+                AttemptStatus.STOPPING.value,
             }:
                 raise ManagedStateConflict(
                     "attempt_not_running",
@@ -1476,6 +1922,11 @@ class SQLiteApplicationStore:
                     "render_unavailable_not_allowed",
                     "Only a Ready Render Variant can become Unavailable",
                 )
+            if variant["status"] == RenderVariantStatus.UNAVAILABLE.value:
+                # Concurrent lightweight reads can observe the same stale Ready
+                # row. The first request owns the transition; followers return
+                # the durable state without rewriting timestamps or events.
+                return self._render_record(connection, str(render_id))
             connection.execute(
                 """
                 UPDATE render_variants
@@ -1507,6 +1958,89 @@ class SQLiteApplicationStore:
             action,
         )
 
+    def record_render_verification(
+        self,
+        command_id: str,
+        render_id: RenderVariantId,
+        *,
+        verified: bool,
+        size_bytes: int,
+        cached: bool,
+        reason: str | None = None,
+    ) -> IdempotentResult:
+        """Persist one idempotent integrity decision without exposing its digest."""
+
+        if not isinstance(verified, bool) or not isinstance(cached, bool):
+            raise TypeError("verified and cached must be booleans")
+        if (
+            not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+        ):
+            raise ValueError("size_bytes must be a non-negative integer")
+        normalized_reason = None
+        if not verified:
+            normalized_reason = _normalise_name(
+                reason or "Managed master failed integrity validation",
+                "Integrity failure reason",
+            )
+        request = {"render_variant_id": str(render_id)}
+
+        def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            variant = self._require_render_row(connection, str(render_id))
+            if verified:
+                if variant["status"] != RenderVariantStatus.READY.value:
+                    raise ManagedStateConflict(
+                        "render_media_unavailable",
+                        "Only a Ready Render Variant can be verified",
+                    )
+            else:
+                if variant["status"] not in {
+                    RenderVariantStatus.READY.value,
+                    RenderVariantStatus.UNAVAILABLE.value,
+                }:
+                    raise ManagedStateConflict(
+                        "render_media_unavailable",
+                        "Render Variant has no Ready managed master",
+                    )
+                if variant["status"] == RenderVariantStatus.READY.value:
+                    connection.execute(
+                        """
+                        UPDATE render_variants
+                        SET status = ?, failure_message = ?, updated_at = ?
+                        WHERE render_variant_id = ?
+                        """,
+                        (
+                            RenderVariantStatus.UNAVAILABLE.value,
+                            normalized_reason,
+                            now,
+                            str(render_id),
+                        ),
+                    )
+                    self._event(
+                        connection,
+                        event_type="render_variant.unavailable",
+                        occurred_at=now,
+                        object_type="render_variant",
+                        object_id=str(render_id),
+                        command_id=command_id,
+                        payload={"reason": normalized_reason},
+                    )
+            return {
+                "render_variant": self._render_record(connection, str(render_id)),
+                "verified": verified,
+                "size_bytes": size_bytes,
+                "cached": cached,
+                "reason": normalized_reason,
+            }
+
+        return self._idempotent(
+            command_id,
+            "renders.verify",
+            request,
+            action,
+        )
+
     def delete_render_variant(
         self,
         command_id: str,
@@ -1523,6 +2057,17 @@ class SQLiteApplicationStore:
                     str(render_id),
                     blockers,
                 )
+            edit = self._require_edit_row(connection, variant["edit_id"])
+            run = self._require_run_row(connection, edit["run_id"])
+            jobs = connection.execute(
+                """
+                SELECT jobs.job_id FROM jobs
+                JOIN attempts USING (attempt_id)
+                WHERE attempts.render_variant_id = ?
+                ORDER BY jobs.job_id
+                """,
+                (str(render_id),),
+            ).fetchall()
             connection.execute(
                 "DELETE FROM render_variants WHERE render_variant_id = ?",
                 (str(render_id),),
@@ -1539,6 +2084,8 @@ class SQLiteApplicationStore:
                 "render_variant_id": str(render_id),
                 "deleted": True,
                 "master_relative_path": variant["master_relative_path"],
+                "project_id": run["project_id"],
+                "job_ids": [row["job_id"] for row in jobs],
             }
 
         return self._idempotent(
@@ -1656,6 +2203,156 @@ class SQLiteApplicationStore:
             action,
         )
 
+    def requeue_material_analysis(
+        self,
+        command_id: str,
+        material_id: MaterialId,
+        *,
+        expected_status: AttemptStatus,
+    ) -> IdempotentResult:
+        """Create a new Material Analysis Attempt from one terminal state.
+
+        The status check and insertion share the idempotent transaction.  A
+        replay of the same command therefore returns the already-created Job
+        even though that Job is now the latest active Attempt.
+        """
+
+        if expected_status not in {AttemptStatus.FAILED, AttemptStatus.INTERRUPTED}:
+            raise ValueError("Material Analysis can only retry or resume")
+        request = {
+            "material_id": str(material_id),
+            "expected_status": expected_status.value,
+        }
+
+        def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            latest = connection.execute(
+                """
+                SELECT attempt_id, status FROM attempts
+                WHERE material_id = ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (str(material_id),),
+            ).fetchone()
+            if latest is None:
+                raise ManagedStateConflict(
+                    "material_analysis_history_missing",
+                    f"Material {material_id} has no Analysis Attempt to "
+                    f"{('retry' if expected_status is AttemptStatus.FAILED else 'resume')}",
+                )
+            current = AttemptStatus(latest["status"])
+            if current is not expected_status:
+                raise ManagedStateConflict(
+                    "material_analysis_state_conflict",
+                    f"Material {material_id} latest Attempt is {current.value}; "
+                    f"expected {expected_status.value}",
+                )
+            attempt, job = self._insert_attempt(
+                connection,
+                operation_type="material_analysis",
+                owner_type="material",
+                owner_id=str(material_id),
+                command_id=command_id,
+                now=now,
+            )
+            action_name = (
+                "retried" if expected_status is AttemptStatus.FAILED else "resumed"
+            )
+            self._event(
+                connection,
+                event_type=f"material_analysis.{action_name}",
+                occurred_at=now,
+                object_type="material",
+                object_id=str(material_id),
+                command_id=command_id,
+                attempt_id=attempt["attempt_id"],
+                job_id=job["job_id"],
+                payload={"previous_attempt_id": latest["attempt_id"]},
+            )
+            return {"attempt": attempt, "job": job}
+
+        return self._idempotent(
+            command_id,
+            f"jobs.{expected_status.value}_material_analysis",
+            request,
+            action,
+        )
+
+    def active_material_attempt_ids(self, material_id: MaterialId) -> tuple[str, ...]:
+        if not isinstance(material_id, MaterialId):
+            raise TypeError("material_id must be a MaterialId")
+        placeholders = ",".join("?" for _ in _ACTIVE_ATTEMPT_STATUSES)
+        with self._read() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT attempt_id FROM attempts
+                WHERE material_id = ? AND status IN ({placeholders})
+                ORDER BY sequence
+                """,
+                (str(material_id), *_ACTIVE_ATTEMPT_STATUSES),
+            ).fetchall()
+        return tuple(str(row["attempt_id"]) for row in rows)
+
+    def purge_material_attempts(self, material_id: MaterialId) -> None:
+        """Remove terminal execution rows after their Material is deleted."""
+
+        if not isinstance(material_id, MaterialId):
+            raise TypeError("material_id must be a MaterialId")
+        with self._transaction() as connection:
+            blockers = connection.execute(
+                f"""
+                SELECT attempt_id FROM attempts
+                WHERE material_id = ? AND status IN (
+                    {",".join("?" for _ in _ACTIVE_ATTEMPT_STATUSES)}
+                ) ORDER BY sequence
+                """,
+                (str(material_id), *_ACTIVE_ATTEMPT_STATUSES),
+            ).fetchall()
+            if blockers:
+                raise ActiveAttemptBlocker(
+                    "material",
+                    str(material_id),
+                    [str(row["attempt_id"]) for row in blockers],
+                )
+            connection.execute(
+                "DELETE FROM attempts WHERE material_id = ?",
+                (str(material_id),),
+            )
+
+    def replay_material_deletion(
+        self,
+        command_id: str,
+        material_id: MaterialId,
+    ) -> bool:
+        request = {"material_id": str(material_id)}
+        return (
+            self.replay_idempotent(
+                command_id,
+                "materials.delete",
+                request,
+            )
+            is not None
+        )
+
+    def record_material_deletion(
+        self,
+        command_id: str,
+        material_id: MaterialId,
+    ) -> IdempotentResult:
+        request = {"material_id": str(material_id)}
+
+        def action(
+            _connection: sqlite3.Connection,
+            _now: str,
+        ) -> JsonObject:
+            return {"material_id": str(material_id), "deleted": True}
+
+        return self._idempotent(
+            command_id,
+            "materials.delete",
+            request,
+            action,
+        )
+
     def claim_next_job(
         self,
         worker_id: str,
@@ -1664,7 +2361,11 @@ class SQLiteApplicationStore:
         job_id: JobId | None = None,
     ) -> JsonObject | None:
         normalized_worker = _normalise_name(worker_id, "worker_id")
-        if not isinstance(process_id, int) or isinstance(process_id, bool) or process_id <= 0:
+        if (
+            not isinstance(process_id, int)
+            or isinstance(process_id, bool)
+            or process_id <= 0
+        ):
             raise ValueError("process_id must be a positive integer")
         if job_id is not None and not isinstance(job_id, JobId):
             raise TypeError("job_id must be a JobId or None")
@@ -1692,54 +2393,206 @@ class SQLiteApplicationStore:
                 ).fetchone()
             if row is None:
                 return None
+            return self._claim_job_row(
+                connection,
+                row,
+                worker_id=normalized_worker,
+                process_id=process_id,
+            )
+
+    def claim_next_supervised_job(
+        self,
+        worker_id: str,
+        process_id: int,
+        *,
+        max_active_jobs: int,
+    ) -> JsonObject | None:
+        """Atomically claim the oldest capacity- and owner-eligible Job."""
+
+        normalized_worker = _normalise_name(worker_id, "worker_id")
+        if (
+            not isinstance(process_id, int)
+            or isinstance(process_id, bool)
+            or process_id <= 0
+        ):
+            raise ValueError("process_id must be a positive integer")
+        if (
+            not isinstance(max_active_jobs, int)
+            or isinstance(max_active_jobs, bool)
+            or max_active_jobs <= 0
+        ):
+            raise ValueError("max_active_jobs must be a positive integer")
+        with self._transaction() as connection:
+            active = int(
+                connection.execute(
+                    """
+                    SELECT count(*)
+                    FROM jobs JOIN attempts USING (attempt_id)
+                    WHERE jobs.status IN ('running', 'retrying', 'stopping')
+                      AND attempts.status IN ('running', 'retrying', 'stopping')
+                    """
+                ).fetchone()[0]
+            )
+            if active >= max_active_jobs:
+                return None
+            row = connection.execute(
+                """
+                SELECT queued_jobs.job_id, queued_jobs.attempt_id
+                FROM jobs AS queued_jobs
+                JOIN attempts AS queued_attempts USING (attempt_id)
+                WHERE queued_jobs.status = 'queued'
+                  AND queued_attempts.status = 'queued'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM attempts AS active_attempts
+                    WHERE active_attempts.status IN (
+                        'running', 'retrying', 'stopping'
+                    )
+                      AND (
+                        (
+                          queued_attempts.material_id IS NOT NULL
+                          AND active_attempts.material_id = queued_attempts.material_id
+                        ) OR (
+                          queued_attempts.run_id IS NOT NULL
+                          AND active_attempts.run_id = queued_attempts.run_id
+                        ) OR (
+                          queued_attempts.render_variant_id IS NOT NULL
+                          AND active_attempts.render_variant_id =
+                              queued_attempts.render_variant_id
+                        )
+                      )
+                  )
+                ORDER BY queued_jobs.created_at, queued_jobs.job_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return self._claim_job_row(
+                connection,
+                row,
+                worker_id=normalized_worker,
+                process_id=process_id,
+            )
+
+    def adopt_supervised_job(
+        self,
+        job_id: JobId,
+        attempt_id: AttemptId,
+        *,
+        expected_worker_id: str,
+        expected_process_id: int,
+        worker_id: str,
+        process_id: int,
+    ) -> JsonObject:
+        """Transfer one exact supervisor lease to its launched child process."""
+
+        if not isinstance(job_id, JobId):
+            raise TypeError("job_id must be a JobId")
+        if not isinstance(attempt_id, AttemptId):
+            raise TypeError("attempt_id must be an AttemptId")
+        expected_worker = _normalise_name(expected_worker_id, "expected_worker_id")
+        normalized_worker = _normalise_name(worker_id, "worker_id")
+        for value, label in (
+            (expected_process_id, "expected_process_id"),
+            (process_id, "process_id"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{label} must be a positive integer")
+        with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT jobs.*, attempts.status AS attempt_status
+                FROM jobs JOIN attempts USING (attempt_id)
+                WHERE jobs.job_id = ? AND jobs.attempt_id = ?
+                """,
+                (str(job_id), str(attempt_id)),
+            ).fetchone()
+            if row is None:
+                raise ManagedStateConflict(
+                    "supervisor_lease_mismatch",
+                    f"Job {job_id} is not bound to Attempt {attempt_id}",
+                )
+            if (
+                row["status"] != AttemptStatus.RUNNING.value
+                or row["attempt_status"] != AttemptStatus.RUNNING.value
+                or row["worker_id"] != expected_worker
+                or row["process_id"] != expected_process_id
+            ):
+                raise ManagedStateConflict(
+                    "supervisor_lease_mismatch",
+                    f"Job {job_id} no longer owns the expected supervisor lease",
+                )
             now = self._now()
             connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, worker_id = ?, process_id = ?, heartbeat_at = ?,
-                    updated_at = ?
-                WHERE job_id = ? AND status = ?
+                SET worker_id = ?, process_id = ?, heartbeat_at = ?, updated_at = ?
+                WHERE job_id = ?
                 """,
-                (
-                    AttemptStatus.RUNNING.value,
-                    normalized_worker,
-                    process_id,
-                    now,
-                    now,
-                    row["job_id"],
-                    AttemptStatus.QUEUED.value,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE attempts
-                SET status = ?, started_at = coalesce(started_at, ?), updated_at = ?
-                WHERE attempt_id = ? AND status = ?
-                """,
-                (
-                    AttemptStatus.RUNNING.value,
-                    now,
-                    now,
-                    row["attempt_id"],
-                    AttemptStatus.QUEUED.value,
-                ),
-            )
-            attempt = self._attempt_record(connection, row["attempt_id"])
-            self._update_owner_for_claim(connection, attempt, now)
-            self._event(
-                connection,
-                event_type="attempt.started",
-                occurred_at=now,
-                object_type=attempt["owner_type"],
-                object_id=attempt["owner_id"],
-                command_id=attempt["command_id"],
-                attempt_id=attempt["attempt_id"],
-                job_id=row["job_id"],
+                (normalized_worker, process_id, now, now, str(job_id)),
             )
             return {
-                "attempt": self._attempt_record(connection, row["attempt_id"]),
-                "job": self._job_record(connection, row["job_id"]),
+                "attempt": self._attempt_record(connection, str(attempt_id)),
+                "job": self._job_record(connection, str(job_id)),
             }
+
+    def _claim_job_row(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        worker_id: str,
+        process_id: int,
+    ) -> JsonObject:
+        now = self._now()
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = ?, worker_id = ?, process_id = ?, heartbeat_at = ?,
+                updated_at = ?
+            WHERE job_id = ? AND status = ?
+            """,
+            (
+                AttemptStatus.RUNNING.value,
+                worker_id,
+                process_id,
+                now,
+                now,
+                row["job_id"],
+                AttemptStatus.QUEUED.value,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE attempts
+            SET status = ?, started_at = coalesce(started_at, ?), updated_at = ?
+            WHERE attempt_id = ? AND status = ?
+            """,
+            (
+                AttemptStatus.RUNNING.value,
+                now,
+                now,
+                row["attempt_id"],
+                AttemptStatus.QUEUED.value,
+            ),
+        )
+        attempt = self._attempt_record(connection, row["attempt_id"])
+        self._update_owner_for_claim(connection, attempt, now)
+        self._event(
+            connection,
+            event_type="attempt.started",
+            occurred_at=now,
+            object_type=attempt["owner_type"],
+            object_id=attempt["owner_id"],
+            command_id=attempt["command_id"],
+            attempt_id=attempt["attempt_id"],
+            job_id=row["job_id"],
+        )
+        return {
+            "attempt": self._attempt_record(connection, row["attempt_id"]),
+            "job": self._job_record(connection, row["job_id"]),
+        }
 
     def heartbeat_job(
         self,
@@ -1891,7 +2744,15 @@ class SQLiteApplicationStore:
         return self._transition_attempt(
             attempt_id,
             AttemptStatus.COMPLETE,
-            allowed={AttemptStatus.RUNNING, AttemptStatus.RETRYING},
+            # Material publication is atomic but cannot be rolled back once the
+            # canonical Memory commit point is visible.  A late Stop request
+            # therefore completes successfully instead of reporting an
+            # interrupted Material that is already Ready.
+            allowed={
+                AttemptStatus.RUNNING,
+                AttemptStatus.RETRYING,
+                AttemptStatus.STOPPING,
+            },
         )
 
     def _transition_attempt(
@@ -1967,6 +2828,7 @@ class SQLiteApplicationStore:
                 SELECT jobs.attempt_id
                 FROM jobs JOIN attempts USING (attempt_id)
                 WHERE jobs.status IN ('running', 'retrying', 'stopping')
+                  AND attempts.status IN ('running', 'retrying', 'stopping')
                   AND (jobs.heartbeat_at IS NULL OR jobs.heartbeat_at < ?)
                 ORDER BY jobs.created_at
                 """,
@@ -2009,6 +2871,19 @@ class SQLiteApplicationStore:
         with self._read() as connection:
             return self._attempt_record(connection, str(attempt_id))
 
+    def record_attempt_model_usage(
+        self,
+        attempt_id: AttemptId,
+        model_usage_summary: Mapping[str, Any],
+    ) -> JsonObject:
+        with self._transaction() as connection:
+            self._write_attempt_model_usage(
+                connection,
+                str(attempt_id),
+                model_usage_summary,
+            )
+            return self._attempt_record(connection, str(attempt_id))
+
     def get_job(self, job_id: JobId) -> JsonObject:
         with self._read() as connection:
             return self._job_record(connection, str(job_id))
@@ -2027,7 +2902,11 @@ class SQLiteApplicationStore:
         limit: int = 100,
         offset: int = 0,
     ) -> list[JsonObject]:
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 500
+        ):
             raise ValueError("limit must be between 1 and 500")
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ValueError("offset must be a non-negative integer")
@@ -2059,24 +2938,64 @@ class SQLiteApplicationStore:
             ).fetchall()
             return [self._attempt_record(connection, row[0]) for row in rows]
 
-    def list_events(self, after_event_id: int = 0, limit: int = 200) -> list[JsonObject]:
+    def event_bounds(self) -> tuple[int | None, int | None]:
+        """Return the currently replayable inclusive durable Event bounds."""
+
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT min(event_id), max(event_id) FROM events"
+            ).fetchone()
+            if row is None:  # pragma: no cover - aggregate always returns one row
+                return None, None
+            return (
+                None if row[0] is None else int(row[0]),
+                None if row[1] is None else int(row[1]),
+            )
+
+    def read_event_page(
+        self,
+        after_event_id: int = 0,
+        limit: int = 200,
+    ) -> JsonObject:
+        """Read replay bounds and one ordered page from one SQLite snapshot."""
+
         if (
             not isinstance(after_event_id, int)
             or isinstance(after_event_id, bool)
             or after_event_id < 0
+            or after_event_id > 9_223_372_036_854_775_807
         ):
-            raise ValueError("after_event_id must be a non-negative integer")
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000:
+            raise ValueError("after_event_id must be a non-negative SQLite integer")
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 1000
+        ):
             raise ValueError("limit must be between 1 and 1000")
         with self._read() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM events WHERE event_id > ?
-                ORDER BY event_id LIMIT ?
+                WITH bounds AS (
+                    SELECT min(event_id) AS first_event_id,
+                           max(event_id) AS last_event_id
+                    FROM events
+                ), page AS (
+                    SELECT * FROM events
+                    WHERE event_id > ?
+                    ORDER BY event_id
+                    LIMIT ?
+                )
+                SELECT bounds.first_event_id AS available_first_event_id,
+                       bounds.last_event_id AS available_last_event_id,
+                       page.*
+                FROM bounds LEFT JOIN page ON 1 = 1
+                ORDER BY page.event_id
                 """,
                 (after_event_id, limit),
             ).fetchall()
-            return [
+            first_event_id = rows[0]["available_first_event_id"]
+            last_event_id = rows[0]["available_last_event_id"]
+            items = [
                 {
                     "event_id": row["event_id"],
                     "event_type": row["event_type"],
@@ -2090,7 +3009,21 @@ class SQLiteApplicationStore:
                     "schema_version": row["schema_version"],
                 }
                 for row in rows
+                if row["event_id"] is not None
             ]
+            return {
+                "first_event_id": first_event_id,
+                "last_event_id": last_event_id,
+                "items": items,
+            }
+
+    def list_events(
+        self, after_event_id: int = 0, limit: int = 200
+    ) -> list[JsonObject]:
+        items = self.read_event_page(after_event_id, limit)["items"]
+        if not isinstance(items, list):  # pragma: no cover - internal invariant
+            raise SQLiteStoreError("Invalid durable event page")
+        return items
 
     def _insert_attempt(
         self,
@@ -2233,6 +3166,10 @@ class SQLiteApplicationStore:
             owner_type, owner_id = "run", row["run_id"]
         else:
             owner_type, owner_id = "render_variant", row["render_variant_id"]
+        raw_usage = row["model_usage_summary_json"]
+        usage = None if raw_usage is None else _parse_json(raw_usage)
+        if usage is not None and not isinstance(usage, dict):
+            raise SQLiteStoreError("Invalid Attempt model usage summary")
         return {
             "attempt_id": row["attempt_id"],
             "operation_type": row["operation_type"],
@@ -2242,11 +3179,94 @@ class SQLiteApplicationStore:
             "status": row["status"],
             "command_id": row["command_id"],
             "error_message": row["error_message"],
+            "model_usage_summary": usage,
             "created_at": row["created_at"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
             "updated_at": row["updated_at"],
         }
+
+    @staticmethod
+    def _validate_checkpoint_record(value: Mapping[str, Any]) -> None:
+        expected = {
+            "run_id",
+            "checkpoint_id",
+            "source_attempt_id",
+            "completed_stage",
+            "relative_path",
+            "content_sha256",
+            "identity_signature",
+            "schema_version",
+            "created_at",
+            "updated_at",
+        }
+        if set(value) != expected:
+            raise SQLiteStoreError("Invalid ASTER checkpoint receipt fields")
+        RunId.parse(str(value["run_id"]))
+        AttemptId.parse(str(value["source_attempt_id"]))
+        _validate_command_id(str(value["checkpoint_id"]))
+        _checkpoint_stage(str(value["completed_stage"]))
+        validate_portable_relative_file_path(str(value["relative_path"]))
+        _checkpoint_digest(str(value["content_sha256"]), "content_sha256")
+        _checkpoint_digest(
+            str(value["identity_signature"]),
+            "identity_signature",
+        )
+        if value["schema_version"] != "1.0":
+            raise SQLiteStoreError("Unsupported ASTER checkpoint receipt schema")
+        for field_name in ("created_at", "updated_at"):
+            raw = value[field_name]
+            if not isinstance(raw, str):
+                raise SQLiteStoreError(
+                    f"Invalid ASTER checkpoint {field_name}"
+                )
+
+    def _run_checkpoint_record(self, row: Mapping[str, Any]) -> JsonObject:
+        value = {
+            "run_id": row["run_id"],
+            "checkpoint_id": row["checkpoint_id"],
+            "source_attempt_id": row["source_attempt_id"],
+            "completed_stage": row["completed_stage"],
+            "relative_path": row["relative_path"],
+            "content_sha256": row["content_sha256"],
+            "identity_signature": row["identity_signature"],
+            "schema_version": row["schema_version"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        self._validate_checkpoint_record(value)
+        return value
+
+    def _write_attempt_model_usage(
+        self,
+        connection: sqlite3.Connection,
+        attempt_id: str,
+        model_usage_summary: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(model_usage_summary, Mapping):
+            raise TypeError("model_usage_summary must be a mapping")
+        row = self._require_attempt_row(connection, attempt_id)
+        if row["operation_type"] != "aster_planning":
+            raise ManagedStateConflict(
+                "attempt_usage_not_supported",
+                "Model usage is only persisted for ASTER planning Attempts",
+            )
+        encoded = _canonical_json(dict(model_usage_summary))
+        existing = row["model_usage_summary_json"]
+        if existing is not None:
+            if existing != encoded:
+                raise ManagedStateConflict(
+                    "attempt_usage_conflict",
+                    f"Attempt {attempt_id} already has a different usage summary",
+                )
+            return
+        connection.execute(
+            """
+            UPDATE attempts SET model_usage_summary_json = ?
+            WHERE attempt_id = ?
+            """,
+            (encoded, attempt_id),
+        )
 
     def _job_record(self, connection: sqlite3.Connection, job_id: str) -> JsonObject:
         row = self._require_job_row(connection, job_id)

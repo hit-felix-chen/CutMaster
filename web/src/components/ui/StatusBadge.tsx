@@ -44,13 +44,21 @@ export function StatusBadge({ status }: { status: string }) {
     completed: 'activity.complete',
     reused: 'activity.reused',
     queued: 'activity.queued',
+    analysing: 'materials.analysing',
     running: 'activity.running',
+    rendering: 'renders.rendering',
     planners: 'activity.running',
     retrying: 'activity.retrying',
     stopping: 'activity.stopping',
     unavailable: 'common.unavailable',
   }
-  const animated = ['running', 'planners', 'retrying'].includes(value)
+  const animated = [
+    'analysing',
+    'running',
+    'rendering',
+    'planners',
+    'retrying',
+  ].includes(value)
   return (
     <span className={`status-badge status-badge--${tone}`}>
       <Icon size={13} aria-hidden="true" className={animated ? 'spin' : undefined} />

@@ -48,10 +48,9 @@ root workflow facade, root CLI module, raw-path stage contracts, and generic
 ## Repository layout and Web expansion
 
 **Status:** the Python backend, FastAPI adapter, React/Vite client, SPA packaging,
-Project Setup, managed ASTER planning worker, Frozen Edit Review, and atomic
-Guided Revision are implemented. Some leaf files in the fuller map below remain
-a design map for the proposed general long-job supervisor, SSE, automatic
-Renderer Preview/Variant flows, and Data Root Migration; consolidated modules
+Project Setup, managed local Job Supervisor, durable SSE, guarded Data Root
+Migration, Frozen Edit Review, and atomic Guided Revision are implemented. Some
+leaf files in the fuller map below remain a design map; consolidated modules
 need not be split merely to match every proposed filename.
 
 CutMaster remains a standard Python `src`-layout repository. The backend is not
@@ -108,9 +107,10 @@ never vendored, symlinked, or collected as part of CutMaster's tests.
 
 The tree below records the accepted Web-release ownership map. The implemented
 backend currently uses the consolidated package structure shown at the start of
-this document. The Web adapter, front-end-serving infrastructure, and
-submission-triggered ASTER dispatcher/worker are now present; general
-supervisor/SSE and several later feature leaves remain proposed.
+this document. The Web adapter, front-end-serving infrastructure, shared local
+supervisor, Analyser/Planners/Renderer workers, and durable SSE transport are
+present. Persistent notifications and several later product leaves remain
+design-map entries rather than implemented modules.
 
 ```text
 src/cutmaster/
@@ -192,15 +192,12 @@ src/cutmaster/
 │       ├── material_catalog.py
 │       ├── repositories.py
 │       ├── unit_of_work.py
-│       ├── artifact_store.py
 │       ├── data_root.py
 │       ├── job_dispatcher.py
 │       ├── event_store.py
 │       ├── idempotency.py
-│       ├── settings_store.py
 │       ├── provider_connections.py
-│       ├── notification_repository.py
-│       └── clock.py
+│       └── notification_repository.py
 │
 ├── workflow/
 │   ├── __init__.py
@@ -340,14 +337,12 @@ src/cutmaster/
 │   │   ├── __init__.py
 │   │   └── local/
 │   │       ├── __init__.py
-│   │       ├── data_root.py
+│   │       ├── data_root_coordination.py
 │   │       ├── material_catalog.py
-│   │       ├── artifact_store.py
 │   │       ├── leases.py
 │   │       ├── fingerprints.py
 │   │       ├── integrity.py
-│   │       ├── migration.py
-│   │       └── settings_store.py
+│   │       └── data_root_migration.py
 │   ├── jobs/
 │   │   ├── __init__.py
 │   │   └── subprocess/
@@ -606,7 +601,7 @@ Uvicorn are normal runtime dependencies rather than an optional extra. Their
 imports remain inside the Web adapter so direct component commands do not
 initialize the server stack.
 
-### Complete test layout (Proposed Web additions included)
+### Complete test layout
 
 ```text
 tests/
@@ -693,13 +688,15 @@ The backend migration completed these boundaries on 2026-08-12:
 6. SQLite-backed Projects, Material References, Runs, Frozen Edits, Render
    Variants, Attempts, jobs, durable events, command receipts, and settings.
 
-The next work is **Proposed**: extend the implemented ASTER subprocess path into
-a general supervisor for Material Analysis, Renderer, shared scheduling, and
-orphan recovery; add SSE; add automatic Renderer Preview/Variant creation; and
-then implement guarded Data Root Migration. Frozen Edit Review and atomic Guided
-Revision already execute synchronously through the Application Layer. OpenAPI,
-media Range requests, SPA packaging, Project Setup/Run route tests, and ASTER
-worker tests are already implemented.
+The managed local execution slice now extends the original ASTER subprocess
+path to Material Analysis and Renderer. It includes shared FIFO/capacity
+scheduling, per-owner serialization, cooperative cancellation, orphan recovery,
+stage-boundary ASTER Resume, automatic Dialogue Preview, Render Variants and
+Outputs, durable SSE, provider/Setup flows, and guarded Data Root Migration.
+Frozen Edit Review and atomic Guided Revision execute through the same
+Application boundary. Media Range requests, SPA packaging, managed route and
+worker tests, and localized Problem Details are implemented. Generated OpenAPI
+TypeScript transport types plus a CI drift check remain **Proposed**.
 Historical output
 directories and v1 plans remain
 untouched; they are not compatibility inputs for the handle-only stage API.
@@ -818,20 +815,24 @@ identity rather than to an ASTER execution attempt or a plan file path. Product
 persistence has no mutable `current_frozen_edit_id` or `final_frozen_edit_id`;
 the newest creation sequence is only a default query result for adapters.
 
-For newly completed managed ASTER Runs, the worker also publishes a versioned
-Review Candidate Bundle whose manifest is committed after its integrity-addressed
-Candidate Space, edit plan, music profile, and selection diagnostics. Historical
-Frozen Edits created before this publication remain fully inspectable through
-their RenderPlan but expose read-only Review rather than inferred candidates.
+Every managed Frozen Edit requires a versioned Review Candidate Bundle. The
+worker publishes its manifest only after the integrity-addressed Candidate
+Space, edit plan, music profile, selection diagnostics, and selected candidate
+for every required Slot are complete. Frozen Edit publication and Guided
+Revision commit validate that complete bundle contract. A missing or damaged
+artifact, digest mismatch, or incomplete selected-candidate mapping makes the
+Review data invalid and returns `review_artifact_unavailable`; the Application
+never infers candidates from the RenderPlan or exposes a read-only fallback.
 
 Guided Revision is implemented without rerunning ASTER. The Application validates
 the complete replacement set against the persisted Candidate Space, rejects
 Story Anchor, identity, and chronology violations before history changes,
 deterministically compiles one child RenderPlan, and atomically commits one
 derived Frozen Edit linked to its source. Any failure leaves the source and
-history unchanged. Automatic Renderer Preview/Variant creation after that
-commit remains **Proposed**. Direct CLI and Benchmark workflows use RenderPlan
-without creating Frozen Edit product history.
+history unchanged. Renderer Variant creation remains a separate managed
+lifecycle after that commit; the Web flow automatically requests the default
+Dialogue Preview and also permits explicit BGM-only Variants. Direct CLI and
+Benchmark workflows use RenderPlan without creating Frozen Edit product history.
 
 ## Implemented ownership
 
@@ -855,7 +856,7 @@ without creating Frozen Edit product history.
 - `workflow/renderer/` realizes an immutable portable RenderPlan from explicit
   runtime bindings. It prepares dialogue and mix decisions but accesses media
   through the current local media helpers; broader media-port injection is
-  proposed.
+  **Proposed**.
 - `workflow/prompting/` owns prompt definitions, response contracts, and the
   shared failure catalogue. Analyser and Planners use prompt packages and model
   response contracts; Renderer imports only the transport-neutral failure
@@ -866,16 +867,16 @@ without creating Frozen Edit product history.
   current model execution context; concrete model, media, logging, and progress
   helpers remain in `infrastructure/` pending broader port injection.
 - `infrastructure/` implements SQLite persistence, local Material storage,
-  model access, FFprobe helpers, and observability. The Web adapter currently
-  owns the implemented ASTER subprocess dispatcher; a reusable general job
-  supervisor remains **Proposed**.
+  model access, FFprobe helpers, and observability. The Web adapter owns the
+  implemented local supervisor and isolated Analyser, Planners, Renderer, and
+  Data Root Migration workers.
 - `adapters/cli/` translates transport input and output and calls only the
   Application Layer. `adapters/web/` is the implemented FastAPI peer adapter
-  and owns the current ASTER dispatcher/worker; its other managed long-job and
-  SSE expansion is **Proposed**.
+  and owns the managed local-job and durable SSE transports.
 - `configuration/` loads and validates bootstrap, local overlay, environment,
   Data Root resolution, and non-secret snapshot configuration for the
-  composition root. Data Root Migration is **Proposed**.
+  composition root. The Application and local storage adapters implement the
+  guarded Data Root Migration control plane.
 - `contracts/workflow.py` and root stage-class re-exports remain public. The mixed-purpose
   `runtime/` package has no target equivalent and must not be recreated under
   another generic name.
@@ -941,11 +942,36 @@ app.jobs         # Execution Attempt, activity, stop, retry, and resume
 app.settings     # model connections, execution settings, storage, and Data Root
 ```
 
-`app.settings` currently owns Effective Configuration reads, validated local
-overlay saves, and storage reporting. Model-connection UI, bulk cleanup, and
-guarded Data Root Migration are **Proposed**. Browser-only Locale and Colour
-Mode preferences will not pass through this service or be persisted as
-Application state.
+`app.settings` owns Effective Configuration reads, canonical provider profiles,
+validated local overlay and sibling `.env` writes, bounded connection tests,
+storage reporting, and the supported host file-manager reveal action. Direct
+Bundle bulk cleanup is **Proposed**; guarded Data Root Migration is implemented.
+Browser-only Locale and Colour Mode preferences will not pass through this
+service or be persisted as Application state.
+
+### Guarded Data Root Migration
+
+Migration coordination is stored outside either candidate Data Root. A stable
+external shared/exclusive root lease fences every persistent Application read
+or write across Web, CLI, Benchmark, supervisor, and worker processes. Preflight
+rejects active Attempts, invalid/overlapping roots, ownership conflicts, and
+insufficient destination capacity before the user confirms the operation.
+
+The managed migration worker creates an online SQLite backup, copies only the
+canonical owned namespaces (including Direct Workflow Bundles), and verifies
+the manifest with size and SHA-256 checks plus SQLite integrity, foreign keys,
+schema, and queued-job count. While it runs, every business API read and write
+returns a typed maintenance 503; only health, migration status/control, and SPA
+resources remain available. Cancellation is accepted only before the atomic
+pointer switch.
+
+After successful verification, the worker atomically updates the external
+root-location pointer and enters `restart_required`. The next backend start
+validates the destination owner marker before reopening business services. A
+failure or pre-switch cancellation keeps the original pointer authoritative and
+removes only files owned by the migration manifest; it preserves unknown
+destination entries. A successful migration deliberately does **not** delete
+the old Data Root, so old-root cleanup remains an explicit manual decision.
 
 ### Effective configuration
 
@@ -991,10 +1017,9 @@ Variants persist their normalized Render Specification.
 
 Secrets are deliberately excluded from snapshots. Direct execution resolves
 the required environment references when constructing a runtime configuration.
-The managed ASTER subprocess resolves secrets at its Execution Attempt start,
-allowing credential repair without changing the owning operation's non-secret
-snapshot. Other managed workers will follow this policy when the proposed
-general supervisor is implemented.
+Each managed Analyser, Planners, or Renderer subprocess resolves secrets at its
+Execution Attempt start, allowing credential repair without changing the owning
+operation's non-secret snapshot.
 
 Inbound adapters translate only their transport-specific input and output.
 The implemented CLI and Benchmark adapters obtain services from
@@ -1005,17 +1030,18 @@ Root and one Material Catalog. Service groups are lazy: using `app.direct`
 does not initialize SQLite, the durable queue, or unrelated model providers,
 while managed groups open those resources only when accessed.
 
-### Web adapter protocol and managed ASTER execution
+### Web adapter protocol and managed execution
 
 The implemented FastAPI adapter exposes noun-based queries for Projects,
-Materials, sanitized Material Memory, leased source-media Range streams,
-Activity/events, Settings, storage, Run details, and Frozen Edit Review. It
-exposes Project Setup, Settings, Stop Attempt, Start editing, and atomic Save
-revision commands through Application use cases. Start editing returns a durable
-Run/Attempt/job submission and dispatches real ASTER planning to an isolated
-subprocess. The proposed general supervisor expansion adds Material Analysis,
-Retry/Resume, and Render; automatic Preview/Variant creation also remains
-Proposed. The adapter has no generic
+Materials, sanitized Material Memory and bounded previews, leased source-media
+Range streams, Activity/events, Settings/Setup, storage, Runs, Frozen Edit
+Review, Render Variants, and Outputs. Its semantic commands cover Material
+preflight/import/analysis/recovery/deletion, Project Setup, ASTER Run
+Start/Retry/Resume/Run again/deletion, Stop Attempt, atomic Save revision,
+Render Variant lifecycle, provider tests/settings, and Data Root Migration.
+Managed Analyser, Planners, and Renderer commands return durable submissions
+and dispatch real work to isolated subprocesses through the shared supervisor.
+The adapter has no generic
 `/commands` endpoint and does not expose database-shaped CRUD.
 Each route maps a transport DTO to one Application use case and maps its result
 or domain error back to HTTP; authorization-free local transport concerns never
@@ -1064,6 +1090,31 @@ server emits `resync_required`; the client invalidates its resource cache and
 refetches the visible page plus global Activity before continuing. Route changes
 never close the global stream.
 
+One `LocalJobSupervisor` owns dispatch for Material Analysis, ASTER planning,
+and Renderer Attempts. It claims the durable queue in FIFO order subject to the
+configured heavy-job capacity and per-owner serialization, adopts worker PIDs
+before another supervisor can duplicate a launch, and reconciles stale leases,
+dead workers, and non-zero exits into one terminal/recoverable state. Analyser
+and Planners receive a shared cancellation port and check it at safe model,
+media, and agent boundaries; Stop therefore transitions through `Stopping` to
+`Interrupted` without misclassifying cooperative cancellation as failure.
+
+ASTER Resume requires an identity-bound checkpoint selected from the previous
+Interrupted Attempt. The checkpoint contains parsed state only after a complete
+Arrangement Architect, Story Editor, Timeline Scout, Edit Composer, or Revision
+Editor boundary; a separate `replan_pending` boundary stores sanitized feedback
+before the next Arrangement Architect pass. It contains aggregate usage but no
+prompt, credential, provider response, runtime path, or instruction-level state.
+Retry deliberately clears this resume receipt and starts the same immutable Run
+snapshot without claiming partial continuation.
+
+Activity uses a cursor-paginated projection and exposes structured owner
+context—Material Name, or Project Name plus Run/edit/Variant sequence—so every
+row links to a canonical Material, Run, or Render Variant route without showing
+bare internal IDs. The React client renders localized operation/status failure
+copy rather than persisted internal exception messages; raw logs remain
+server-owned, and a richer Activity log drawer is deferred.
+
 HTTP resources use shallow ownership routes. Listing or creating a child may be
 scoped once beneath its owner, while detail queries and commands address the
 target directly by its canonical ID. For example:
@@ -1073,9 +1124,11 @@ GET  /api/projects/{project_id}/runs
 POST /api/projects/{project_id}/runs
 GET  /api/runs/{run_id}
 POST /api/runs/{run_id}/retry
+POST /api/runs/{run_id}/resume
+POST /api/runs/{run_id}/run-again
 GET  /api/frozen-edits/{edit_id}/review           # implemented
 POST /api/frozen-edits/{edit_id}/revisions        # implemented atomically
-POST /api/frozen-edits/{edit_id}/render-variants  # proposed
+POST /api/frozen-edits/{edit_id}/render-variants  # implemented
 ```
 
 The adapter does not mirror the full Project → Run → Frozen Edit → Variant
@@ -1204,11 +1257,10 @@ The separate `analyse`, `analyse-music`, `plan`, and `render` commands remain
 available for component-level evaluation and debugging.
 
 The implemented CLI surface contains those five synchronous commands plus
-`cutmaster serve`. The Web slice exposes Project, Material, Activity, Settings,
-managed ASTER planning, Frozen Edit Review, and atomic Guided Revision use cases.
-Retry/Resume, Material Analysis, Render, automatic Preview/Variant creation, and
-other long-running Web commands wait for the proposed general supervisor
-expansion.
+`cutmaster serve`. The Web slice exposes Project, Material, Activity,
+Settings/Setup, the managed Material Analysis and ASTER Run lifecycles, Frozen
+Edit Review, atomic Guided Revision, Render Variants/Outputs, durable SSE, and
+Data Root Migration through the same Application boundary.
 
 The official Mashup-Benchmark adapter may call the same direct Application API
 as a peer adapter instead of spawning this CLI adapter. Both routes execute the
@@ -1217,8 +1269,8 @@ same use case and must produce the same workflow result and artifact contract.
 ### Output ownership
 
 **Implemented:** Direct Bundle allocation, explicit external-output validation,
-Material leases, and storage reporting. **Proposed:** bulk Direct Bundle cleanup
-and Data Root Migration.
+Material leases, storage reporting, and guarded Data Root Migration.
+**Proposed:** bulk Direct Bundle cleanup.
 
 Output ownership is explicit and is never inferred from the resolved path.
 The Application Layer accepts three output targets:
@@ -1235,17 +1287,18 @@ Direct Workflow Bundles count toward Application Data Root storage usage but do
 not create Project, ASTER Run, Activity, or Render Variant records. External
 outputs are not managed by CutMaster. Paths inside `media/`, `projects/`,
 `direct/`, or any other Data Root namespace are rejected when supplied as
-explicit CLI output directories. The proposed Data Root Migration will move
-managed Direct Bundles together with the rest of the root.
+explicit CLI output directories. Data Root Migration moves managed Direct
+Bundles together with the rest of the root.
 
 Direct Workflow Bundles have no automatic retention deadline. Settings reports
 their count and total size. An explicit bulk-delete operation with two-click
 confirmation is **Proposed**; it will skip active or locked bundles and report
 both skipped and deleted counts.
 
-A direct workflow holds Material leases for its lifetime, so Material deletion
-cannot race CLI or Benchmark use. The proposed Data Root Migration must add an
-exclusive root lease before copying or switching managed state.
+A direct workflow holds Material and shared root leases for its lifetime, so
+Material deletion or Data Root Migration cannot race CLI or Benchmark use. The
+migration worker obtains the stable external exclusive root lease before
+copying or switching managed state.
 
 ### Implemented Benchmark adapter
 
@@ -1349,13 +1402,15 @@ app.settings     # models, execution settings, storage, and Data Root
 
 `CutMasterApplication.open(...)`, all seven lazy service groups, Direct and
 Material operations, SQLite-backed managed use cases, and Settings reads,
-writes, and storage reporting are implemented. CLI and Mashup-Benchmark both
-invoke the Direct service; FastAPI maps its supported routes to the same
-Application, dispatches implemented ASTER planning in a managed subprocess, and
-serves Frozen Edit Review plus atomic Guided Revision through `app.runs`.
-Persistent application notifications, automatic Renderer Preview/Variant
-creation, SSE, the general supervisor and other managed workers, and Data Root
-Migration are **Proposed** additions over this boundary.
+writes, tests, and storage/migration controls are implemented. CLI and
+Mashup-Benchmark both invoke the Direct service; FastAPI maps its routes to the
+same Application and dispatches managed Analyser, Planners, and Renderer work
+through the shared supervisor. Frozen Edit Review, atomic Guided Revision,
+automatic Dialogue Preview, Render Variants/Outputs, durable SSE, provider
+Setup, and Data Root Migration are implemented. Persistent application
+notifications, the Activity log drawer, Direct Bundle bulk cleanup/retention,
+generated OpenAPI transport drift CI, multi-user/cloud execution, and broader
+provider/media port injection remain **Proposed**.
 
 The complete direct workflow uses a stable versioned contract from
 `cutmaster.contracts.workflow`:

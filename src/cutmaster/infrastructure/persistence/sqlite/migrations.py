@@ -242,6 +242,54 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=2,
+        statements=(
+            """
+            ALTER TABLE attempts
+            ADD COLUMN model_usage_summary_json TEXT
+                CHECK (
+                    model_usage_summary_json IS NULL
+                    OR json_valid(model_usage_summary_json)
+                )
+            """,
+        ),
+    ),
+    Migration(
+        version=3,
+        statements=(
+            """
+            CREATE TABLE run_checkpoints (
+                run_id TEXT PRIMARY KEY
+                    REFERENCES runs(run_id) ON DELETE CASCADE,
+                checkpoint_id TEXT NOT NULL UNIQUE,
+                source_attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                completed_stage TEXT NOT NULL CHECK (
+                    completed_stage IN (
+                        'replan_pending', 'arrangement_architect', 'story_editor',
+                        'timeline_scout', 'edit_composer', 'revision_editor'
+                    )
+                ),
+                relative_path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+                identity_signature TEXT NOT NULL
+                    CHECK (length(identity_signature) = 64),
+                schema_version TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            ) STRICT
+            """,
+            """
+            ALTER TABLE attempts
+            ADD COLUMN resume_checkpoint_json TEXT
+                CHECK (
+                    resume_checkpoint_json IS NULL
+                    OR json_valid(resume_checkpoint_json)
+                )
+            """,
+        ),
+    ),
 )
 
 

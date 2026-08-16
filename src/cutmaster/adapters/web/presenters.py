@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from cutmaster.application.jobs import AttemptView, EventView, JobView
+from cutmaster.application.jobs.usage import compact_usage_summary
 from cutmaster.application.materials import (
     MaterialDetailView,
     MaterialMemoryView,
@@ -16,10 +17,21 @@ from cutmaster.application.materials import (
 )
 from cutmaster.application.projects import ProjectView
 from cutmaster.application.renders import RenderVariantView
-from cutmaster.application.runs import FrozenEditReviewView, FrozenEditView, RunView
-from cutmaster.application.settings import SettingsView, StorageReportView
-from cutmaster.domain.ids import EntityId
+from cutmaster.application.runs import (
+    FrozenEditReviewView,
+    FrozenEditView,
+    RunUsageView,
+    RunView,
+)
+from cutmaster.application.settings import (
+    DataRootMigrationPreflightView,
+    DataRootMigrationView,
+    SettingsView,
+    StorageReportView,
+)
+from cutmaster.domain.ids import EntityId, ProjectId, RunId
 from cutmaster.domain.projects import CreativeBrief
+from cutmaster.infrastructure.persistence.sqlite import ManagedStateNotFound
 
 
 def json_value(value: Any) -> Any:
@@ -51,20 +63,81 @@ def material_view(value: MaterialView) -> dict[str, Any]:
 def material_detail_view(
     value: MaterialDetailView,
     *,
+    references: Sequence[Mapping[str, Any]],
     attempts: tuple[AttemptView, ...] | None = None,
 ) -> dict[str, Any]:
+    material_id = str(value.material.material_id)
+    preview_base = f"/api/materials/{material_id}"
+    has_video_preview = bool(
+        value.preview_available and value.material.material_type.value == "video"
+    )
+    has_music_preview = bool(
+        value.preview_available and value.material.material_type.value == "music"
+    )
     result = {
         **material_view(value.material),
         "duration_sec": value.duration_sec,
         "analysis_available": value.analysis_available,
         "reference_count": value.reference_count,
-        "references": list(value.references),
+        "references": [json_value(item) for item in references],
         "source": json_value(value.source),
         "memory_summary": json_value(value.memory_summary),
+        "thumbnail_url": f"{preview_base}/thumbnail" if has_video_preview else None,
+        "waveform_url": f"{preview_base}/waveform" if has_music_preview else None,
     }
     if attempts is not None:
         result["attempts"] = [attempt_view(item) for item in attempts]
     return result
+
+
+def material_reference_views(
+    application: Any,
+    references: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Resolve opaque deletion references into safe, linkable Web metadata.
+
+    The persistence/deletion boundary deliberately keeps compact raw strings.
+    They are parsed only here: the Web transport receives human labels and
+    canonical route identity, never the raw reference token itself.
+    """
+
+    return [_material_reference_view(application, value) for value in references]
+
+
+def _material_reference_view(application: Any, value: str) -> dict[str, Any]:
+    parts = value.split(":")
+    if len(parts) != 4 or parts[3] not in {"video", "music"}:
+        return {"kind": "unknown", "navigation": None}
+    owner_kind, owner_id, relation, _material_type = parts
+    try:
+        if owner_kind == "project" and relation == "current":
+            project = application.projects.get(ProjectId.parse(owner_id))
+            return {
+                "kind": "project_current",
+                "project_name": project.name,
+                "navigation": {
+                    "kind": "project",
+                    "project_id": str(project.project_id),
+                },
+            }
+        if owner_kind == "run" and relation == "snapshot":
+            run = application.runs.get(RunId.parse(owner_id))
+            project = application.projects.get(run.project_id)
+            return {
+                "kind": "run_snapshot",
+                "project_name": project.name,
+                "run_sequence": run.sequence,
+                "navigation": {
+                    "kind": "run",
+                    "project_id": str(project.project_id),
+                    "run_id": str(run.run_id),
+                },
+            }
+    except (ManagedStateNotFound, ValueError):
+        # A stale/deleted or malformed historical relation remains a blocker,
+        # but no opaque identity is exposed to the browser.
+        pass
+    return {"kind": "unknown", "navigation": None}
 
 
 def material_memory_view(value: MaterialMemoryView) -> dict[str, Any]:
@@ -114,6 +187,30 @@ def run_view(value: RunView) -> dict[str, Any]:
     }
 
 
+def run_usage_view(value: RunUsageView) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "attempt_usage": [
+            {
+                "attempt_id": str(item.attempt_id),
+                "sequence": item.sequence,
+                "status": item.status.value,
+                "model_usage_summary": (
+                    None
+                    if item.model_usage_summary is None
+                    else json_value(item.model_usage_summary)
+                ),
+            }
+            for item in value.attempt_usage
+        ],
+        "run_total": json_value(value.run_total),
+    }
+
+
+def run_usage_total_view(value: RunUsageView) -> dict[str, Any]:
+    return compact_usage_summary(value.run_total)
+
+
 def frozen_edit_view(value: FrozenEditView) -> dict[str, Any]:
     return {
         "edit_id": str(value.edit_id),
@@ -154,13 +251,12 @@ def frozen_edit_review_view(value: FrozenEditReviewView) -> dict[str, Any]:
                 "source_url": f"/api/materials/{value.music_material_id}/source",
             },
         },
-        "candidate_space_available": value.candidate_space_available,
-        "candidate_space_unavailable_reason": (
-            value.candidate_space_unavailable_reason
-        ),
         "slots": [json_value(item) for item in value.slots],
         "candidates": candidates,
-        "variants": [_review_variant_view(item) for item in value.variants],
+        "variants": [
+            render_variant_view(item, edit=value.edit, run=value.run)
+            for item in value.variants
+        ],
         "timeline": {
             "dialogue_cues": [json_value(item) for item in value.dialogue_cues],
             "music_beats_sec": list(value.music_beats_sec),
@@ -169,16 +265,33 @@ def frozen_edit_review_view(value: FrozenEditReviewView) -> dict[str, Any]:
     }
 
 
-def _review_variant_view(value: RenderVariantView) -> dict[str, Any]:
+def render_variant_view(
+    value: RenderVariantView,
+    *,
+    edit: FrozenEditView,
+    run: RunView,
+) -> dict[str, Any]:
+    ready = value.status.value == "ready" and value.master is not None
     return {
         "render_variant_id": str(value.render_variant_id),
+        "project_id": str(run.project_id),
+        "run_id": str(run.run_id),
+        "run_sequence": run.sequence,
+        "edit_id": str(edit.edit_id),
+        "edit_sequence": edit.sequence,
+        "edit_origin": edit.origin.value,
         "status": value.status.value,
         "specification": json_value(value.specification),
+        "frame_count": value.frame_count,
         "duration_sec": value.duration_sec,
+        "size_bytes": value.master_size_bytes,
         "failure_message": value.failure_message,
         "media_url": (
-            f"/api/render-variants/{value.render_variant_id}/media"
-            if value.master is not None and value.status.value == "ready"
+            f"/api/render-variants/{value.render_variant_id}/media" if ready else None
+        ),
+        "download_url": (
+            f"/api/render-variants/{value.render_variant_id}/download"
+            if ready
             else None
         ),
         "created_at": value.created_at.isoformat(),
@@ -260,6 +373,20 @@ def settings_view(value: SettingsView) -> dict[str, Any]:
             "vlm_configured": value.secrets.vlm_configured,
             "asr_configured": value.secrets.asr_configured,
         },
+        "connections": {
+            "profile": value.connections.profile,
+            "providers": json_value(value.connections.providers),
+            "presets": json_value(value.connections.presets),
+            "credentials": {
+                capability: {
+                    "configured": credential.configured,
+                    "suffix": credential.suffix,
+                    "source": credential.source,
+                    "writable": credential.writable,
+                }
+                for capability, credential in value.connections.credentials.items()
+            },
+        },
     }
 
 
@@ -276,11 +403,112 @@ def storage_report_view(value: StorageReportView) -> dict[str, Any]:
         ],
         "direct_bundle_count": value.direct_bundle_count,
         "total_size_bytes": value.total_size_bytes,
+        "reveal_supported": value.reveal_supported,
+    }
+
+
+_MIGRATION_BLOCKER_METADATA_KEYS: dict[str, frozenset[str]] = {
+    "active_attempt": frozenset({"attempt_id", "status", "owner_type", "owner_id"}),
+    "cleanup_incomplete": frozenset({"remaining_entries"}),
+    "historical_file_not_empty": frozenset({"relative_path"}),
+    "invalid_root_owner_marker": frozenset({"relative_path"}),
+    "unmanifested_destination_entry": frozenset({"relative_path"}),
+    "unknown_namespace": frozenset({"relative_path"}),
+    "unsafe_filesystem_entry": frozenset({"relative_path"}),
+}
+
+
+def _safe_migration_metadata(kind: str, metadata: object) -> dict[str, Any]:
+    if not isinstance(metadata, Mapping):
+        return {}
+    allowed = _MIGRATION_BLOCKER_METADATA_KEYS.get(kind, frozenset())
+    result: dict[str, Any] = {}
+    for key in allowed:
+        value = metadata.get(key)
+        if key == "relative_path":
+            if (
+                not isinstance(value, str)
+                or Path(value).is_absolute()
+                or ".." in Path(value).parts
+            ):
+                continue
+            result[key] = value
+        elif key == "remaining_entries":
+            if isinstance(value, (tuple, list)):
+                result[key] = [
+                    item
+                    for item in value
+                    if isinstance(item, str)
+                    and not Path(item).is_absolute()
+                    and ".." not in Path(item).parts
+                ]
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            result[key] = value
+    return result
+
+
+def data_root_migration_blockers(value: object) -> list[dict[str, Any]]:
+    blockers = getattr(value, "blockers")
+    return [
+        {
+            "kind": blocker.kind,
+            "metadata": _safe_migration_metadata(blocker.kind, blocker.metadata),
+        }
+        for blocker in blockers
+    ]
+
+
+def data_root_migration_preflight_view(
+    value: DataRootMigrationPreflightView,
+) -> dict[str, Any]:
+    return {
+        "source_root": str(value.source_root),
+        "destination_root": str(value.destination_root),
+        "eligible": value.eligible,
+        "estimated_file_count": value.estimated_file_count,
+        "estimated_size_bytes": value.estimated_size_bytes,
+        "blockers": data_root_migration_blockers(value),
+    }
+
+
+def data_root_migration_view(value: DataRootMigrationView) -> dict[str, Any]:
+    return {
+        "migration_id": value.migration_id,
+        "source_root": str(value.source_root),
+        "destination_root": str(value.destination_root),
+        "status": value.status.value,
+        "progress": {
+            "phase": value.phase,
+            "files_completed": value.files_completed,
+            "files_total": value.files_total,
+            "bytes_completed": value.bytes_completed,
+            "bytes_total": value.bytes_total,
+        },
+        "cancel_requested": value.cancel_requested,
+        "blockers": data_root_migration_blockers(value),
+        "failure": (
+            None
+            if value.failure_code is None
+            else {
+                "code": value.failure_code,
+            }
+        ),
+        "created_at": value.created_at.isoformat(),
+        "updated_at": value.updated_at.isoformat(),
+        "started_at": (
+            None if value.started_at is None else value.started_at.isoformat()
+        ),
+        "finished_at": (
+            None if value.finished_at is None else value.finished_at.isoformat()
+        ),
     }
 
 
 __all__ = [
     "attempt_view",
+    "data_root_migration_preflight_view",
+    "data_root_migration_blockers",
+    "data_root_migration_view",
     "event_view",
     "execution_view",
     "frozen_edit_review_view",
@@ -289,8 +517,12 @@ __all__ = [
     "json_value",
     "material_detail_view",
     "material_memory_view",
+    "material_reference_views",
     "material_view",
     "project_view",
+    "render_variant_view",
+    "run_usage_total_view",
+    "run_usage_view",
     "run_view",
     "settings_view",
     "storage_report_view",

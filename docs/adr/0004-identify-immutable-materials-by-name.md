@@ -1,6 +1,6 @@
 # Identify immutable Materials by type-scoped unique names
 
-**Status: Implemented in the backend; Web collision UI proposed.**
+**Status: Implemented in the backend and Web import/collision flow.**
 
 The Material Library has separate video and music namespaces. Within each
 Material Type, the stable user-visible Material Name is unique. Before file
@@ -26,3 +26,8 @@ different Material records or prevent equal bytes from being added under
 different names; avoiding such duplicates is the user's responsibility. A
 fingerprint mismatch marks the managed Material as inconsistent and still
 requires deleting and adding it again because source replacement is unsupported.
+
+The Web preflight performs the same type-scoped name check before media
+transfer. A collision presents the existing Material and the three explicit
+choices above; the accepted import then calculates and binds SHA-256, queues
+the real Material Analysis, and never fabricates a suffix or replacement.

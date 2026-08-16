@@ -15,7 +15,6 @@ from cutmaster.application.direct import (
 from cutmaster.application.materials import MaterialsService
 from cutmaster.configuration.effective import load_effective_configuration
 
-
 MINIMAL_CONFIG = """
 [llm]
 model = "test-llm"
@@ -28,6 +27,44 @@ api_key_env = "CUTMASTER_TEST_VLM_KEY"
 [analyser.asr]
 api_key_env = "CUTMASTER_TEST_ASR_KEY"
 """.strip()
+
+
+class _Token:
+    def raise_if_cancelled(self) -> None:
+        return None
+
+
+def test_optional_cancellation_is_not_part_of_direct_command_identity() -> None:
+    token = _Token()
+    commands = (
+        (
+            AnalyseVideoCommand(video_path=Path("video.mp4")),
+            AnalyseVideoCommand(
+                video_path=Path("video.mp4"),
+                cancellation_token=token,
+            ),
+        ),
+        (
+            AnalyseMusicCommand(audio_path=Path("music.wav")),
+            AnalyseMusicCommand(
+                audio_path=Path("music.wav"),
+                cancellation_token=token,
+            ),
+        ),
+        (
+            PlanCommand(prompt="Create a montage"),
+            PlanCommand(
+                prompt="Create a montage",
+                cancellation_token=token,
+            ),
+        ),
+    )
+
+    for default_command, managed_command in commands:
+        assert default_command.cancellation_token is None
+        assert default_command == managed_command
+        assert repr(default_command) == repr(managed_command)
+        assert "cancellation_token" not in repr(managed_command)
 
 
 def _direct(tmp_path: Path) -> tuple[DirectService, Path]:

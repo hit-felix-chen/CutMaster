@@ -24,7 +24,24 @@ describe('Application health gate', () => {
   it('redirects missing model connections to the real Setup state', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => Promise.resolve(healthResponse(true, false, false))),
+      vi.fn((input: string | URL | Request) => {
+        if (String(input) === '/api/health') {
+          return Promise.resolve(healthResponse(true, false, false))
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              title: 'Settings unavailable',
+              detail: 'Provider Settings could not be loaded.',
+              code: 'settings_unavailable',
+            }),
+            {
+              status: 503,
+              headers: { 'Content-Type': 'application/problem+json' },
+            },
+          ),
+        )
+      }),
     )
     const router = createMemoryRouter(
       [

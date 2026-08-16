@@ -4,11 +4,14 @@ import {
   ChevronLeft,
   Film,
   Layers3,
-  PlaySquare,
+  LoaderCircle,
+  RefreshCcw,
+  Repeat2,
   Rocket,
   Save,
+  Square,
+  Trash2,
 } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -22,20 +25,29 @@ import {
 } from 'react-router-dom'
 
 import { appPaths, appRoutes } from '@/app/routes'
+import { useEventStream } from '@/app/providers/event-stream-context'
 import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
+import { OperationProblem } from '@/components/ui/OperationProblem'
 import { StatusBadge } from '@/components/ui/StatusBadge'
+import { ProjectOutputsView } from '@/features/renders/ProjectOutputs'
 import { AsterProgress } from '@/features/shared/AsterProgress'
 import {
   api,
   collectionItems,
+  type ExecutionSummary,
   type MaterialSummary,
+  type ModelUsageBucket,
   type ProjectWorkspace as WorkspaceData,
+  type RunModelUsage,
+  type RunSummary,
 } from '@/features/shared/api'
 import {
   executionStatus,
   hasActiveRun,
   isRunExecutionActive,
 } from '@/features/shared/execution-state'
+import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
+import { formatCost, formatNumber } from '@/i18n/formatters'
 
 interface ProjectContext {
   workspace: WorkspaceData
@@ -332,7 +344,9 @@ export function ProjectOverview() {
             {!materialsReady && videoId && musicId ? (
               <p className="setup-warning">{t('projects.materialsNotReady')}</p>
             ) : null}
-            {save.isError || start.isError ? <ErrorState /> : null}
+            {save.isError || start.isError ? (
+              <OperationProblem error={save.error ?? start.error} />
+            ) : null}
             <footer className="project-setup__actions">
               <button
                 className="button button--secondary"
@@ -490,7 +504,7 @@ export function ProjectMaterials() {
                 ))}
             </select>
           </label>
-          {save.isError ? <ErrorState /> : null}
+          {save.isError ? <OperationProblem error={save.error} /> : null}
           <div className="form-actions">
             <button
               className="button button--primary"
@@ -627,7 +641,7 @@ export function CreativeBrief() {
             {exceedsMusic && musicDuration ? ` (${secondsToTime(musicDuration)})` : ''}
           </small>
         </label>
-        {save.isError ? <ErrorState /> : null}
+        {save.isError ? <OperationProblem error={save.error} /> : null}
         <div className="form-actions">
           <button
             className="button button--primary"
@@ -662,15 +676,194 @@ export function CreativeBrief() {
   )
 }
 
-export function ProjectRuns() {
+function RunActions({
+  run,
+  execution,
+  compact = false,
+}: {
+  run: RunSummary
+  execution: ExecutionSummary | null
+  compact?: boolean
+}) {
   const { t } = useTranslation('common')
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [deleteArmed, setDeleteArmed] = useState(false)
+  const status = executionStatus(run.status, execution).trim().toLocaleLowerCase()
+  const active = isRunExecutionActive(run.status, execution)
+  const terminal = ['failed', 'interrupted', 'complete', 'completed'].includes(status)
+  const stop = useMutation({
+    mutationFn: () => {
+      if (!execution) throw new Error('Active Run has no execution Attempt')
+      return api.attempts.stop(execution.attempt.attempt_id)
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['run', run.run_id] }),
+        queryClient.invalidateQueries({ queryKey: ['project-runs', run.project_id] }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({ queryKey: ['activity'] }),
+      ])
+    },
+  })
+  const recovery = useMutation({
+    mutationFn: async (action: 'retry' | 'resume' | 'runAgain') => {
+      if (action === 'retry') return api.runs.retry(run.run_id)
+      if (action === 'resume') return api.runs.resume(run.run_id)
+      return api.runs.runAgain(run.run_id)
+    },
+    onSuccess: async (submission) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project-runs', run.project_id] }),
+        queryClient.invalidateQueries({ queryKey: ['run', submission.run.run_id] }),
+        queryClient.invalidateQueries({
+          queryKey: ['project-workspace', run.project_id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({ queryKey: ['activity'] }),
+      ])
+      navigate(appRoutes.runDetail(run.project_id, submission.run.run_id))
+    },
+  })
+  const remove = useMutation({
+    mutationFn: () => api.runs.delete(run.run_id),
+    onSuccess: async () => {
+      queryClient.removeQueries({ queryKey: ['run', run.run_id] })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project-runs', run.project_id] }),
+        queryClient.invalidateQueries({
+          queryKey: ['project-workspace', run.project_id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({ queryKey: ['activity'] }),
+      ])
+      navigate(appRoutes.projectRuns(run.project_id), { replace: true })
+    },
+  })
+
+  useEffect(() => {
+    if (!deleteArmed) return
+    const timeout = window.setTimeout(() => setDeleteArmed(false), 6000)
+    return () => window.clearTimeout(timeout)
+  }, [deleteArmed])
+
+  if (active) {
+    if (compact || !execution) return null
+    const stopping = execution.attempt.status.trim().toLocaleLowerCase() === 'stopping'
+    return (
+      <div className="run-actions">
+        <div className="run-actions__buttons">
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={stopping || stop.isPending}
+            onClick={() => stop.mutate()}
+          >
+            {stop.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : (
+              <Square size={14} aria-hidden="true" />
+            )}
+            {stopping ? t('projects.stoppingRun') : t('projects.stopRun')}
+          </button>
+        </div>
+        {stop.isError ? <OperationProblem error={stop.error} /> : null}
+      </div>
+    )
+  }
+  if (!terminal) return null
+  const pending = recovery.isPending || remove.isPending
+  return (
+    <div className={compact ? 'run-actions run-actions--compact' : 'run-actions'}>
+      <div className="run-actions__buttons">
+        {status === 'failed' ? (
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={pending}
+            onClick={() => recovery.mutate('retry')}
+          >
+            {recovery.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : (
+              <RefreshCcw size={15} aria-hidden="true" />
+            )}
+            {t('projects.retryRun')}
+          </button>
+        ) : null}
+        {status === 'interrupted' ? (
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={pending}
+            onClick={() => recovery.mutate('resume')}
+          >
+            {recovery.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : (
+              <RefreshCcw size={15} aria-hidden="true" />
+            )}
+            {t('projects.resumeRun')}
+          </button>
+        ) : null}
+        {['complete', 'completed'].includes(status) ? (
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={pending}
+            onClick={() => recovery.mutate('runAgain')}
+          >
+            {recovery.isPending ? (
+              <LoaderCircle className="spin" size={15} aria-hidden="true" />
+            ) : (
+              <Repeat2 size={15} aria-hidden="true" />
+            )}
+            {t('projects.runAgain')}
+          </button>
+        ) : null}
+        <button
+          className={deleteArmed ? 'button button--danger' : 'button button--secondary'}
+          type="button"
+          disabled={pending}
+          aria-label={
+            deleteArmed
+              ? t('projects.confirmDeleteRun', { sequence: run.sequence })
+              : t('projects.deleteRun', { sequence: run.sequence })
+          }
+          onClick={() => {
+            recovery.reset()
+            if (deleteArmed) remove.mutate()
+            else setDeleteArmed(true)
+          }}
+        >
+          {remove.isPending ? (
+            <LoaderCircle className="spin" size={15} aria-hidden="true" />
+          ) : (
+            <Trash2 size={15} aria-hidden="true" />
+          )}
+          {deleteArmed ? t('projects.confirmDelete') : t('projects.delete')}
+        </button>
+      </div>
+      {deleteArmed && !remove.isPending ? (
+        <small className="run-actions__confirm">{t('projects.deleteRunAgain')}</small>
+      ) : null}
+      {recovery.isError ? <OperationProblem error={recovery.error} /> : null}
+      {remove.isError ? <OperationProblem error={remove.error} /> : null}
+    </div>
+  )
+}
+
+export function ProjectRuns() {
+  const { t, i18n } = useTranslation('common')
   const { workspace } = useProjectContext()
+  const { isConnected } = useEventStream()
   const projectId = workspace.project.project_id
   const runsQuery = useQuery({
     queryKey: ['project-runs', projectId],
     queryFn: () => api.runs.list(projectId),
     enabled: Boolean(projectId),
     refetchInterval: (query) => {
+      if (isConnected) return false
       const value = query.state.data
       return value && hasActiveRun(collectionItems(value)) ? 2000 : false
     },
@@ -695,24 +888,38 @@ export function ProjectRuns() {
         </section>
       ) : (
         <div className="history-list">
-          {runs.map(({ run, execution }) => {
+          {runs.map(({ run, execution, model_usage_total: usage }) => {
             const active = isRunExecutionActive(run.status, execution)
             return (
-              <Link
-                className="history-list__link run-list-card"
-                key={run.run_id}
-                to={appRoutes.runDetail(projectId, run.run_id)}
-              >
-                <span className="run-list-card__header">
-                  <strong>
-                    {t('projects.runSequence', { sequence: run.sequence })}
-                  </strong>
-                  <StatusBadge status={executionStatus(run.status, execution)} />
-                </span>
-                {active ? (
-                  <AsterProgress compact execution={execution} runStatus={run.status} />
-                ) : null}
-              </Link>
+              <article className="run-list-item" key={run.run_id}>
+                <Link
+                  className="history-list__link run-list-card"
+                  to={appRoutes.runDetail(projectId, run.run_id)}
+                >
+                  <span className="run-list-card__header">
+                    <strong>
+                      {t('projects.runSequence', { sequence: run.sequence })}
+                    </strong>
+                    <StatusBadge status={executionStatus(run.status, execution)} />
+                  </span>
+                  {active ? (
+                    <AsterProgress
+                      compact
+                      execution={execution}
+                      runStatus={run.status}
+                    />
+                  ) : null}
+                  {usage && usage.request_count > 0 ? (
+                    <span className="run-list-card__usage">
+                      {t('projects.usageCompact', {
+                        tokens: formatNumber(usage.total_tokens, i18n.language),
+                        cost: formatCost(usage.total_cost_yuan, i18n.language),
+                      })}
+                    </span>
+                  ) : null}
+                </Link>
+                <RunActions run={run} execution={execution} compact />
+              </article>
             )
           })}
         </div>
@@ -722,70 +929,19 @@ export function ProjectRuns() {
 }
 
 export function ProjectOutputs() {
-  const { t } = useTranslation('common')
-  const { workspace } = useProjectContext()
-  return (
-    <CollectionPage
-      icon={PlaySquare}
-      title={t('projects.outputs')}
-      empty={t('projects.noOutputs')}
-      items={workspace.outputs ?? []}
-    />
-  )
-}
-
-function CollectionPage({
-  icon: Icon,
-  title,
-  empty,
-  items,
-}: {
-  icon: LucideIcon
-  title: string
-  empty: string
-  items: Array<{
-    status: string
-    run_id?: string
-    render_id?: string
-    variant_id?: string
-  }>
-}) {
-  const { t } = useTranslation('common')
-  return (
-    <div className="project-section">
-      <header className="section-header">
-        <div>
-          <span className="eyebrow">{t('projects.immutableHistory')}</span>
-          <h2>{title}</h2>
-        </div>
-      </header>
-      {items.length === 0 ? (
-        <section className="empty-panel">
-          <Icon size={28} />
-          <h3>{empty}</h3>
-        </section>
-      ) : (
-        <div className="history-list">
-          {items.map((item) => (
-            <article key={item.run_id ?? item.render_id ?? item.variant_id}>
-              <span>{item.run_id ?? item.render_id ?? item.variant_id}</span>
-              <StatusBadge status={item.status} />
-            </article>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+  return <ProjectOutputsView />
 }
 
 export function RunDetail() {
   const { t } = useTranslation('common')
   const { runId = '' } = useParams()
+  const { isConnected } = useEventStream()
   const detail = useQuery({
     queryKey: ['run', runId],
     queryFn: () => api.runs.get(runId),
     enabled: Boolean(runId),
     refetchInterval: (query) => {
+      if (isConnected) return false
       const value = query.state.data
       return value && isRunExecutionActive(value.run.status, value.execution)
         ? 2000
@@ -818,15 +974,23 @@ export function RunDetail() {
           <strong>{detail.data.frozen_edits.length}</strong>
         </article>
       </section>
+      {detail.data.model_usage ? (
+        <RunUsagePanel modelUsage={detail.data.model_usage} />
+      ) : null}
       {run.failure_message ? (
         <section className="run-failure">
           <h3>{t('common.errorTitle')}</h3>
-          <p>{run.failure_message}</p>
+          <ExecutionFailure
+            operationType="aster_planning"
+            ownerType="run"
+            status={run.status}
+          />
         </section>
       ) : null}
       {active || ['complete', 'completed'].includes(run.status) ? (
         <AsterProgress execution={execution} runStatus={run.status} />
       ) : null}
+      <RunActions run={run} execution={execution} />
       {detail.data.frozen_edits.length > 0 ? (
         <div className="history-list">
           {detail.data.frozen_edits.map((edit) => (
@@ -842,5 +1006,149 @@ export function RunDetail() {
         </div>
       ) : null}
     </div>
+  )
+}
+
+function RunUsagePanel({ modelUsage }: { modelUsage: RunModelUsage }) {
+  const { t, i18n } = useTranslation('common')
+  const total = modelUsage.run_total
+  const modelEntries = Object.entries(total.by_model)
+  const taskEntries = Object.entries(total.by_task)
+  return (
+    <section className="run-usage" aria-labelledby="run-usage-title">
+      <header className="run-usage__header">
+        <div>
+          <span className="eyebrow">ASTER</span>
+          <h3 id="run-usage-title">{t('projects.usageTitle')}</h3>
+          <p>{t('projects.usageSubtitle')}</p>
+        </div>
+        <strong>{formatCost(total.total_cost_yuan, i18n.language)}</strong>
+      </header>
+      <div className="run-usage__metrics">
+        <UsageMetric label={t('projects.usageRequests')} value={total.request_count} />
+        <UsageMetric
+          label={t('projects.usageReportedRequests')}
+          value={total.reported_usage_count}
+        />
+        <UsageMetric
+          label={t('projects.usageUnreported')}
+          value={total.unreported_usage_count}
+        />
+        <UsageMetric
+          label={t('projects.usageTokens')}
+          value={formatNumber(total.total_tokens, i18n.language)}
+        />
+        <UsageMetric
+          label={t('projects.usageCost')}
+          value={formatCost(total.total_cost_yuan, i18n.language)}
+        />
+      </div>
+      {total.unreported_usage_count > 0 ? (
+        <p className="run-usage__notice" role="status">
+          {t('projects.usageUnreportedNotice', {
+            count: total.unreported_usage_count,
+          })}
+        </p>
+      ) : null}
+      {total.unpriced_usage_count > 0 ? (
+        <p className="run-usage__notice" role="status">
+          {t('projects.usageUnpricedNotice', {
+            count: total.unpriced_usage_count,
+          })}
+        </p>
+      ) : null}
+      <section className="run-usage__attempts">
+        <h4>{t('projects.usageAttempts')}</h4>
+        <div>
+          {modelUsage.attempt_usage.map((attempt) => {
+            const summary = attempt.model_usage_summary
+            return (
+              <article key={attempt.attempt_id}>
+                <header>
+                  <strong>
+                    {t('projects.usageAttempt', { sequence: attempt.sequence })}
+                  </strong>
+                  <StatusBadge status={attempt.status} />
+                </header>
+                {summary ? (
+                  summary.request_count === 0 ? (
+                    <small>{t('projects.usageNoRequests')}</small>
+                  ) : (
+                    <>
+                      <span>
+                        {t('projects.usageBreakdown', {
+                          requests: summary.request_count,
+                          tokens: formatNumber(summary.total_tokens, i18n.language),
+                          cost: formatCost(summary.total_cost_yuan, i18n.language),
+                        })}
+                      </span>
+                      <small>
+                        {t('projects.usageReported', {
+                          reported: summary.reported_usage_count,
+                          total: summary.request_count,
+                        })}
+                      </small>
+                    </>
+                  )
+                ) : (
+                  <small>
+                    {['queued', 'running', 'retrying', 'stopping'].includes(
+                      attempt.status.toLowerCase(),
+                    )
+                      ? t('projects.usagePending')
+                      : t('projects.usageUnavailable')}
+                  </small>
+                )}
+              </article>
+            )
+          })}
+        </div>
+      </section>
+      {modelEntries.length > 0 || taskEntries.length > 0 ? (
+        <div className="run-usage__groups">
+          <UsageBreakdown title={t('projects.usageByModel')} items={modelEntries} />
+          <UsageBreakdown title={t('projects.usageByTask')} items={taskEntries} />
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function UsageMetric({ label, value }: { label: string; value: number | string }) {
+  return (
+    <article>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  )
+}
+
+function UsageBreakdown({
+  title,
+  items,
+}: {
+  title: string
+  items: Array<[string, ModelUsageBucket]>
+}) {
+  const { t, i18n } = useTranslation('common')
+  if (items.length === 0) return null
+  return (
+    <section>
+      <h4>{title}</h4>
+      <div>
+        {items.map(([name, usage]) => (
+          <article key={name}>
+            <strong>{name}</strong>
+            <span>
+              {t('projects.usageBreakdown', {
+                requests: usage.request_count,
+                tokens: formatNumber(usage.total_tokens, i18n.language),
+                cost: formatCost(usage.total_cost_yuan, i18n.language),
+              })}
+            </span>
+          </article>
+        ))}
+      </div>
+    </section>
   )
 }

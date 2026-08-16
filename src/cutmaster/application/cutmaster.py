@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from threading import RLock
@@ -21,7 +22,9 @@ from cutmaster.configuration.effective import (
     load_effective_configuration,
 )
 from cutmaster.domain.ids import MaterialId
-
+from cutmaster.infrastructure.storage.local.data_root_coordination import (
+    LocalDataRootCoordinator,
+)
 
 _Service = TypeVar("_Service")
 
@@ -31,17 +34,30 @@ class _ApplicationMaterialReferenceChecker:
 
     __slots__ = ("_application",)
 
-    def __init__(self, application: "CutMasterApplication") -> None:
+    def __init__(self, application: CutMasterApplication) -> None:
         self._application = application
 
     def references(self, material_id: MaterialId) -> Sequence[str]:
-        return self._application.projects.references(material_id)
+        managed = tuple(self._application.projects.references(material_id))
+        active_attempts = tuple(
+            f"attempt:{attempt_id}:active"
+            for attempt_id in self._application.jobs.active_material_attempt_ids(
+                material_id
+            )
+        )
+        return (*managed, *active_attempts)
 
 
 class CutMasterApplication:
     """Wire configuration and lazily constructed Application service groups."""
 
-    __slots__ = ("_effective_configuration", "_service_lock", "_services")
+    __slots__ = (
+        "_effective_configuration",
+        "_data_root_coordinator",
+        "_process_environment_names",
+        "_service_lock",
+        "_services",
+    )
 
     _CONSTRUCTION_TOKEN = object()
 
@@ -49,6 +65,7 @@ class CutMasterApplication:
         self,
         effective_configuration: EffectiveConfiguration,
         *,
+        _process_environment_names: frozenset[str] = frozenset(),
         _token: object | None = None,
     ) -> None:
         if _token is not self._CONSTRUCTION_TOKEN:
@@ -56,6 +73,8 @@ class CutMasterApplication:
         if not isinstance(effective_configuration, EffectiveConfiguration):
             raise TypeError("effective_configuration must be EffectiveConfiguration")
         self._effective_configuration = effective_configuration
+        self._data_root_coordinator = LocalDataRootCoordinator(effective_configuration)
+        self._process_environment_names = _process_environment_names
         self._service_lock = RLock()
         self._services: dict[str, object] = {}
 
@@ -68,8 +87,16 @@ class CutMasterApplication:
 
         resolved_config_path = Path(config_path).expanduser().resolve()
         effective_configuration = load_effective_configuration(resolved_config_path)
+        # Capture names, never values, before dotenv loading.  This preserves
+        # process precedence even when Custom later points at another existing
+        # environment variable.
+        process_environment_names = frozenset(os.environ)
         load_dotenv(effective_configuration.sources.dotenv_path, override=False)
-        return cls(effective_configuration, _token=cls._CONSTRUCTION_TOKEN)
+        return cls(
+            effective_configuration,
+            _process_environment_names=process_environment_names,
+            _token=cls._CONSTRUCTION_TOKEN,
+        )
 
     def _get_service(
         self,
@@ -90,6 +117,7 @@ class CutMasterApplication:
             lambda: DirectService(
                 self._effective_configuration,
                 self.materials,
+                self._data_root_coordinator,
             ),
         )
 
@@ -100,6 +128,7 @@ class CutMasterApplication:
             lambda: MaterialsService(
                 self._effective_configuration,
                 reference_checker=_ApplicationMaterialReferenceChecker(self),
+                data_root_coordinator=self._data_root_coordinator,
             ),
         )
 
@@ -110,6 +139,7 @@ class CutMasterApplication:
             lambda: ProjectsService(
                 self._effective_configuration,
                 materials=self.materials,
+                data_root_coordinator=self._data_root_coordinator,
             ),
         )
 
@@ -121,6 +151,7 @@ class CutMasterApplication:
                 self._effective_configuration,
                 materials=self.materials,
                 renders=self.renders,
+                data_root_coordinator=self._data_root_coordinator,
             ),
         )
 
@@ -128,22 +159,39 @@ class CutMasterApplication:
     def renders(self) -> RendersService:
         return self._get_service(
             "renders",
-            lambda: RendersService(self._effective_configuration),
+            lambda: RendersService(
+                self._effective_configuration,
+                materials=self.materials,
+                data_root_coordinator=self._data_root_coordinator,
+            ),
         )
 
     @property
     def jobs(self) -> JobsService:
         return self._get_service(
             "jobs",
-            lambda: JobsService(self._effective_configuration),
+            lambda: JobsService(
+                self._effective_configuration,
+                data_root_coordinator=self._data_root_coordinator,
+            ),
         )
 
     @property
     def settings(self) -> SettingsService:
         return self._get_service(
             "settings",
-            lambda: SettingsService(self._effective_configuration),
+            lambda: SettingsService(
+                self._effective_configuration,
+                process_environment_names=self._process_environment_names,
+                data_root_coordinator=self._data_root_coordinator,
+            ),
         )
+
+    @property
+    def data_root_coordinator(self) -> LocalDataRootCoordinator:
+        """Return the process-local adapter for the stable root authority."""
+
+        return self._data_root_coordinator
 
 
 __all__ = ["CutMasterApplication"]

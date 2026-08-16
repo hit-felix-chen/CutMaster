@@ -1,14 +1,14 @@
 # Protect referenced Materials from deletion
 
-**Status: Backend reference checks implemented; Web confirmation flow proposed.**
+**Status: Backend reference checks, cascades, and Web confirmation flows
+implemented.**
 
 The frontend may delete a Material only after the user removes every current
 project selection and explicitly deletes every ASTER Run that references it.
 There is no force-delete path: deleting a Run cascades to its Frozen Edits and
 Render Variants, Attempts, jobs, Activity records, and other SQLite-owned state
 but preserves the Edit Project. Deleting corresponding managed logs and
-artifacts is part of the proposed worker/artifact-store integration and is not
-performed by the current Run deletion service. This keeps historical plans
+artifacts is part of the implemented owner-aware deletion cascade. This keeps historical plans
 reproducible and rerenderable without forcing users to delete an entire project
 just to release one Material.
 

@@ -11,21 +11,21 @@ from typing import Any
 
 import cv2
 
+from cutmaster.configuration.schema import SceneSegmentationConfig, VLMConfig
+from cutmaster.infrastructure.observability.logging import log_event
+from cutmaster.infrastructure.observability.progress import progress_bar
 from cutmaster.workflow.analyser.tools.cache import (
     read_json_checkpoint,
     write_json_checkpoint,
 )
-from cutmaster.configuration.schema import SceneSegmentationConfig, VLMConfig
 from cutmaster.workflow.contracts.video import SpeechMode, TimelineRole
+from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.workflow.prompting.analyser import (
     SCENE_BOUNDARY_PROMPT_VERSION,
     SceneBoundaryDetectionDetails,
 )
-from cutmaster.infrastructure.observability.logging import log_event
-from cutmaster.infrastructure.observability.progress import progress_bar
 from cutmaster.workflow.shared.execution_context import WorkflowContext
-
 
 _FRAME_MAX_SIDE = 640
 _FRAME_JPEG_QUALITY = 85
@@ -79,8 +79,7 @@ def _frame_times(shot: dict[str, Any], count: int) -> list[float]:
     end = float(shot["time_range"]["end_sec"])
     duration = end - start
     return [
-        round(start + duration * (index + 0.5) / count, 6)
-        for index in range(count)
+        round(start + duration * (index + 0.5) / count, 6) for index in range(count)
     ]
 
 
@@ -138,8 +137,10 @@ def prepare_scene_frames(
     shots: list[dict[str, Any]],
     config: SceneSegmentationConfig,
     frame_directory: Path,
+    cancellation_token: CancellationToken | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Persist three labelled Scene-VLM frames per Shot for resumable reuse."""
+    raise_if_cancelled(cancellation_token)
     frame_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = frame_directory / "manifest.json"
     manifest = read_json_checkpoint(manifest_path)
@@ -163,11 +164,7 @@ def prepare_scene_frames(
                     "time_sec": time_sec,
                 }
             )
-            if (
-                force_rebuild
-                or not path.is_file()
-                or path.stat().st_size <= 0
-            ):
+            if force_rebuild or not path.is_file() or path.stat().st_size <= 0:
                 missing += 1
     if missing == 0:
         log_event(
@@ -191,6 +188,7 @@ def prepare_scene_frames(
             unit="shot",
         ) as progress:
             for shot in progress:
+                raise_if_cancelled(cancellation_token)
                 shot_id = str(shot["shot_id"])
                 previous_path: Path | None = None
                 for frame_index, sample in enumerate(expected[shot_id], 1):
@@ -238,6 +236,7 @@ def prepare_scene_frames(
                     ):
                         raise RuntimeError(f"Could not write Scene-VLM frame: {output}")
                     previous_path = output
+                raise_if_cancelled(cancellation_token)
     finally:
         capture.release()
     write_json_checkpoint(
@@ -249,13 +248,13 @@ def prepare_scene_frames(
             "shots": expected,
         },
     )
+    raise_if_cancelled(cancellation_token)
     return expected
 
 
 def _data_url(path: Path) -> str:
-    return (
-        "data:image/jpeg;base64,"
-        + base64.b64encode(path.read_bytes()).decode("ascii")
+    return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode(
+        "ascii"
     )
 
 
@@ -310,8 +309,10 @@ def detect_scene_boundaries(
     scene_config: SceneSegmentationConfig,
     frame_directory: Path,
     checkpoint_directory: Path,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[dict[str, Any]]:
     """Run context-focus Scene boundary classification with window checkpoints."""
+    raise_if_cancelled(cancellation_token)
     windows = build_scene_windows(len(shots), scene_config)
     if not windows:
         return []
@@ -321,6 +322,7 @@ def detect_scene_boundaries(
         shots,
         scene_config,
         frame_directory,
+        cancellation_token,
     )
     contextual_shots = _shots_with_dialogue(shots, dialogue)
     progress = progress_bar(
@@ -330,10 +332,10 @@ def detect_scene_boundaries(
     )
 
     def process(window: SceneWindow) -> list[dict[str, Any]]:
+        raise_if_cancelled(cancellation_token)
         window_shots = [contextual_shots[index] for index in window.context_indexes]
         focus_shot_ids = [
-            str(contextual_shots[index]["shot_id"])
-            for index in window.focus_indexes
+            str(contextual_shots[index]["shot_id"]) for index in window.focus_indexes
         ]
         package = prompt_registry.build(
             PromptStage.ANALYSER,
@@ -368,6 +370,7 @@ def detect_scene_boundaries(
             except ValueError:
                 decisions = None
         if decisions is None:
+            raise_if_cancelled(cancellation_token)
             image_data_urls = [
                 _data_url(Path(sample["path"]))
                 for shot in window_shots
@@ -405,13 +408,14 @@ def detect_scene_boundaries(
                     "prompt_version": package.prompt_version,
                     "prompt_fingerprint": package.fingerprint,
                     "contract_fingerprint": package.response_contract.fingerprint,
-                    "context_shot_ids": [
-                        str(shot["shot_id"]) for shot in window_shots
-                    ],
+                    "context_shot_ids": [str(shot["shot_id"]) for shot in window_shots],
                     "focus_shot_ids": focus_shot_ids,
                     "response": {"decisions": decisions},
                 },
             )
+            raise_if_cancelled(cancellation_token)
+        else:
+            raise_if_cancelled(cancellation_token)
         progress.update()
         return decisions
 
@@ -440,8 +444,11 @@ def detect_scene_boundaries(
     finally:
         progress.close()
     expected_ids = [str(shot["shot_id"]) for shot in shots[:-1]]
+    raise_if_cancelled(cancellation_token)
     if [decision["shot_id"] for decision in decisions] != expected_ids:
-        raise ValueError("Aggregated Scene decisions do not cover every Shot exactly once")
+        raise ValueError(
+            "Aggregated Scene decisions do not cover every Shot exactly once"
+        )
     return decisions
 
 
@@ -453,11 +460,11 @@ def build_segments_from_scene_boundaries(
     """Create a full Shot partition from validated Scene-end decisions."""
     expected_decision_ids = [str(shot["shot_id"]) for shot in shots[:-1]]
     if [str(item["shot_id"]) for item in decisions] != expected_decision_ids:
-        raise ValueError("Scene decisions must cover all non-final Shots in source order")
+        raise ValueError(
+            "Scene decisions must cover all non-final Shots in source order"
+        )
     scene_end_ids = {
-        str(item["shot_id"])
-        for item in decisions
-        if bool(item["is_scene_end"])
+        str(item["shot_id"]) for item in decisions if bool(item["is_scene_end"])
     }
     dialogue_by_shot: dict[str, list[dict[str, Any]]] = {
         str(shot["shot_id"]): [] for shot in shots
@@ -505,12 +512,8 @@ def build_segments_from_scene_boundaries(
             {
                 "segment_id": f"segment_{segment_index:04d}",
                 "time_range": {
-                    "start_sec": float(
-                        segment_shots[0]["time_range"]["start_sec"]
-                    ),
-                    "end_sec": float(
-                        segment_shots[-1]["time_range"]["end_sec"]
-                    ),
+                    "start_sec": float(segment_shots[0]["time_range"]["start_sec"]),
+                    "end_sec": float(segment_shots[-1]["time_range"]["end_sec"]),
                 },
                 "has_dialogue": bool(ordered_dialogue),
                 "speech_mode": speech_mode,

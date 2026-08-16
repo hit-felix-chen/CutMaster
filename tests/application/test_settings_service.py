@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from cutmaster.application.settings import SaveSettingsCommand, SettingsService
+from cutmaster.application.errors import StorageRevealUnavailableError
+from cutmaster.application.settings import (
+    CredentialUpdate,
+    ProbeProviderConnectionCommand,
+    SaveProviderSettingsCommand,
+    SaveSettingsCommand,
+    SettingsService,
+)
+from cutmaster.application.settings.provider_connections import ProviderProbe
 from cutmaster.configuration.effective import EffectiveConfiguration
+from cutmaster.infrastructure.persistence.sqlite import IdempotencyConflict
 
 
 def command_id() -> str:
@@ -94,3 +105,276 @@ def test_storage_report_counts_real_managed_categories(
     assert categories["logs"].size_bytes == 3
     assert categories["database"].file_count == 0
     assert report.total_size_bytes == sum(item.size_bytes for item in report.categories)
+
+
+def test_storage_reveal_opens_only_the_fixed_data_root_once_per_command(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    opened: list[Path] = []
+    service = SettingsService(
+        managed_configuration,
+        storage_revealer=opened.append,
+        reveal_supported=True,
+    )
+    identifier = command_id()
+
+    first = service.reveal_data_root(identifier)
+    replay = service.reveal_data_root(identifier)
+
+    assert first.opened and replay.opened
+    assert opened == [managed_configuration.data_root]
+
+
+def test_storage_reveal_is_explicitly_unavailable_on_unsupported_hosts(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    service = SettingsService(managed_configuration, reveal_supported=False)
+
+    with pytest.raises(StorageRevealUnavailableError):
+        service.reveal_data_root(command_id())
+
+
+def test_macos_storage_reveal_invokes_open_without_a_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cutmaster.application.settings.service as service_module
+
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **options: object) -> None:
+        calls.append((command, options))
+
+    monkeypatch.setattr(service_module.sys, "platform", "darwin")
+    monkeypatch.setattr(service_module.subprocess, "run", run)
+
+    service_module._reveal_in_file_manager(tmp_path)
+
+    assert calls[0][0] == ["open", str(tmp_path)]
+    assert "shell" not in calls[0][1]
+    assert calls[0][1]["check"] is True
+    assert calls[0][1]["close_fds"] is True
+
+
+def _credentials(
+    *,
+    llm: CredentialUpdate | None = None,
+    vlm: CredentialUpdate | None = None,
+    asr: CredentialUpdate | None = None,
+) -> dict[str, CredentialUpdate]:
+    return {
+        "llm": llm or CredentialUpdate("keep"),
+        "vlm": vlm or CredentialUpdate("keep"),
+        "asr": asr or CredentialUpdate("keep"),
+    }
+
+
+def test_provider_projection_derives_preset_without_exposing_secret(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    view = SettingsService(managed_configuration).get()
+
+    assert view.connections.profile == "cost_saving"
+    assert view.connections.providers["llm"]["model"] == "deepseek-v4-flash"
+    assert view.connections.credentials["llm"].source == "none"
+    assert view.connections.credentials["llm"].suffix is None
+
+
+def test_provider_save_writes_one_shared_dotenv_secret_with_mode_0600(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    service = SettingsService(managed_configuration)
+    secret = "dashscope-secret-value"
+
+    saved = service.save_providers(
+        SaveProviderSettingsCommand(
+            command_id(),
+            "simple",
+            None,
+            _credentials(
+                llm=CredentialUpdate("set", secret),
+                vlm=CredentialUpdate("set", secret),
+                asr=CredentialUpdate("set", secret),
+            ),
+        )
+    )
+
+    dotenv = managed_configuration.sources.dotenv_path
+    assert dotenv.read_text(encoding="utf-8") == (
+        'DASHSCOPE_API_KEY="dashscope-secret-value"\n'
+    )
+    assert dotenv.stat().st_mode & 0o777 == 0o600
+    assert saved.settings.connections.profile == "simple"
+    assert saved.settings.connections.credentials["llm"].suffix == "alue"
+    assert set(saved.credential_results.values()) == {"set"}
+
+
+def test_provider_receipt_has_no_secret_verifier_and_repairs_dotenv_mode(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    service = SettingsService(managed_configuration)
+    dotenv = managed_configuration.sources.dotenv_path
+    secret = "same-secret"
+    dotenv.write_text(f'DEEPSEEK_API_KEY="{secret}"\n', encoding="utf-8")
+    dotenv.chmod(0o644)
+
+    service.save_providers(
+        SaveProviderSettingsCommand(
+            command_id(),
+            "cost_saving",
+            None,
+            _credentials(llm=CredentialUpdate("set", secret)),
+        )
+    )
+
+    assert dotenv.stat().st_mode & 0o777 == 0o600
+    with sqlite3.connect(
+        managed_configuration.data_root / "cutmaster.db"
+    ) as connection:
+        request_digest, result_json = connection.execute(
+            """
+            SELECT request_digest, result_json
+            FROM idempotency_receipts
+            WHERE command_kind = 'settings.providers.save'
+            """
+        ).fetchone()
+    assert secret not in result_json
+    assert hashlib.sha256(secret.encode("utf-8")).hexdigest() not in result_json
+    assert request_digest != hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def test_provider_save_is_idempotent_and_detects_secret_request_drift(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    service = SettingsService(managed_configuration)
+    identifier = command_id()
+    command = SaveProviderSettingsCommand(
+        identifier,
+        "cost_saving",
+        None,
+        _credentials(llm=CredentialUpdate("set", "first-secret")),
+    )
+
+    first = service.save_providers(command)
+    replay = service.save_providers(command)
+
+    assert replay.credential_results == first.credential_results
+    with pytest.raises(IdempotencyConflict):
+        service.save_providers(
+            SaveProviderSettingsCommand(
+                identifier,
+                "cost_saving",
+                None,
+                _credentials(llm=CredentialUpdate("set", "different-secret")),
+            )
+        )
+
+
+def test_process_secret_is_locked_without_blocking_public_provider_save(
+    managed_configuration: EffectiveConfiguration,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "process-secret")
+    service = SettingsService(
+        managed_configuration,
+        process_environment_names=frozenset({"DEEPSEEK_API_KEY"}),
+    )
+    providers = {
+        name: dict(value) for name, value in service.get().connections.providers.items()
+    }
+    providers["llm"]["model"] = "deepseek-custom"
+
+    saved = service.save_providers(
+        SaveProviderSettingsCommand(
+            command_id(),
+            "custom",
+            providers,
+            _credentials(llm=CredentialUpdate("set", "ignored-secret")),
+        )
+    )
+
+    assert saved.settings.connections.providers["llm"]["model"] == "deepseek-custom"
+    assert saved.credential_results["llm"] == "process_locked"
+    assert not managed_configuration.sources.dotenv_path.exists()
+    assert saved.settings.connections.credentials["llm"].source == "process"
+    assert saved.settings.connections.credentials["llm"].writable is False
+
+
+def test_provider_save_rolls_back_dotenv_when_overlay_write_fails(
+    managed_configuration: EffectiveConfiguration,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cutmaster.application.settings.service as service_module
+
+    dotenv = managed_configuration.sources.dotenv_path
+    dotenv.write_text("KEEP=value\n", encoding="utf-8")
+    before = dotenv.read_bytes()
+    real_atomic_write = service_module._atomic_write
+
+    def fail_overlay(path: Path, content: str) -> None:
+        if path == managed_configuration.sources.overlay_path:
+            raise OSError("injected overlay failure")
+        real_atomic_write(path, content)
+
+    monkeypatch.setattr(service_module, "_atomic_write", fail_overlay)
+    service = SettingsService(managed_configuration)
+
+    with pytest.raises(OSError, match="injected"):
+        service.save_providers(
+            SaveProviderSettingsCommand(
+                command_id(),
+                "cost_saving",
+                None,
+                _credentials(llm=CredentialUpdate("set", "new-secret")),
+            )
+        )
+
+    assert dotenv.read_bytes() == before
+    assert not managed_configuration.sources.overlay_path.exists()
+
+
+def test_atomic_write_and_both_restore_paths_fsync_the_parent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cutmaster.application.settings.service as service_module
+
+    target = tmp_path / ".env"
+    synced: list[Path] = []
+    monkeypatch.setattr(service_module, "_fsync_directory", synced.append)
+
+    service_module._atomic_write(target, "API_KEY=updated\n")
+    service_module._restore_file(target, b"API_KEY=previous\n")
+    service_module._restore_file(target, None)
+
+    assert synced == [tmp_path, tmp_path, tmp_path]
+    assert not target.exists()
+
+
+def test_connection_test_uses_ephemeral_candidate_without_persisting(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    probes: list[ProviderProbe] = []
+
+    def tester(probe: ProviderProbe) -> float:
+        probes.append(probe)
+        return 12.34
+
+    service = SettingsService(managed_configuration, connection_tester=tester)
+    configuration = dict(service.get().connections.providers["llm"])
+    configuration["model"] = "ephemeral-model"
+
+    result = service.test_provider(
+        ProbeProviderConnectionCommand(
+            "llm",
+            configuration,
+            "ephemeral-secret",
+        )
+    )
+
+    assert result.status == "connected"
+    assert result.latency_ms == 12.3
+    assert probes[0].api_key == "ephemeral-secret"
+    assert probes[0].configuration["model"] == "ephemeral-model"
+    assert not managed_configuration.sources.overlay_path.exists()
+    assert not managed_configuration.sources.dotenv_path.exists()

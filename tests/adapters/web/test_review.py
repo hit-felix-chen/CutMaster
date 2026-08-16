@@ -58,6 +58,28 @@ def review_fixture(
     music_source.write_bytes(b"fixture-music")
     video = application.materials.add(video_source, "video", "Review Video")
     music = application.materials.add(music_source, "music", "Review Music")
+    for material in (video, music):
+        with application.materials.lease(material.material_id) as binding:
+            if binding.material.material_type.value == "music":
+                (binding.memory_root / "music_memory.json").write_text(
+                    json.dumps({"source_duration_sec": 180.0}),
+                    encoding="utf-8",
+                )
+            staged = tmp_path / f"{material.material_id}-analysis-result.json"
+            staged.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "2.0",
+                        "status": "success",
+                        "material_id": str(binding.material.material_id),
+                        "material_type": binding.material.material_type.value,
+                        "material_name": binding.material.name,
+                        "material_fingerprint": str(binding.material.fingerprint),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            application.materials.publish_analysis_result(binding, staged)
     application.projects.set_materials(
         SetProjectMaterialsCommand(
             _command_id(),
@@ -93,9 +115,7 @@ def review_fixture(
         source_start = float((index - 1) * 10)
         output_start = float((index - 1) * 2)
         selected_id = (
-            f"{slot_id}_dialogue_anchor"
-            if index == 1
-            else f"{slot_id}_candidate_01"
+            f"{slot_id}_dialogue_anchor" if index == 1 else f"{slot_id}_candidate_01"
         )
         anchor = (
             {
@@ -257,43 +277,34 @@ def _publish_bundle(fixture: ReviewFixture) -> Path:
     return manifest
 
 
-def test_historical_edit_without_bundle_is_complete_read_only_review(
+def test_frozen_edit_without_candidate_bundle_is_unavailable(
     review_fixture: ReviewFixture,
 ) -> None:
     response = review_fixture.client.get(
         f"/api/frozen-edits/{review_fixture.edit_id}/review"
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["edit"]["edit_id"] == str(review_fixture.edit_id)
-    assert payload["candidate_space_available"] is False
-    assert payload["candidate_space_unavailable_reason"] == "not_persisted"
-    assert len(payload["slots"]) == 15
-    assert payload["slots"][0]["is_anchor"] is True
-    assert payload["timeline"]["dialogue_cues"] == [
-        {
-            "slot_id": "slot_01",
-            "start_sec": 0.0,
-            "end_sec": 2.0,
-            "text": "The story begins.",
-            "speaker": "Speaker 1",
-        }
-    ]
-    assert all(
-        len(items) == 1 and items[0]["selected"] is True
-        and items[0]["eligible_for_replacement"] is False
-        for items in payload["candidates"].values()
+    assert response.status_code == 409
+    assert response.json()["code"] == "review_artifact_unavailable"
+
+
+def test_guided_revision_without_candidate_bundle_is_unavailable_and_atomic(
+    review_fixture: ReviewFixture,
+) -> None:
+    response = review_fixture.client.post(
+        f"/api/frozen-edits/{review_fixture.edit_id}/revisions",
+        headers={"Idempotency-Key": _command_id()},
+        json={
+            "replacements": [
+                {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}
+            ]
+        },
     )
-    serialized = json.dumps(payload, sort_keys=True)
-    assert "a" * 64 not in serialized
-    assert "b" * 64 not in serialized
-    assert str(review_fixture.plan_path) not in serialized
-    assert "plan_relative_path" not in serialized
-    assert "expected_fingerprint" not in serialized
-    assert "specification_digest" not in serialized
-    assert "master_sha256" not in serialized
-    assert "master_relative_path" not in serialized
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "review_artifact_unavailable"
+    source = review_fixture.application.runs.get_frozen_edit(review_fixture.edit_id)
+    assert len(review_fixture.application.runs.list_frozen_edits(source.run_id)) == 1
 
 
 def test_committed_review_bundle_exposes_only_real_validated_candidates(
@@ -307,8 +318,8 @@ def test_committed_review_bundle_exposes_only_real_validated_candidates(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["candidate_space_available"] is True
-    assert payload["candidate_space_unavailable_reason"] is None
+    assert "candidate_space_available" not in payload
+    assert "candidate_space_unavailable_reason" not in payload
     selected, alternative, late = payload["candidates"]["slot_02"]
     assert selected["candidate_id"] == "slot_02_candidate_01"
     assert selected["selected"] is True
@@ -320,17 +331,31 @@ def test_committed_review_bundle_exposes_only_real_validated_candidates(
     assert alternative["media_url"].endswith("/source")
     assert late["candidate_id"] == "slot_02_candidate_late"
     assert payload["variants"] == []
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "a" * 64 not in serialized
+    assert "b" * 64 not in serialized
+    assert str(review_fixture.plan_path) not in serialized
+    assert "plan_relative_path" not in serialized
+    assert "expected_fingerprint" not in serialized
+    assert "specification_digest" not in serialized
+    assert "master_sha256" not in serialized
+    assert "master_relative_path" not in serialized
 
 
 def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
     review_fixture: ReviewFixture,
 ) -> None:
     _publish_bundle(review_fixture)
+    preview_submissions = []
+
+    class PreviewDispatcher:
+        def dispatch(self, submission) -> None:
+            preview_submissions.append(submission)
+
+    review_fixture.client.app.state.cutmaster_render_dispatcher = PreviewDispatcher()
     command_id = _command_id()
     request = {
-        "replacements": [
-            {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}
-        ]
+        "replacements": [{"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}]
     }
 
     first = review_fixture.client.post(
@@ -354,10 +379,13 @@ def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
     assert first.json()["review_url"].endswith(child_payload["edit_id"])
 
     child_id = FrozenEditId.parse(child_payload["edit_id"])
+    variants = review_fixture.application.renders.list(child_id)
+    assert len(variants) == 1
+    assert variants[0].specification["audio_mode"] == "dialogue"
+    assert len(preview_submissions) == 1
     child = review_fixture.application.runs.get_frozen_edit(child_id)
     child_path = (
-        review_fixture.application.settings.get().data_root
-        / child.plan.relative_path
+        review_fixture.application.settings.get().data_root / child.plan.relative_path
     )
     child_plan = RenderPlan.read(child_path)
     original = review_fixture.plan.clips[1]
@@ -367,14 +395,59 @@ def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
     assert revised["output_frame_range"] == original["output_frame_range"]
     assert revised["output_start_sec"] == original["output_start_sec"]
     assert revised["output_end_sec"] == original["output_end_sec"]
-    assert len(
-        review_fixture.application.runs.list_frozen_edits(child.run_id)
-    ) == 2
-    child_review = review_fixture.client.get(
-        f"/api/frozen-edits/{child_id}/review"
-    )
+    assert len(review_fixture.application.runs.list_frozen_edits(child.run_id)) == 2
+    child_review = review_fixture.client.get(f"/api/frozen-edits/{child_id}/review")
     assert child_review.status_code == 200
-    assert child_review.json()["candidate_space_available"] is True
+    assert "candidate_space_available" not in child_review.json()
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "missing_slot",
+        "missing_selected",
+        "extra_slot",
+        "missing_candidate_slot_id",
+    ],
+)
+def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
+    review_fixture: ReviewFixture,
+    corrupt: str,
+) -> None:
+    if corrupt == "missing_slot":
+        review_fixture.candidate_pool.pop("slot_02")
+    elif corrupt == "missing_selected":
+        selected_id = str(review_fixture.plan.clips[1]["candidate_id"])
+        review_fixture.candidate_pool["slot_02"] = [
+            item
+            for item in review_fixture.candidate_pool["slot_02"]
+            if item["candidate_id"] != selected_id
+        ]
+    elif corrupt == "extra_slot":
+        review_fixture.candidate_pool["slot_extra"] = []
+    else:
+        review_fixture.candidate_pool["slot_02"][1].pop("slot_id")
+    _publish_bundle(review_fixture)
+
+    review = review_fixture.client.get(
+        f"/api/frozen-edits/{review_fixture.edit_id}/review"
+    )
+    revision = review_fixture.client.post(
+        f"/api/frozen-edits/{review_fixture.edit_id}/revisions",
+        headers={"Idempotency-Key": _command_id()},
+        json={
+            "replacements": [
+                {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}
+            ]
+        },
+    )
+
+    assert review.status_code == 409
+    assert review.json()["code"] == "review_artifact_unavailable"
+    assert revision.status_code == 409
+    assert revision.json()["code"] == "review_artifact_unavailable"
+    source = review_fixture.application.runs.get_frozen_edit(review_fixture.edit_id)
+    assert len(review_fixture.application.runs.list_frozen_edits(source.run_id)) == 1
 
 
 @pytest.mark.parametrize(
@@ -439,9 +512,7 @@ def test_invalid_guided_revision_is_atomic(
     assert response.status_code == 409
     assert response.json()["code"] == expected_code
     source = review_fixture.application.runs.get_frozen_edit(review_fixture.edit_id)
-    assert len(
-        review_fixture.application.runs.list_frozen_edits(source.run_id)
-    ) == 1
+    assert len(review_fixture.application.runs.list_frozen_edits(source.run_id)) == 1
 
 
 def test_empty_guided_revision_is_rejected_before_history_changes(
@@ -457,13 +528,11 @@ def test_empty_guided_revision_is_rejected_before_history_changes(
 
     assert response.status_code == 422
     source = review_fixture.application.runs.get_frozen_edit(review_fixture.edit_id)
-    assert len(
-        review_fixture.application.runs.list_frozen_edits(source.run_id)
-    ) == 1
+    assert len(review_fixture.application.runs.list_frozen_edits(source.run_id)) == 1
 
 
-@pytest.mark.parametrize("corrupt", ["hash", "path"])
-def test_review_bundle_integrity_or_path_failure_is_a_review_conflict(
+@pytest.mark.parametrize("corrupt", ["hash", "path", "schema", "shape"])
+def test_invalid_review_bundle_is_a_review_conflict(
     review_fixture: ReviewFixture,
     corrupt: str,
 ) -> None:
@@ -471,8 +540,16 @@ def test_review_bundle_integrity_or_path_failure_is_a_review_conflict(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if corrupt == "hash":
         manifest["artifacts"]["candidate_pool"]["sha256"] = "0" * 64
-    else:
+    elif corrupt == "path":
         manifest["artifacts"]["candidate_pool"]["path"] = "../outside.json"
+    elif corrupt == "schema":
+        manifest["schema_version"] = "0.9"
+    else:
+        edit_plan_path = (
+            manifest_path.parent / manifest["artifacts"]["edit_plan"]["path"]
+        )
+        _write_json(edit_plan_path, {"not": "an edit plan"})
+        manifest["artifacts"]["edit_plan"]["sha256"] = _sha256(edit_plan_path)
     _write_json(manifest_path, manifest)
 
     response = review_fixture.client.get(
@@ -483,16 +560,16 @@ def test_review_bundle_integrity_or_path_failure_is_a_review_conflict(
     assert response.json()["code"] == "review_artifact_unavailable"
 
 
-def _create_render_variant(review_fixture: ReviewFixture):
+def _create_render_variant(
+    review_fixture: ReviewFixture,
+    *,
+    audio_mode: str = "dialogue",
+):
     return review_fixture.application.renders.create(
         CreateRenderVariantCommand(
             _command_id(),
             review_fixture.edit_id,
-            {
-                "audio_mode": "dialogue",
-                "fps": 30,
-                "test_case": _command_id(),
-            },
+            audio_mode,
         )
     )
 
@@ -501,8 +578,9 @@ def _complete_render_variant(
     review_fixture: ReviewFixture,
     *,
     master_bytes: bytes = b"0123456789abcdef",
+    audio_mode: str = "dialogue",
 ):
-    submission = _create_render_variant(review_fixture)
+    submission = _create_render_variant(review_fixture, audio_mode=audio_mode)
     claimed = review_fixture.application.jobs.claim_next(
         ClaimJobCommand(
             "review-render-worker",
@@ -517,9 +595,7 @@ def _complete_render_variant(
         f"projects/{run.project_id}/renders/"
         f"{submission.render_variant.render_variant_id}/master.mp4"
     )
-    master_path = (
-        review_fixture.application.settings.get().data_root / relative_master
-    )
+    master_path = review_fixture.application.settings.get().data_root / relative_master
     master_path.parent.mkdir(parents=True, exist_ok=True)
     master_path.write_bytes(master_bytes)
     completed = review_fixture.application.renders.complete(
@@ -563,7 +639,10 @@ def test_non_ready_and_unavailable_render_media_share_stable_problem_code(
     assert queued_response.status_code == 409
     assert queued_response.json()["code"] == "render_media_unavailable"
 
-    ready, master_path = _complete_render_variant(review_fixture)
+    ready, master_path = _complete_render_variant(
+        review_fixture,
+        audio_mode="bgm_only",
+    )
     master_path.write_bytes(b"tampered-master")
     unavailable = review_fixture.application.renders.verify(
         VerifyRenderVariantCommand(

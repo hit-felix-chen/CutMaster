@@ -4,14 +4,23 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from cutmaster.infrastructure.storage.local import (
-    material_catalog as material_catalog_module,
-)
+import pytest
 from fastapi.testclient import TestClient
 
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import EnqueueMaterialAnalysisCommand
-from cutmaster.domain.ids import MaterialId
+from cutmaster.application.projects import (
+    CreateProjectCommand,
+    SaveCreativeBriefCommand,
+    SetProjectMaterialsCommand,
+)
+from cutmaster.application.runs import CreateRunCommand
+from cutmaster.domain.ids import MaterialId, ProjectId
+from cutmaster.infrastructure.storage.local import (
+    material_catalog as material_catalog_module,
+)
+
+THUMBNAIL_BYTES = b"\xff\xd8\xffreal-middle-frame\xff\xd9"
 
 
 def source(path: Path, content: bytes) -> Path:
@@ -92,6 +101,15 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
         )
         (binding.memory_root / "dialogues.json").write_text(
             json.dumps(dialogue), encoding="utf-8"
+        )
+        frames = binding.memory_root / "scene_frames"
+        frames.mkdir()
+        (frames / "shot_00007_01.jpg").write_bytes(
+            b"\xff\xd8\xffreal-first-frame\xff\xd9"
+        )
+        (frames / "shot_00007_02.jpg").write_bytes(THUMBNAIL_BYTES)
+        (frames / "shot_00042_02.jpg").write_bytes(
+            b"\xff\xd8\xffreal-later-shot\xff\xd9"
         )
         staged = tmp_path / "analysis-result.json"
         staged.write_text(
@@ -192,8 +210,90 @@ def test_material_cards_are_searchable_sorted_and_contain_real_metadata(
         "shot_count": 1,
         "dialogue_count": 2,
     }
+    assert detail.json()["thumbnail_url"] == (
+        f"/api/materials/{video_id}/thumbnail"
+    )
+    assert detail.json()["waveform_url"] is None
     assert "fingerprint" not in detail.text
     assert str(tmp_path) not in detail.text
+
+
+def test_material_preview_endpoints_are_real_bounded_and_never_open_source_media(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+) -> None:
+    video_id = publish_ready_video(application, tmp_path)
+    music_id = publish_ready_music(application, tmp_path)
+    for material_id in (video_id, music_id):
+        with application.materials.read_lease(MaterialId.parse(material_id)) as binding:
+            binding.source_path.chmod(0)
+
+    video_detail = client.get(f"/api/materials/{video_id}").json()
+    music_detail = client.get(f"/api/materials/{music_id}").json()
+    thumbnail = client.get(
+        video_detail["thumbnail_url"],
+        headers={"Range": "bytes=0-3"},
+    )
+    waveform = client.get(
+        music_detail["waveform_url"],
+        headers={"Range": "bytes=0-12"},
+    )
+
+    assert thumbnail.status_code == waveform.status_code == 200
+    assert thumbnail.content == THUMBNAIL_BYTES
+    assert thumbnail.headers["content-type"] == "image/jpeg"
+    assert len(thumbnail.content) < 2 * 1024 * 1024
+    assert waveform.headers["content-type"] == "image/svg+xml"
+    assert len(waveform.content) < 64 * 1024
+    assert b"<polygon" in waveform.content
+    assert b"<script" not in waveform.content
+    assert b"Main Score" not in waveform.content
+    assert str(tmp_path).encode() not in waveform.content
+    for response in (thumbnail, waveform):
+        assert response.headers["accept-ranges"] == "none"
+        assert response.headers["cache-control"] == "private, no-store"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert "default-src 'none'" in response.headers["content-security-policy"]
+
+    wrong_thumbnail = client.get(f"/api/materials/{music_id}/thumbnail")
+    wrong_waveform = client.get(f"/api/materials/{video_id}/waveform")
+    assert wrong_thumbnail.status_code == wrong_waveform.status_code == 404
+    assert wrong_thumbnail.json()["code"] == "material_preview_unavailable"
+    assert wrong_waveform.json()["code"] == "material_preview_unavailable"
+
+
+def test_video_preview_rejects_symlinks_and_oversized_frames(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+) -> None:
+    material_id = publish_ready_video(application, tmp_path)
+    with application.materials.read_lease(MaterialId.parse(material_id)) as binding:
+        frame_directory = binding.memory_root / "scene_frames"
+        for frame in frame_directory.iterdir():
+            frame.unlink()
+        outside = tmp_path / "outside.jpg"
+        outside.write_bytes(b"\xff\xd8\xffprivate\xff\xd9")
+        (frame_directory / "shot_00003_02.jpg").symlink_to(outside)
+
+    unavailable = client.get(f"/api/materials/{material_id}/thumbnail")
+    detail = client.get(f"/api/materials/{material_id}")
+    assert unavailable.status_code == 404
+    assert unavailable.json()["code"] == "material_preview_unavailable"
+    assert detail.json()["thumbnail_url"] is None
+    assert outside.read_bytes() not in unavailable.content
+
+    with application.materials.read_lease(MaterialId.parse(material_id)) as binding:
+        frame = binding.memory_root / "scene_frames" / "shot_00003_02.jpg"
+        frame.unlink()
+        frame.write_bytes(
+            b"\xff\xd8\xff" + b"x" * (2 * 1024 * 1024) + b"\xff\xd9"
+        )
+
+    oversized = client.get(f"/api/materials/{material_id}/thumbnail")
+    assert oversized.status_code == 404
+    assert len(oversized.content) < 2 * 1024 * 1024
 
 
 def test_material_detail_includes_real_analysis_attempt_history(
@@ -214,6 +314,97 @@ def test_material_detail_includes_real_analysis_attempt_history(
     assert response.status_code == 200
     assert len(response.json()["attempts"]) == 1
     assert response.json()["attempts"][0]["operation_type"] == "material_analysis"
+
+
+def test_material_references_are_human_link_metadata_without_raw_tokens(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+) -> None:
+    video_id = publish_ready_video(application, tmp_path)
+    music_id = publish_ready_music(application, tmp_path)
+    project = application.projects.create(
+        CreateProjectCommand(str(uuid4()), "lalaland")
+    )
+    application.projects.set_materials(
+        SetProjectMaterialsCommand(
+            str(uuid4()),
+            project.project_id,
+            (MaterialId.parse(video_id),),
+            (MaterialId.parse(music_id),),
+        )
+    )
+    application.projects.save_creative_brief(
+        SaveCreativeBriefCommand(
+            str(uuid4()),
+            project.project_id,
+            "Keep the musical story moving",
+            30.0,
+        )
+    )
+    submission = application.runs.create(
+        CreateRunCommand(str(uuid4()), project.project_id)
+    )
+
+    detail = client.get(f"/api/materials/{video_id}")
+    listing = client.get("/api/materials?type=video")
+
+    expected = [
+        {
+            "kind": "project_current",
+            "project_name": "lalaland",
+            "navigation": {
+                "kind": "project",
+                "project_id": str(project.project_id),
+            },
+        },
+        {
+            "kind": "run_snapshot",
+            "project_name": "lalaland",
+            "run_sequence": 1,
+            "navigation": {
+                "kind": "run",
+                "project_id": str(project.project_id),
+                "run_id": str(submission.run.run_id),
+            },
+        },
+    ]
+    assert detail.status_code == listing.status_code == 200
+    assert detail.json()["reference_count"] == 2
+    assert detail.json()["references"] == expected
+    assert listing.json()["items"][0]["references"] == expected
+    for response in (detail, listing):
+        assert f"project:{project.project_id}:current:video" not in response.text
+        assert f"run:{submission.run.run_id}:snapshot:video" not in response.text
+        assert '"reference"' not in response.text
+        assert '"url"' not in response.text
+        assert "/projects/" not in response.text
+
+
+def test_unknown_material_reference_is_safe_and_does_not_expose_owner_identity(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_id = publish_ready_video(application, tmp_path)
+    missing_project_id = ProjectId.new()
+    raw_reference = f"project:{missing_project_id}:current:video"
+    monkeypatch.setattr(
+        type(application.projects),
+        "references",
+        lambda _service, _material_id: (raw_reference,),
+    )
+
+    response = client.get(f"/api/materials/{video_id}")
+
+    assert response.status_code == 200
+    assert response.json()["reference_count"] == 1
+    assert response.json()["references"] == [
+        {"kind": "unknown", "navigation": None}
+    ]
+    assert str(missing_project_id) not in response.text
+    assert raw_reference not in response.text
 
 
 def test_video_memory_tabs_are_real_paginated_and_sanitized(

@@ -1,21 +1,25 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from cutmaster import CutMasterApplication
-from cutmaster.configuration.effective import load_effective_configuration
 from cutmaster.application.direct.service import DirectService
 from cutmaster.application.jobs.service import JobsService
 from cutmaster.application.materials.service import MaterialsService
 from cutmaster.application.projects.service import ProjectsService
 from cutmaster.application.renders.service import RendersService
 from cutmaster.application.runs.service import RunsService
+from cutmaster.application.settings import (
+    CredentialUpdate,
+    SaveProviderSettingsCommand,
+)
 from cutmaster.application.settings.service import SettingsService
-
+from cutmaster.configuration.effective import load_effective_configuration
 
 MINIMAL_CONFIG = """
 [llm]
@@ -101,9 +105,46 @@ def test_process_environment_wins_over_sibling_dotenv(
     )
     monkeypatch.setenv("CUTMASTER_TEST_LLM_KEY", "process-value")
 
-    CutMasterApplication.open(config_path)
+    application = CutMasterApplication.open(config_path)
 
     assert os.environ["CUTMASTER_TEST_LLM_KEY"] == "process-value"
+    status = application.settings.get().connections.credentials["llm"]
+    assert status.source == "process"
+    assert status.writable is False
+    assert status.suffix == "alue"
+
+
+def test_process_snapshot_also_locks_a_later_custom_secret_reference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = _write_config(tmp_path)
+    monkeypatch.setenv("CUTMASTER_FUTURE_PROVIDER_KEY", "future-process-secret")
+    application = CutMasterApplication.open(config_path)
+    providers = {
+        name: dict(value)
+        for name, value in application.settings.get()
+        .connections.presets["cost_saving"]
+        .items()
+    }
+    providers["llm"]["api_key_env"] = "CUTMASTER_FUTURE_PROVIDER_KEY"
+
+    saved = application.settings.save_providers(
+        SaveProviderSettingsCommand(
+            str(uuid4()),
+            "custom",
+            providers,
+            {
+                "llm": CredentialUpdate("set", "ignored-local-secret"),
+                "vlm": CredentialUpdate("keep"),
+                "asr": CredentialUpdate("keep"),
+            },
+        )
+    )
+
+    assert saved.credential_results["llm"] == "process_locked"
+    assert saved.settings.connections.credentials["llm"].source == "process"
+    assert not (tmp_path / ".env").exists()
 
 
 def test_open_does_not_load_workflow_stages_or_heavy_media_dependencies(

@@ -49,11 +49,16 @@ M + ASTER = MASTER
 > The FastAPI + React/Vite local Web workspace is now implemented alongside
 > the backend foundations. CLI, Web, and Mashup-Benchmark all enter through the
 > Application Layer. Web `Start editing` now runs real ASTER planning in an
-> isolated subprocess and persists its RenderPlan, initial Frozen Edit, and a
-> Candidate Bundle for newly completed Runs. Frozen Edit Review, read-only
-> fallback for historical artifacts, and atomic Guided Revision are implemented.
-> Web-managed Material Analysis and Renderer jobs, automatic Preview/Variant
-> creation, SSE, the general supervisor, and Data Root Migration remain Proposed.
+> isolated subprocess and persists its RenderPlan, initial Frozen Edit, and the
+> required Candidate Bundle. The Web workspace also implements
+> Material import, analysis, previews, and recovery; ASTER Run retry, boundary
+> resume, run-again, deletion, and usage; Frozen Edit Review and atomic Guided
+> Revision; and strict Render-Specification-driven Renderer, Dialogue Preview,
+> Render Variant, and Outputs flows. One local supervisor provides FIFO,
+> capacity limits, per-owner serialization, and orphan recovery, while durable
+> SSE supports `Last-Event-ID` replay and full resynchronization. Provider/Setup
+> connection tests, atomic local configuration writes, and guarded Data Root
+> Migration are connected to the real backend as well.
 
 ```mermaid
 flowchart LR
@@ -114,7 +119,7 @@ CLI
 
 The Material Library stores read-only managed copies of video and music sources. Every Material owns an opaque internal **Material ID**, while users and CLI callers select it by `(Material Type, exact Material Name)`. The CLI defaults the name to the source filename stem. Names are unique within a Material Type: `app.materials.add()` reports every occupied name, and CutMaster never appends `(2)`, overwrites, or replaces a Material automatically. The `app.materials.ensure()` operation used by `analyse` and `run --video/--audio` gives CLI and automation idempotence only when type, name, and fingerprint all match, returning the same Material ID; the same name with different bytes is still a collision. Equal bytes under different available names remain independently selectable Materials.
 
-SHA-256 is stored on the Material manifest record solely as an internal consistency check. It does not participate in the Material ID or directory name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, edit decision, and rendering. The low-level Material Library supports adding and deleting sources, but deletion is not exposed through the CLI or frontend yet. In-place replacement is unsupported.
+SHA-256 is stored on the Material manifest record solely as an internal consistency check. It does not participate in the Material ID or directory name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, edit decision, and rendering. The Web Material Library exposes permanent deletion guarded by references and active Attempts; the CLI remains focused on add, ensure, and exact-name reuse. In-place replacement is unsupported.
 
 Completed Material Memory is reused directly. An interrupted video analysis can
 resume only when its subtitle and analysis specification are unchanged, so
@@ -235,19 +240,43 @@ npm --prefix web run build
 uv run cutmaster serve --config config.toml
 ```
 
-CutMaster opens at `http://127.0.0.1:8000` by default. The implemented Web
-slice uses real backend data for Projects, the Material Library, Video/Music
-Memory Explorer, Activity, and Settings. A Project has three tabs: **Project
-Setup**, **Runs**, and **Outputs**. Project Setup combines video/music selection,
-Editing Intent, and Target Duration on one explicitly saved page. **Start
-editing** then creates an immutable ASTER Run; an isolated local subprocess
-executes the real Planners call, and Run details show its state and resulting
-Frozen Edit. Opening that edit loads the real Review workspace. Candidate
-Bundles persisted for new Runs enable atomic, candidate-constrained Guided
-Revision; historical edits created without a bundle degrade explicitly to
-read-only Review. Web Import & Analyse, automatic Renderer Preview/Variant
-creation, SSE, and the general supervisor remain Proposed; the complete CLI
-and Benchmark generation paths remain available.
+CutMaster opens at `http://127.0.0.1:8000` by default. The Web workspace uses
+real Application data for Projects, the Material Library, Video/Music Memory
+Explorer, Activity, and Settings. Materials can be preflighted and imported in
+the browser (with an optional SRT for video), then queued for the real Analyser.
+Failed or interrupted work supports Retry/Resume, active work supports Stop,
+and deletion is guarded by references and running state. Video thumbnails and
+music waveforms are bounded previews rather than full source media embedded in
+list responses.
+
+A Project has **Project Setup**, **Runs**, and **Outputs** tabs. After saving
+Materials, Editing Intent, and Target Duration, **Start editing** creates an
+immutable ASTER Run and an isolated local subprocess executes the real
+Planners call. Failed Runs support Retry; Interrupted Runs resume only from a
+validated complete A/S/T/E/R agent boundary, including the replan-pending
+boundary; successful Runs support Run again, and historical Runs can be
+deleted when safe. Run detail and Activity show the same durable progress and
+model-usage projection.
+
+Opening a Frozen Edit loads the real Review workspace. Every Frozen Edit must
+reference a complete, integrity-checked Candidate Bundle, enabling atomic,
+candidate-constrained Guided Revision. A missing or damaged bundle—or an
+incomplete selected-candidate mapping—returns `review_artifact_unavailable`;
+there is no read-only fallback. A strict immutable
+Render Specification drives real Renderer Attempts, automatic Dialogue
+Preview, BGM-only Variants, playback, Range downloads, Finder reveal,
+integrity verification, Render again, and guarded deletion. One
+`LocalJobSupervisor` provides FIFO, capacity, per-owner serialization, and
+orphan recovery across Analyser, Planners, and Renderer. A single global SSE
+connection replays durable events using `Last-Event-ID` and falls back to REST
+after `resync_required`.
+
+Settings and first-run Setup support provider presets or custom
+OpenAI-compatible connections, per-capability connection tests, atomic `.env`
+and local-overlay writes, and guarded Data Root Migration. Deliberately deferred
+work includes persistent in-app notifications, an Activity log drawer, Direct
+Bundle bulk cleanup/retention, generated OpenAPI TypeScript drift checks in CI,
+multi-user/cloud deployment, and broader provider/media port injection.
 
 ### CLI
 

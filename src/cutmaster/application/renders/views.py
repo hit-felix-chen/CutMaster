@@ -51,6 +51,13 @@ class DeletedRenderVariantView:
     deleted: bool
 
 
+@dataclass(frozen=True)
+class VerifiedRenderIntegrityView:
+    render_variant: RenderVariantView
+    size_bytes: int
+    cached: bool
+
+
 def render_variant_view(value: Mapping[str, Any]) -> RenderVariantView:
     render_id = RenderVariantId.parse(str(value["render_variant_id"]))
     specification = value["specification"]
@@ -114,7 +121,7 @@ __all__ = [
     "DeletedRenderVariantView",
     "RenderSubmissionView",
     "RenderVariantView",
+    "VerifiedRenderIntegrityView",
     "render_submission_view",
     "render_variant_view",
 ]
-

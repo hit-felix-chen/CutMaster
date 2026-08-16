@@ -19,16 +19,16 @@ class MaterialMemoryTabNotFoundError(ApplicationError):
     code = "material_memory_tab_not_found"
 
 
+class MaterialPreviewUnavailableError(ApplicationError):
+    """A Material has no safe, lightweight card preview projection."""
+
+    code = "material_preview_unavailable"
+
+
 class ReviewArtifactUnavailableError(ApplicationError):
     """A Frozen Edit references an absent or invalid managed artifact."""
 
     code = "review_artifact_unavailable"
-
-
-class CandidateSpaceUnavailableError(ApplicationError):
-    """Guided Revision cannot proceed without the Run's validated candidates."""
-
-    code = "candidate_space_unavailable"
 
 
 class AnchorLockedError(ApplicationError):
@@ -55,14 +55,56 @@ class RenderMediaUnavailableError(ApplicationError):
     code = "render_media_unavailable"
 
 
+class RenderFpsMismatchError(ApplicationError):
+    """A concrete renderer snapshot cannot execute the Frozen Edit plan."""
+
+    code = "render_fps_mismatch"
+
+
+class RenderIntegrityMismatchError(ApplicationError):
+    """A persisted Ready master no longer matches its private fingerprint."""
+
+    code = "render_integrity_mismatch"
+
+
+class RenderDispatchFailedError(ApplicationError):
+    """The durable Render Attempt exists but its worker could not be launched."""
+
+    code = "render_dispatch_failed"
+
+
+class ProviderConnectionFailedError(ApplicationError):
+    """A bounded provider authentication probe failed."""
+
+    code = "provider_connection_failed"
+
+
+class StorageRevealUnavailableError(ApplicationError):
+    """The host has no supported file-manager reveal capability."""
+
+    code = "storage_reveal_unavailable"
+
+
+class StorageRevealFailedError(ApplicationError):
+    """The host file manager failed to open the Application Data Root."""
+
+    code = "storage_reveal_failed"
+
+
 __all__ = [
     "AnchorLockedError",
     "ApplicationError",
-    "CandidateSpaceUnavailableError",
     "InvalidCandidateReplacementError",
     "MaterialMemoryTabNotFoundError",
     "MaterialMemoryUnavailableError",
+    "MaterialPreviewUnavailableError",
+    "ProviderConnectionFailedError",
+    "RenderDispatchFailedError",
+    "RenderFpsMismatchError",
+    "RenderIntegrityMismatchError",
     "RenderMediaUnavailableError",
     "ReviewArtifactUnavailableError",
     "RevisionInfeasibleError",
+    "StorageRevealFailedError",
+    "StorageRevealUnavailableError",
 ]

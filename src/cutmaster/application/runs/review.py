@@ -45,18 +45,24 @@ def load_render_plan(data_root: Path, relative_path: str) -> tuple[RenderPlan, P
     path = resolve_managed_review_file(data_root, relative_path)
     try:
         return RenderPlan.read(path), path
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise ReviewArtifactUnavailableError(
             "Frozen Edit RenderPlan is unreadable or unsupported"
         ) from exc
 
 
-def load_review_bundle(plan_path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Load a committed Review bundle beside a Run's initial RenderPlan.
+def load_review_bundle(plan_path: Path) -> dict[str, Any]:
+    """Load a committed, versioned Review bundle for a Frozen Edit.
 
-    The manifest is the commit point. Historical Runs created before bundle
-    persistence intentionally return ``not_persisted`` instead of pretending
-    that their selected clips are a complete Candidate Space.
+    The manifest is the commit point. Guided Revision children retain their
+    source Run's immutable bundle, so the bounded ancestor lookup is part of
+    the current artifact contract rather than a legacy fallback.
     """
 
     candidate_directories = (
@@ -73,7 +79,9 @@ def load_review_bundle(plan_path: Path) -> tuple[dict[str, Any] | None, str | No
         None,
     )
     if manifest_path is None:
-        return None, "not_persisted"
+        raise ReviewArtifactUnavailableError(
+            "Frozen Edit Candidate Bundle is unavailable"
+        )
     manifest = _read_json_object(manifest_path, "Review bundle manifest")
     if manifest.get("schema_version") != REVIEW_BUNDLE_SCHEMA_VERSION:
         raise ReviewArtifactUnavailableError("Unsupported Review bundle schema")
@@ -115,9 +123,18 @@ def load_review_bundle(plan_path: Path) -> tuple[dict[str, Any] | None, str | No
                 f"Review bundle artifact {logical_name} failed integrity validation"
             )
         loaded[logical_name] = _read_json(artifact_path, logical_name)
-    if not isinstance(loaded["candidate_pool"], dict):
-        raise ReviewArtifactUnavailableError("Candidate Space must be an object")
-    return loaded, None
+    expected_shapes = {
+        "candidate_pool": dict,
+        "edit_plan": list,
+        "music_profile": dict,
+        "selection_diagnostics": dict,
+    }
+    for logical_name, expected_type in expected_shapes.items():
+        if not isinstance(loaded[logical_name], expected_type):
+            raise ReviewArtifactUnavailableError(
+                f"Review bundle artifact {logical_name} has an invalid shape"
+            )
+    return loaded
 
 
 def project_plan_summary(plan: RenderPlan) -> Mapping[str, Any]:
@@ -157,7 +174,9 @@ def project_slots(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
                         dict(clip.get("selection_scores") or {})
                     ),
                     "dialogue_anchor": (
-                        None if not isinstance(anchor, Mapping) else MappingProxyType(dict(anchor))
+                        None
+                        if not isinstance(anchor, Mapping)
+                        else MappingProxyType(dict(anchor))
                     ),
                 }
             )
@@ -167,17 +186,20 @@ def project_slots(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
 
 def project_candidates(
     plan: RenderPlan,
-    candidate_pool: Mapping[str, Any] | None,
+    candidate_pool: Mapping[str, Any],
 ) -> Mapping[str, tuple[Mapping[str, Any], ...]]:
     clips_by_slot = {str(clip["slot_id"]): clip for clip in plan.clips}
+    pool_slot_ids = tuple(candidate_pool.keys())
+    if any(not isinstance(slot_id, str) for slot_id in pool_slot_ids) or set(
+        pool_slot_ids
+    ) != set(clips_by_slot):
+        raise ReviewArtifactUnavailableError(
+            "Candidate Space Slot identities do not match the RenderPlan"
+        )
     projected: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for slot_id, clip in clips_by_slot.items():
         anchor = isinstance(clip.get("dialogue_anchor"), Mapping)
-        raw_items = (
-            candidate_pool.get(slot_id, [])
-            if isinstance(candidate_pool, Mapping)
-            else []
-        )
+        raw_items = candidate_pool.get(slot_id)
         if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
             raise ReviewArtifactUnavailableError(
                 f"Candidate Space for {slot_id} must be an array"
@@ -189,29 +211,25 @@ def project_candidates(
                     f"Candidate Space for {slot_id} contains an invalid item"
                 )
             candidate_id = str(raw.get("candidate_id") or "")
-            if not candidate_id or str(raw.get("slot_id") or slot_id) != slot_id:
+            candidate_slot_id = raw.get("slot_id")
+            if (
+                not candidate_id
+                or not isinstance(candidate_slot_id, str)
+                or candidate_slot_id != slot_id
+            ):
                 raise ReviewArtifactUnavailableError(
                     f"Candidate Space identity mismatch for {slot_id}"
                 )
+            if candidate_id in by_id:
+                raise ReviewArtifactUnavailableError(
+                    f"Candidate Space contains duplicate {candidate_id}"
+                )
             by_id[candidate_id] = dict(raw)
         selected_id = str(clip["candidate_id"])
-        selected_raw = by_id.setdefault(selected_id, {})
-        selected_raw.setdefault("candidate_id", selected_id)
-        selected_raw.setdefault("slot_id", slot_id)
-        selected_raw.setdefault("timestamp", str(clip["timestamp"]))
-        selected_raw.setdefault("description", str(clip.get("picture") or ""))
-        scores = clip.get("selection_scores")
-        if isinstance(scores, Mapping):
-            for key in (
-                "semantic_relevance",
-                "visual_slot_relevance_likert",
-                "protagonist_visibility_likert",
-                "emotional_intensity",
-                "kinetic_energy",
-                "salience",
-            ):
-                if key in scores:
-                    selected_raw.setdefault(key, scores[key])
+        if selected_id not in by_id:
+            raise ReviewArtifactUnavailableError(
+                f"Candidate Space for {slot_id} does not contain its selected Candidate"
+            )
 
         items: list[Mapping[str, Any]] = []
         for candidate_id, raw in by_id.items():
@@ -257,14 +275,18 @@ def project_candidates(
                             else str(raw["visual_evidence"])
                         ),
                         "selected": selected,
-                        "eligible_for_replacement": (
-                            candidate_pool is not None and not anchor and not selected
-                        ),
+                        "eligible_for_replacement": (not anchor and not selected),
                     }
                 )
             )
         projected[slot_id] = tuple(
-            sorted(items, key=lambda item: (not bool(item["selected"]), str(item["candidate_id"])))
+            sorted(
+                items,
+                key=lambda item: (
+                    not bool(item["selected"]),
+                    str(item["candidate_id"]),
+                ),
+            )
         )
     return MappingProxyType(projected)
 
@@ -291,9 +313,7 @@ def project_dialogue_cues(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
                     "start_sec": float(
                         anchor.get("output_audio_start_sec", output_start)
                     ),
-                    "end_sec": float(
-                        anchor.get("output_audio_end_sec", output_end)
-                    ),
+                    "end_sec": float(anchor.get("output_audio_end_sec", output_end)),
                     "text": str(anchor.get("text") or ""),
                     "speaker": speaker,
                 }

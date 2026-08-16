@@ -12,25 +12,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-from cutmaster.workflow.analyser.tools.asr import prepare_subtitles
-from cutmaster.workflow.analyser.tools.cache import (
-    ANALYSIS_SCHEMA_VERSION,
-    analysis_signature as _analysis_signature,
-    dialogue_checkpoint as _dialogue_checkpoint,
-    read_json_checkpoint as _read_json_checkpoint,
-    reuse_compatible_stage_checkpoints as _reuse_compatible_stage_checkpoints,
-    valid_segment_checkpoint as _valid_segment_checkpoint,
-    valid_shot_checkpoint as _valid_shot_checkpoint,
-    write_json_checkpoint as _write_json_checkpoint,
-)
-from cutmaster.workflow.shared.shot_detection import detect_source_cuts
-from cutmaster.workflow.analyser.tools.dialogue import postprocess_dialogues
-from cutmaster.workflow.analyser.tools.music_analysis import analyze_music_memory
-from cutmaster.workflow.analyser.tools.scene_segmenter import (
-    SCENE_SEGMENTATION_VERSION,
-    build_segments_from_scene_boundaries,
-    detect_scene_boundaries,
-)
 from cutmaster.configuration.schema import (
     AppConfig,
     ASRConfig,
@@ -40,25 +21,45 @@ from cutmaster.configuration.schema import (
     ShotDetectionConfig,
     VLMConfig,
 )
-from cutmaster.infrastructure.observability.logging import log_event
+from cutmaster.infrastructure.media.ffprobe import probe_media
 from cutmaster.infrastructure.models.openai_compatible import (
     empty_usage_summary,
     load_usage_summary,
 )
-from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.workflow.prompting.failure_catalog import (
-    PromptFailureCode,
-    build_prompt_failure,
-)
-from cutmaster.workflow.prompting.analyser import (
-    SegmentSummaryDetails,
-    SegmentShotAnnotationDetails,
-    VideoSummaryDetails,
-)
-from cutmaster.workflow.shared.execution_context import WorkflowContext
+from cutmaster.infrastructure.observability.logging import log_event
 from cutmaster.infrastructure.observability.progress import progress_bar
-from cutmaster.infrastructure.media.ffprobe import probe_media
-from cutmaster.workflow.shared.timecode import format_range, parse_time
+from cutmaster.workflow.analyser.tools.asr import prepare_subtitles
+from cutmaster.workflow.analyser.tools.cache import (
+    ANALYSIS_SCHEMA_VERSION,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    analysis_signature as _analysis_signature,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    dialogue_checkpoint as _dialogue_checkpoint,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    read_json_checkpoint as _read_json_checkpoint,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    reuse_compatible_stage_checkpoints as _reuse_compatible_stage_checkpoints,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    valid_segment_checkpoint as _valid_segment_checkpoint,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    valid_shot_checkpoint as _valid_shot_checkpoint,
+)
+from cutmaster.workflow.analyser.tools.cache import (
+    write_json_checkpoint as _write_json_checkpoint,
+)
+from cutmaster.workflow.analyser.tools.dialogue import postprocess_dialogues
+from cutmaster.workflow.analyser.tools.music_analysis import analyze_music_memory
+from cutmaster.workflow.analyser.tools.scene_segmenter import (
+    SCENE_SEGMENTATION_VERSION,
+    build_segments_from_scene_boundaries,
+    detect_scene_boundaries,
+)
 from cutmaster.workflow.contracts.video import (
     BoundarySource,
     CameraAngle,
@@ -74,12 +75,30 @@ from cutmaster.workflow.contracts.video import (
     ShotScale,
     SourceVideoMetadata,
     SpeechMode,
-    TimeOfDay,
     TimelineRole,
+    TimeOfDay,
     TimeRange,
     VideoDescription,
     VisualAnnotationStatus,
 )
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    WorkflowCancelledError,
+    raise_if_cancelled,
+)
+from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.workflow.prompting.analyser import (
+    SegmentShotAnnotationDetails,
+    SegmentSummaryDetails,
+    VideoSummaryDetails,
+)
+from cutmaster.workflow.prompting.failure_catalog import (
+    PromptFailureCode,
+    build_prompt_failure,
+)
+from cutmaster.workflow.shared.execution_context import WorkflowContext
+from cutmaster.workflow.shared.shot_detection import detect_source_cuts
+from cutmaster.workflow.shared.timecode import format_range, parse_time
 
 
 @dataclass(frozen=True)
@@ -100,10 +119,12 @@ class _MaterialAnalysisArtifacts:
     model_usage_cumulative_summary: dict[str, Any] = field(default_factory=dict)
     analysis_reused: bool = False
 
+
 def _detect_full_video_shots(
     video_path: Path,
     duration_sec: float,
     detection_config: ShotDetectionConfig,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     cuts, fps = detect_source_cuts(
         video_path,
@@ -111,20 +132,15 @@ def _detect_full_video_shots(
         duration_sec,
         adaptive_threshold=detection_config.adaptive_threshold,
         adaptive_min_content_val=detection_config.adaptive_min_content_val,
-        adaptive_min_scene_len_sec=(
-            detection_config.adaptive_min_scene_len_sec
-        ),
+        adaptive_min_scene_len_sec=(detection_config.adaptive_min_scene_len_sec),
         duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
         progress_label="Full-video Shot detection",
+        cancellation_token=cancellation_token,
     )
     boundaries = [
         0.0,
         *sorted(
-            {
-                round(float(cut), 6)
-                for cut in cuts
-                if 0.0 < float(cut) < duration_sec
-            }
+            {round(float(cut), 6) for cut in cuts if 0.0 < float(cut) < duration_sec}
         ),
         duration_sec,
     ]
@@ -217,6 +233,8 @@ def _split_segment_clips(
     video_path: Path,
     segments: list[dict[str, Any]],
     material_directory: Path,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> None:
     clips_dir = material_directory / "segments"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +245,7 @@ def _split_segment_clips(
         unit="segment",
     ) as progress:
         for segment in progress:
+            raise_if_cancelled(cancellation_token)
             start = float(segment["time_range"]["start_sec"])
             end = float(segment["time_range"]["end_sec"])
             output = clips_dir / f"{segment['segment_id']}.mp4"
@@ -279,6 +298,11 @@ def _split_segment_clips(
                 str(temporary_output),
             ]
             subprocess.run(command, check=True)
+            try:
+                raise_if_cancelled(cancellation_token)
+            except WorkflowCancelledError:
+                temporary_output.unlink(missing_ok=True)
+                raise
             temporary_output.replace(output)
             segment["clip_path"] = str(output.resolve())
 
@@ -298,8 +322,7 @@ def _sample_shot_frames(
     try:
         duration = local_end_sec - local_start_sec
         local_times = [
-            local_start_sec + duration * (index + 0.5) / count
-            for index in range(count)
+            local_start_sec + duration * (index + 0.5) / count for index in range(count)
         ]
         images = []
         global_times = []
@@ -308,9 +331,7 @@ def _sample_shot_frames(
             ok, frame = capture.read()
             if not ok:
                 if not images:
-                    raise RuntimeError(
-                        f"Could not sample any frame from {clip_path}"
-                    )
+                    raise RuntimeError(f"Could not sample any frame from {clip_path}")
                 repeated_frames = count - len(images)
                 log_event(
                     "WARNING",
@@ -396,9 +417,8 @@ def _shot_frame_contact_sheet(image_data_urls: list[str]) -> str:
     )
     if not ok:
         raise RuntimeError("Could not encode Shot frame contact sheet")
-    return (
-        "data:image/jpeg;base64,"
-        + base64.b64encode(encoded_sheet.tobytes()).decode("ascii")
+    return "data:image/jpeg;base64," + base64.b64encode(encoded_sheet.tobytes()).decode(
+        "ascii"
     )
 
 
@@ -445,7 +465,9 @@ def _validate_shot_annotation(
     characters = []
     for index, raw in enumerate(parsed.get("characters") or [], 1):
         character = {
-            "character_id": str(raw.get("character_id") or f"person_{index:02d}").strip(),
+            "character_id": str(
+                raw.get("character_id") or f"person_{index:02d}"
+            ).strip(),
             "name": str(raw["name"]).strip(),
             "description": str(raw["description"]).strip(),
             "identity_likert": int(raw["identity_likert"]),
@@ -494,7 +516,10 @@ def _annotate_segments(
     annotation_directory: Path,
     max_images_per_request: int = 250,
     max_shots_per_request: int = 20,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[SegmentDescription]:
+    raise_if_cancelled(cancellation_token)
     if max_images_per_request <= 0:
         raise ValueError("max_images_per_request must be positive")
     if max_shots_per_request <= 0:
@@ -530,6 +555,7 @@ def _annotate_segments(
         }
 
     def annotate_segment(segment: dict[str, Any]) -> SegmentDescription:
+        raise_if_cancelled(cancellation_token)
         clip_path = Path(segment["clip_path"])
         segment_start = float(segment["time_range"]["start_sec"])
         source_shots = segment["shots"]
@@ -548,9 +574,7 @@ def _annotate_segments(
                 result[str(shot["shot_id"])] = [
                     round(
                         global_start
-                        + (global_end - global_start)
-                        * (index + 0.5)
-                        / sample_frames,
+                        + (global_end - global_start) * (index + 0.5) / sample_frames,
                         6,
                     )
                     for index in range(sample_frames)
@@ -606,9 +630,7 @@ def _annotate_segments(
                     f"{len(raw_annotations)} Shots; expected {len(expected_shots)}"
                 )
             returned_ids = [
-                str(annotation.get("shot_id"))
-                if isinstance(annotation, dict)
-                else ""
+                str(annotation.get("shot_id")) if isinstance(annotation, dict) else ""
                 for annotation in raw_annotations
             ]
             if returned_ids != expected_ids:
@@ -645,11 +667,7 @@ def _annotate_segments(
         package = build_package(
             sampled_times_by_shot,
             segment,
-            (
-                "contact_sheet"
-                if whole_request_uses_contact_sheets
-                else "individual"
-            ),
+            ("contact_sheet" if whole_request_uses_contact_sheets else "individual"),
         )
         checkpoint_matches = (
             isinstance(checkpoint, dict)
@@ -670,8 +688,7 @@ def _annotate_segments(
             checkpoint_matches
             and checkpoint.get("visual_annotation_status")
             == VisualAnnotationStatus.PROVIDER_REJECTED
-            and checkpoint.get("visual_annotation_failure")
-            == "data_inspection_failed"
+            and checkpoint.get("visual_annotation_failure") == "data_inspection_failed"
         ):
             annotations = [
                 unavailable_annotation(shot_id, bool(shot["dialogue"]))
@@ -708,14 +725,14 @@ def _annotate_segments(
             sampled_times_by_shot = {}
             contains_provider_rejection = False
             for batch_index, batch_shots in enumerate(request_batches, 1):
+                raise_if_cancelled(cancellation_token)
                 batch_ids = [str(shot["shot_id"]) for shot in batch_shots]
                 batch_segment = {**segment, "shots": batch_shots}
                 frame_delivery = (
                     "contact_sheet"
                     if (
                         use_request_batches
-                        or len(batch_shots) * sample_frames
-                        > max_images_per_request
+                        or len(batch_shots) * sample_frames > max_images_per_request
                     )
                     else "individual"
                 )
@@ -751,15 +768,12 @@ def _annotate_segments(
                 )
                 batch_annotations: list[dict[str, Any]] | None = None
                 batch_rejected = False
-                if (
-                    batch_checkpoint_matches
-                    and isinstance(batch_checkpoint.get("response"), dict)
+                if batch_checkpoint_matches and isinstance(
+                    batch_checkpoint.get("response"), dict
                 ):
                     try:
-                        structured = (
-                            batch_package.response_contract.validate_structure(
-                                batch_checkpoint["response"]
-                            )
+                        structured = batch_package.response_contract.validate_structure(
+                            batch_checkpoint["response"]
                         )
                         batch_annotations = validate_annotations(
                             structured,
@@ -807,15 +821,12 @@ def _annotate_segments(
                         )
                         batch_sample_times[shot_id] = sampled_times
                         if frame_delivery == "contact_sheet":
-                            image_data_urls.append(
-                                _shot_frame_contact_sheet(images)
-                            )
+                            image_data_urls.append(_shot_frame_contact_sheet(images))
                             image_labels.append(
                                 f"{shot_id} contact sheet; "
                                 f"frames 1-{sample_frames} at "
                                 + ", ".join(
-                                    f"{time_sec:.3f}s"
-                                    for time_sec in sampled_times
+                                    f"{time_sec:.3f}s" for time_sec in sampled_times
                                 )
                             )
                         else:
@@ -894,6 +905,8 @@ def _annotate_segments(
                             **failure,
                         )
 
+                    raise_if_cancelled(cancellation_token)
+
                     batch_checkpoint_payload: dict[str, Any] = {
                         "schema_version": "1.0",
                         "segment_id": segment["segment_id"],
@@ -914,9 +927,7 @@ def _annotate_segments(
                                 "visual_annotation_status": (
                                     VisualAnnotationStatus.PROVIDER_REJECTED
                                 ),
-                                "visual_annotation_failure": (
-                                    "data_inspection_failed"
-                                ),
+                                "visual_annotation_failure": ("data_inspection_failed"),
                             }
                         )
                     else:
@@ -933,6 +944,7 @@ def _annotate_segments(
                 contains_provider_rejection = (
                     contains_provider_rejection or batch_rejected
                 )
+                raise_if_cancelled(cancellation_token)
             annotations = merged_annotations
             package = build_package(
                 sampled_times_by_shot,
@@ -953,9 +965,7 @@ def _annotate_segments(
                         "prompt_id": package.prompt_id,
                         "prompt_version": package.prompt_version,
                         "prompt_fingerprint": package.fingerprint,
-                        "contract_fingerprint": (
-                            package.response_contract.fingerprint
-                        ),
+                        "contract_fingerprint": (package.response_contract.fingerprint),
                         "sampled_frame_times_by_shot": sampled_times_by_shot,
                         "response": {"shots": annotations},
                     },
@@ -1034,9 +1044,7 @@ def _annotate_segments(
             for shot in visually_annotated_shots:
                 durations[shot.content_type] += shot.time_range.duration_sec
             content_type = (
-                max(durations, key=durations.get)
-                if visually_annotated_shots
-                else None
+                max(durations, key=durations.get) if visually_annotated_shots else None
             )
         representative = (
             max(
@@ -1084,9 +1092,7 @@ def _annotate_segments(
                 or None
             ),
             emotional_tone=(
-                representative.emotional_tone
-                if representative is not None
-                else None
+                representative.emotional_tone if representative is not None else None
             ),
             emotional_intensity=(
                 sum(
@@ -1100,6 +1106,7 @@ def _annotate_segments(
             appearing_characters=appearing_characters,
         )
         description.validate()
+        raise_if_cancelled(cancellation_token)
         annotation_progress.update()
         return description
 
@@ -1180,7 +1187,10 @@ def _summarize_segments(
     context: WorkflowContext,
     config: LLMConfig,
     summary_directory: Path,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[SegmentDescription]:
+    raise_if_cancelled(cancellation_token)
     summary_directory.mkdir(parents=True, exist_ok=True)
     summary_progress = progress_bar(
         total=len(segments),
@@ -1189,13 +1199,10 @@ def _summarize_segments(
     )
 
     def summarize(segment: SegmentDescription) -> SegmentDescription:
-        if (
-            not segment.has_dialogue
-            and not any(
-                shot.visual_annotation_status
-                == VisualAnnotationStatus.COMPLETE
-                for shot in segment.shots
-            )
+        raise_if_cancelled(cancellation_token)
+        if not segment.has_dialogue and not any(
+            shot.visual_annotation_status == VisualAnnotationStatus.COMPLETE
+            for shot in segment.shots
         ):
             summary_progress.update()
             return segment
@@ -1227,10 +1234,12 @@ def _summarize_segments(
                 summary = None
                 timeline_role = None
         if summary is None or timeline_role is None:
+            raise_if_cancelled(cancellation_token)
             result = context.call_prompt(
                 package=package,
                 config=config,
             )
+            raise_if_cancelled(cancellation_token)
             summary = str(result["segment_summary"]).strip()
             timeline_role = TimelineRole(str(result["timeline_role"]))
             _write_json_checkpoint(
@@ -1241,9 +1250,7 @@ def _summarize_segments(
                     "prompt_id": package.prompt_id,
                     "prompt_version": package.prompt_version,
                     "prompt_fingerprint": package.fingerprint,
-                    "contract_fingerprint": (
-                        package.response_contract.fingerprint
-                    ),
+                    "contract_fingerprint": (package.response_contract.fingerprint),
                     "summary": result,
                 },
             )
@@ -1253,6 +1260,7 @@ def _summarize_segments(
             timeline_role=timeline_role,
         )
         summarized.validate()
+        raise_if_cancelled(cancellation_token)
         summary_progress.update()
         return summarized
 
@@ -1298,11 +1306,7 @@ def _video_summary_context(
 ) -> dict[str, Any]:
     return {
         "segments": [
-            {
-                key: value
-                for key, value in segment.items()
-                if key != "shots"
-            }
+            {key: value for key, value in segment.items() if key != "shots"}
             for segment in video_description["segments"]
         ],
         "full_dialogue": full_dialogue,
@@ -1319,12 +1323,8 @@ def _cache_result(
     manifest = _read_json_checkpoint(manifest_path)
     if (
         not isinstance(manifest, dict)
-        or any(
-            manifest.get(key) != value
-            for key, value in expected_signature.items()
-        )
-        or manifest.get("scene_segmentation_version")
-        != SCENE_SEGMENTATION_VERSION
+        or any(manifest.get(key) != value for key, value in expected_signature.items())
+        or manifest.get("scene_segmentation_version") != SCENE_SEGMENTATION_VERSION
         or manifest.get("segment_summary_prompt_version") != "2.0"
         or not description_path.is_file()
         or not summary_path.is_file()
@@ -1333,10 +1333,7 @@ def _cache_result(
     description = json.loads(description_path.read_text(encoding="utf-8"))
     summary = _valid_video_summary(
         _read_json_checkpoint(summary_path),
-        [
-            str(segment["segment_id"])
-            for segment in description.get("segments") or []
-        ],
+        [str(segment["segment_id"]) for segment in description.get("segments") or []],
     )
     if summary is None:
         return None
@@ -1345,10 +1342,7 @@ def _cache_result(
         material_directory / "dialogue_merged.srt",
         material_directory / "dialogues.json",
         material_directory / "analysis_history.json",
-        *[
-            Path(segment["clip_path"])
-            for segment in description.get("segments") or []
-        ],
+        *[Path(segment["clip_path"]) for segment in description.get("segments") or []],
     ]
     if not required or any(not path.is_file() for path in required):
         return None
@@ -1403,11 +1397,7 @@ def _require_compatible_incomplete_analysis(
     if spec_path.exists():
         raise ValueError(f"Material analysis specification is invalid: {spec_path}")
     stale_entries = (
-        [
-            path
-            for path in material_directory.iterdir()
-            if path.name != ".analysis.lock"
-        ]
+        [path for path in material_directory.iterdir() if path.name != ".analysis.lock"]
         if material_directory.is_dir()
         else []
     )
@@ -1432,7 +1422,9 @@ def _analyse_video_material(
     llm_config: LLMConfig,
     vlm_config: VLMConfig,
     material_directory: Path,
+    cancellation_token: CancellationToken | None = None,
 ) -> _MaterialAnalysisArtifacts:
+    raise_if_cancelled(cancellation_token)
     if annotation_config.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must be exactly 5")
     analysis_signature = _analysis_signature(
@@ -1449,6 +1441,7 @@ def _analyse_video_material(
     material_directory = material_directory.resolve()
     cached = _cache_result(material_directory, analysis_signature)
     if cached is not None:
+        raise_if_cancelled(cancellation_token)
         return cached
     _require_compatible_incomplete_analysis(
         material_directory,
@@ -1487,6 +1480,7 @@ def _analyse_video_material(
     if fps <= 0:
         raise ValueError("Could not determine source-video frame rate")
     if shots is None:
+        raise_if_cancelled(cancellation_token)
         stage_started = time.monotonic()
         log_event(
             "INFO",
@@ -1501,8 +1495,10 @@ def _analyse_video_material(
             video_path,
             duration_sec,
             detection_config,
+            cancellation_token,
         )
         _write_json_checkpoint(shots_path, shots)
+        raise_if_cancelled(cancellation_token)
         log_event(
             "INFO",
             "analyser",
@@ -1538,6 +1534,7 @@ def _analyse_video_material(
     context.set_artifact("source_metadata", source_metadata)
 
     stage_started = time.monotonic()
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1552,15 +1549,20 @@ def _analyse_video_material(
         material_directory,
         asr_config,
         provided_subtitle,
+        cancellation_token,
     )
+    raise_if_cancelled(cancellation_token)
     dialogue_checkpoint = _dialogue_checkpoint(material_directory)
     if dialogue_checkpoint is None:
+        raise_if_cancelled(cancellation_token)
         processed_subtitle, dialogues_json = postprocess_dialogues(
             source_srt,
             material_directory,
             llm_config,
             context=context,
+            cancellation_token=cancellation_token,
         )
+        raise_if_cancelled(cancellation_token)
         log_event(
             "INFO",
             "analyser",
@@ -1604,6 +1606,7 @@ def _analyse_video_material(
         else None
     )
     if segments is None:
+        raise_if_cancelled(cancellation_token)
         stage_started = time.monotonic()
         log_event(
             "INFO",
@@ -1623,6 +1626,7 @@ def _analyse_video_material(
             scene_config,
             material_directory / "scene_frames",
             material_directory / "scene_boundary_windows",
+            cancellation_token,
         )
         _write_json_checkpoint(
             material_directory / "scene_boundaries.json",
@@ -1645,6 +1649,7 @@ def _analyse_video_material(
                 "model": vlm_config.model,
             },
         )
+        raise_if_cancelled(cancellation_token)
         context.set_artifact("segments", segments)
         log_event(
             "INFO",
@@ -1673,6 +1678,7 @@ def _analyse_video_material(
         context.set_artifact("segments", segments)
 
     stage_started = time.monotonic()
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1683,7 +1689,13 @@ def _analyse_video_material(
         stage_count=7,
         segments=len(segments),
     )
-    _split_segment_clips(video_path, segments, material_directory)
+    _split_segment_clips(
+        video_path,
+        segments,
+        material_directory,
+        cancellation_token=cancellation_token,
+    )
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1697,6 +1709,7 @@ def _analyse_video_material(
     )
 
     stage_started = time.monotonic()
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1715,7 +1728,9 @@ def _analyse_video_material(
         material_directory / "shot_annotations",
         annotation_config.max_images_per_request,
         annotation_config.max_shots_per_request,
+        cancellation_token=cancellation_token,
     )
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1728,6 +1743,7 @@ def _analyse_video_material(
         elapsed_sec=time.monotonic() - stage_started,
     )
     stage_started = time.monotonic()
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1743,7 +1759,9 @@ def _analyse_video_material(
         context,
         llm_config,
         material_directory / "segment_summaries",
+        cancellation_token=cancellation_token,
     )
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "analyser",
@@ -1761,9 +1779,7 @@ def _analyse_video_material(
         scene_detection=SceneDetectionConfig(
             adaptive_threshold=detection_config.adaptive_threshold,
             adaptive_min_content_val=detection_config.adaptive_min_content_val,
-            adaptive_min_scene_len_sec=(
-                detection_config.adaptive_min_scene_len_sec
-            ),
+            adaptive_min_scene_len_sec=(detection_config.adaptive_min_scene_len_sec),
             duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
         ),
         segments=annotated_segments,
@@ -1782,12 +1798,10 @@ def _analyse_video_material(
     summary_path = material_directory / "video_summary.json"
     video_summary = _valid_video_summary(
         _read_json_checkpoint(summary_path),
-        [
-            str(segment["segment_id"])
-            for segment in description_dict["segments"]
-        ],
+        [str(segment["segment_id"]) for segment in description_dict["segments"]],
     )
     if video_summary is None:
+        raise_if_cancelled(cancellation_token)
         stage_started = time.monotonic()
         log_event(
             "INFO",
@@ -1814,6 +1828,7 @@ def _analyse_video_material(
             config=llm_config,
         )
         _write_json_checkpoint(summary_path, video_summary)
+        raise_if_cancelled(cancellation_token)
         log_event(
             "INFO",
             "analyser",
@@ -1822,9 +1837,7 @@ def _analyse_video_material(
             stage="video_summary",
             stage_index=7,
             stage_count=7,
-            story_beats=len(
-                video_summary["chronological_story_beats"]
-            ),
+            story_beats=len(video_summary["chronological_story_beats"]),
             elapsed_sec=time.monotonic() - stage_started,
         )
     else:
@@ -1838,6 +1851,7 @@ def _analyse_video_material(
             stage_index=7,
             stage_count=7,
         )
+    raise_if_cancelled(cancellation_token)
     _write_json_checkpoint(
         material_directory / "analysis_manifest.json",
         {
@@ -1854,6 +1868,7 @@ def _analyse_video_material(
         },
     )
     context.save_model_usage()
+    raise_if_cancelled(cancellation_token)
     return _MaterialAnalysisArtifacts(
         material_directory=material_directory,
         source_srt=source_srt,
@@ -1866,9 +1881,7 @@ def _analyse_video_material(
         video_summary=video_summary,
         model_usage_path=model_usage_path,
         model_usage_summary=context.model_usage_summary(),
-        model_usage_cumulative_summary=context.model_usage_summary(
-            include_prior=True
-        ),
+        model_usage_cumulative_summary=context.model_usage_summary(include_prior=True),
     )
 
 
@@ -1885,6 +1898,7 @@ class MaterialAnalystAgent:
         provided_subtitle: Path | None,
         *,
         material_directory: Path,
+        cancellation_token: CancellationToken | None = None,
     ) -> _MaterialAnalysisArtifacts:
         return _analyse_video_material(
             video_path,
@@ -1897,11 +1911,23 @@ class MaterialAnalystAgent:
             self.config.llm,
             self.config.vlm,
             material_directory,
+            cancellation_token=cancellation_token,
         )
 
-    def analyse_music(self, audio_path: Path) -> dict[str, Any]:
+    def analyse_music(
+        self,
+        audio_path: Path,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> dict[str, Any]:
         """Build edit-independent Music Memory for the complete source track."""
-        return analyze_music_memory(audio_path)
+        raise_if_cancelled(cancellation_token)
+        memory = analyze_music_memory(
+            audio_path,
+            cancellation_token=cancellation_token,
+        )
+        raise_if_cancelled(cancellation_token)
+        return memory
 
 
 __all__ = ["MaterialAnalystAgent"]

@@ -9,10 +9,30 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from cutmaster.adapters.web.presenters import (
+    data_root_migration_blockers,
+    material_reference_views,
+)
 from cutmaster.application.errors import (
     ApplicationError,
     MaterialMemoryTabNotFoundError,
     MaterialMemoryUnavailableError,
+    MaterialPreviewUnavailableError,
+    ProviderConnectionFailedError,
+    RenderDispatchFailedError,
+    StorageRevealFailedError,
+    StorageRevealUnavailableError,
+)
+from cutmaster.application.ports.data_root import (
+    DataRootMaintenanceError,
+    DataRootRestartRequiredError,
+)
+from cutmaster.application.settings import (
+    DataRootMigrationBlockedError,
+    DataRootMigrationCancellationTooLateError,
+    DataRootMigrationConflictError,
+    DataRootMigrationIdempotencyError,
+    DataRootMigrationNotFoundError,
 )
 from cutmaster.infrastructure.persistence.sqlite import (
     ActiveAttemptBlocker,
@@ -25,7 +45,6 @@ from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialNotFoundError,
     MaterialReferencedError,
 )
-
 
 LOGGER = logging.getLogger(__name__)
 PROBLEM_MEDIA_TYPE = "application/problem+json"
@@ -161,6 +180,20 @@ def install_problem_handlers(app: FastAPI) -> None:
             retryable=False,
         )
 
+    @app.exception_handler(MaterialPreviewUnavailableError)
+    async def material_preview_unavailable(
+        request: Request,
+        error: MaterialPreviewUnavailableError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=404,
+            code=error.code,
+            title="Material preview unavailable",
+            detail=str(error),
+            retryable=False,
+        )
+
     @app.exception_handler(MaterialNameCollisionError)
     async def material_name_collision(
         request: Request,
@@ -201,7 +234,10 @@ def install_problem_handlers(app: FastAPI) -> None:
             title="Material is still referenced",
             detail=str(error),
             command_id=_command_id(request),
-            blockers=[{"reference": value} for value in error.references],
+            blockers=material_reference_views(
+                request.app.state.cutmaster_application,
+                error.references,
+            ),
         )
 
     @app.exception_handler(ActiveAttemptBlocker)
@@ -217,8 +253,7 @@ def install_problem_handlers(app: FastAPI) -> None:
             detail=str(error),
             command_id=_command_id(request),
             blockers=[
-                {"type": "attempt", "attempt_id": value}
-                for value in error.attempt_ids
+                {"type": "attempt", "attempt_id": value} for value in error.attempt_ids
             ],
         )
 
@@ -235,6 +270,136 @@ def install_problem_handlers(app: FastAPI) -> None:
             detail=str(error),
             command_id=_command_id(request),
         )
+
+    @app.exception_handler(RenderDispatchFailedError)
+    async def render_dispatch_failed(
+        request: Request,
+        error: RenderDispatchFailedError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=500,
+            code=error.code,
+            title="Renderer worker launch failed",
+            detail=str(error),
+            command_id=_command_id(request),
+            retryable=True,
+        )
+
+    @app.exception_handler(ProviderConnectionFailedError)
+    async def provider_connection_failed(
+        request: Request,
+        error: ProviderConnectionFailedError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=502,
+            code=error.code,
+            title="Provider connection test failed",
+            detail=str(error),
+            retryable=True,
+        )
+
+    @app.exception_handler(StorageRevealUnavailableError)
+    async def storage_reveal_unavailable(
+        request: Request,
+        error: StorageRevealUnavailableError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=501,
+            code=error.code,
+            title="File-manager reveal unavailable",
+            detail=str(error),
+            retryable=False,
+        )
+
+    @app.exception_handler(StorageRevealFailedError)
+    async def storage_reveal_failed(
+        request: Request,
+        error: StorageRevealFailedError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=500,
+            code=error.code,
+            title="File-manager reveal failed",
+            detail=str(error),
+            command_id=_command_id(request),
+            retryable=True,
+        )
+
+    @app.exception_handler(DataRootMigrationBlockedError)
+    async def data_root_migration_blocked(
+        request: Request,
+        error: DataRootMigrationBlockedError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=409,
+            code=error.code,
+            title="Data Root Migration is blocked",
+            detail="Migration admission found one or more blockers.",
+            command_id=_command_id(request),
+            blockers=data_root_migration_blockers(error),
+        )
+
+    @app.exception_handler(DataRootMigrationNotFoundError)
+    async def data_root_migration_not_found(
+        request: Request,
+        error: DataRootMigrationNotFoundError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=404,
+            code=error.code,
+            title="Data Root Migration not found",
+            detail="No migration exists for the requested identifier.",
+        )
+
+    async def data_root_migration_conflict(
+        request: Request,
+        error: Exception,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=409,
+            code=str(getattr(error, "code", "data_root_migration_conflict")),
+            title="Data Root Migration command rejected",
+            detail="The migration command conflicts with durable control state.",
+            command_id=_command_id(request),
+        )
+
+    for conflict_type in (
+        DataRootMigrationConflictError,
+        DataRootMigrationIdempotencyError,
+        DataRootMigrationCancellationTooLateError,
+    ):
+        app.add_exception_handler(conflict_type, data_root_migration_conflict)
+
+    async def data_root_unavailable(
+        request: Request,
+        error: DataRootMaintenanceError | DataRootRestartRequiredError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=503,
+            code=error.code,
+            title=(
+                "CutMaster restart required"
+                if isinstance(error, DataRootRestartRequiredError)
+                else "Application Data Root maintenance"
+            ),
+            detail=(
+                "Restart CutMaster to use the migrated Application Data Root."
+                if isinstance(error, DataRootRestartRequiredError)
+                else "The Application Data Root is undergoing maintenance."
+            ),
+            retryable=True,
+        )
+
+    app.add_exception_handler(DataRootMaintenanceError, data_root_unavailable)
+    app.add_exception_handler(DataRootRestartRequiredError, data_root_unavailable)
 
     @app.exception_handler(ApplicationError)
     async def application_error(

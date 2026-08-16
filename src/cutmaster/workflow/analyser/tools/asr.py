@@ -11,7 +11,11 @@ import requests
 
 from cutmaster.configuration.schema import ASRConfig
 from cutmaster.infrastructure.observability.logging import log_event
-
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    WorkflowCancelledError,
+    raise_if_cancelled,
+)
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 UPLOAD_POLICY_URL = f"{DASHSCOPE_BASE_URL}/api/v1/uploads"
@@ -40,7 +44,11 @@ class UploadPolicy:
 def _headers(api_key: str, **extra: str) -> dict[str, str]:
     if not api_key.strip():
         raise ASRError("DashScope ASR API key is empty")
-    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", **extra}
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        **extra,
+    }
 
 
 def _response_json(response: requests.Response, action: str) -> dict[str, Any]:
@@ -58,16 +66,38 @@ def _response_json(response: requests.Response, action: str) -> dict[str, Any]:
     return data
 
 
-def extract_asr_audio(video_path: Path, audio_path: Path) -> Path:
+def extract_asr_audio(
+    video_path: Path,
+    audio_path: Path,
+    cancellation_token: CancellationToken | None = None,
+) -> Path:
+    raise_if_cancelled(cancellation_token)
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = audio_path.with_name(f"{audio_path.stem}.tmp{audio_path.suffix}")
     temporary.unlink(missing_ok=True)
     command = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000",
-        "-b:a", "64k", str(temporary),
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "64k",
+        str(temporary),
     ]
     subprocess.run(command, check=True)
+    try:
+        raise_if_cancelled(cancellation_token)
+    except WorkflowCancelledError:
+        temporary.unlink(missing_ok=True)
+        raise
     temporary.replace(audio_path)
     return audio_path
 
@@ -79,7 +109,9 @@ def _request_upload_policy(api_key: str, session=requests) -> UploadPolicy:
         headers=_headers(api_key),
         timeout=30,
     )
-    data = _response_json(response, "Requesting DashScope upload policy").get("data") or {}
+    data = (
+        _response_json(response, "Requesting DashScope upload policy").get("data") or {}
+    )
     required = ("upload_host", "upload_dir", "policy", "signature", "oss_access_key_id")
     missing = [name for name in required if not data.get(name)]
     if missing:
@@ -92,7 +124,9 @@ def _request_upload_policy(api_key: str, session=requests) -> UploadPolicy:
         oss_access_key_id=str(data["oss_access_key_id"]),
         object_acl=str(data.get("x_oss_object_acl") or "private"),
         forbid_overwrite=str(data.get("x_oss_forbid_overwrite") or "true"),
-        max_file_size_mb=float(data["max_file_size_mb"]) if data.get("max_file_size_mb") else None,
+        max_file_size_mb=float(data["max_file_size_mb"])
+        if data.get("max_file_size_mb")
+        else None,
     )
 
 
@@ -100,7 +134,9 @@ def _upload_audio(audio_path: Path, policy: UploadPolicy, session=requests) -> s
     if policy.max_file_size_mb is not None:
         max_bytes = policy.max_file_size_mb * 1024 * 1024
         if audio_path.stat().st_size > max_bytes:
-            raise ASRError(f"ASR audio exceeds DashScope upload limit ({policy.max_file_size_mb} MB)")
+            raise ASRError(
+                f"ASR audio exceeds DashScope upload limit ({policy.max_file_size_mb} MB)"
+            )
     safe_name = audio_path.name.replace("/", "_").replace("\\", "_")
     key = f"{policy.upload_dir}/{safe_name}"
     form = {
@@ -122,7 +158,9 @@ def _upload_audio(audio_path: Path, policy: UploadPolicy, session=requests) -> s
     try:
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise ASRError(f"Uploading audio to DashScope temporary storage failed: {response.text[:500]}") from exc
+        raise ASRError(
+            f"Uploading audio to DashScope temporary storage failed: {response.text[:500]}"
+        ) from exc
     return f"oss://{key}"
 
 
@@ -131,7 +169,10 @@ def _submit(api_key: str, oss_url: str, session=requests) -> str:
         TRANSCRIPTION_URL,
         headers=_headers(
             api_key,
-            **{"X-DashScope-Async": "enable", "X-DashScope-OssResourceResolve": "enable"},
+            **{
+                "X-DashScope-Async": "enable",
+                "X-DashScope-OssResourceResolve": "enable",
+            },
         ),
         json={
             "model": "fun-asr",
@@ -147,16 +188,24 @@ def _submit(api_key: str, oss_url: str, session=requests) -> str:
     return task_id
 
 
-def _poll(api_key: str, task_id: str, config: ASRConfig, session=requests) -> dict[str, Any]:
+def _poll(
+    api_key: str,
+    task_id: str,
+    config: ASRConfig,
+    session=requests,
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, Any]:
     deadline = time.monotonic() + config.timeout_sec
     last_status = "PENDING"
     while time.monotonic() < deadline:
+        raise_if_cancelled(cancellation_token)
         response = session.post(
             TASK_URL_TEMPLATE.format(task_id=task_id),
             headers=_headers(api_key),
             timeout=30,
         )
         output = _response_json(response, "Polling Fun-ASR task").get("output") or {}
+        raise_if_cancelled(cancellation_token)
         last_status = str(output.get("task_status") or "").upper()
         if last_status == "SUCCEEDED":
             results = output.get("results") or []
@@ -201,7 +250,9 @@ def _split_text(text: str, max_chars: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
-def _sentence_blocks(sentence: dict[str, Any], config: ASRConfig) -> list[tuple[float, float, str, Any]]:
+def _sentence_blocks(
+    sentence: dict[str, Any], config: ASRConfig
+) -> list[tuple[float, float, str, Any]]:
     words = sentence.get("words") or []
     if words:
         blocks: list[tuple[float, float, str, Any]] = []
@@ -222,7 +273,9 @@ def _sentence_blocks(sentence: dict[str, Any], config: ASRConfig) -> list[tuple[
                 or end - float(current[0]) > config.max_subtitle_duration_sec * 1000
             )
             if should_split:
-                blocks.append((float(current[0]), float(current[1]), str(current[2]), current[3]))
+                blocks.append(
+                    (float(current[0]), float(current[1]), str(current[2]), current[3])
+                )
                 current = None
             if current is None:
                 current = [start, end, text, speaker]
@@ -230,10 +283,14 @@ def _sentence_blocks(sentence: dict[str, Any], config: ASRConfig) -> list[tuple[
                 current[1] = end
                 current[2] = str(current[2]) + text
             if text[-1:] in PUNCTUATION_BREAKS:
-                blocks.append((float(current[0]), float(current[1]), str(current[2]), current[3]))
+                blocks.append(
+                    (float(current[0]), float(current[1]), str(current[2]), current[3])
+                )
                 current = None
         if current is not None:
-            blocks.append((float(current[0]), float(current[1]), str(current[2]), current[3]))
+            blocks.append(
+                (float(current[0]), float(current[1]), str(current[2]), current[3])
+            )
         if blocks:
             return blocks
 
@@ -247,33 +304,62 @@ def _sentence_blocks(sentence: dict[str, Any], config: ASRConfig) -> list[tuple[
     cursor = start
     blocks = []
     for index, chunk in enumerate(chunks):
-        chunk_end = end if index == len(chunks) - 1 else cursor + (end - start) * len(chunk) / total_chars
-        blocks.append((cursor, max(cursor + 200, chunk_end), chunk, sentence.get("speaker_id")))
+        chunk_end = (
+            end
+            if index == len(chunks) - 1
+            else cursor + (end - start) * len(chunk) / total_chars
+        )
+        blocks.append(
+            (cursor, max(cursor + 200, chunk_end), chunk, sentence.get("speaker_id"))
+        )
         cursor = chunk_end
     return blocks
 
 
 def _to_srt(data: dict[str, Any], config: ASRConfig) -> str:
-    blocks = [block for sentence in _iter_sentences(data) for block in _sentence_blocks(sentence, config)]
+    blocks = [
+        block
+        for sentence in _iter_sentences(data)
+        for block in _sentence_blocks(sentence, config)
+    ]
     if not blocks:
         raise ASRError("Fun-ASR response contains no usable subtitle blocks")
     output: list[str] = []
     for index, (start, end, text, speaker) in enumerate(blocks, start=1):
-        prefix = f"Speaker {int(speaker) + 1}: " if isinstance(speaker, (int, float)) else ""
-        output.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{prefix}{text.strip()}\n")
+        prefix = (
+            f"Speaker {int(speaker) + 1}: " if isinstance(speaker, (int, float)) else ""
+        )
+        output.append(
+            f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{prefix}{text.strip()}\n"
+        )
     return "\n".join(output).rstrip() + "\n"
 
 
-def transcribe_bailian(audio_path: Path, subtitle_path: Path, config: ASRConfig) -> Path:
+def transcribe_bailian(
+    audio_path: Path,
+    subtitle_path: Path,
+    config: ASRConfig,
+    cancellation_token: CancellationToken | None = None,
+) -> Path:
+    raise_if_cancelled(cancellation_token)
     policy = _request_upload_policy(config.api_key)
+    raise_if_cancelled(cancellation_token)
     oss_url = _upload_audio(audio_path, policy)
+    raise_if_cancelled(cancellation_token)
     task_id = _submit(config.api_key, oss_url)
-    result = _poll(config.api_key, task_id, config)
+    raise_if_cancelled(cancellation_token)
+    result = _poll(
+        config.api_key,
+        task_id,
+        config,
+        cancellation_token=cancellation_token,
+    )
     transcription_url = str(result.get("transcription_url") or "").strip()
     if not transcription_url:
         raise ASRError("Fun-ASR result is missing transcription_url")
     response = requests.get(transcription_url, timeout=60)
     data = _response_json(response, "Downloading Fun-ASR result")
+    raise_if_cancelled(cancellation_token)
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     subtitle_path.write_text(_to_srt(data, config), encoding="utf-8")
     return subtitle_path
@@ -284,13 +370,16 @@ def prepare_subtitles(
     output_dir: Path,
     config: ASRConfig,
     provided_subtitle: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Path:
+    raise_if_cancelled(cancellation_token)
     subtitle_path = output_dir / "source.srt"
     if provided_subtitle is not None:
         if not provided_subtitle.is_file():
             raise FileNotFoundError(f"Subtitle file not found: {provided_subtitle}")
         if provided_subtitle.resolve() != subtitle_path.resolve():
             shutil.copy2(provided_subtitle, subtitle_path)
+        raise_if_cancelled(cancellation_token)
         return subtitle_path
     if config.reuse and subtitle_path.is_file() and subtitle_path.stat().st_size > 0:
         log_event(
@@ -316,7 +405,7 @@ def prepare_subtitles(
             sample_rate_hz=16000,
             channels=1,
         )
-        extract_asr_audio(video_path, audio_path)
+        extract_asr_audio(video_path, audio_path, cancellation_token)
         log_event(
             "INFO",
             "asr",
@@ -335,7 +424,14 @@ def prepare_subtitles(
         stage="transcription",
         backend=config.backend,
     )
-    result = transcribe_bailian(audio_path, subtitle_path, config)
+    raise_if_cancelled(cancellation_token)
+    result = transcribe_bailian(
+        audio_path,
+        subtitle_path,
+        config,
+        cancellation_token,
+    )
+    raise_if_cancelled(cancellation_token)
     log_event(
         "INFO",
         "asr",

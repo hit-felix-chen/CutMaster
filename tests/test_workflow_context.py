@@ -305,6 +305,67 @@ def test_usage_separates_current_run_from_cumulative(tmp_path) -> None:
     assert persisted["cumulative"]["summary"]["total_cost_yuan"] == 0.000014
 
 
+def test_checkpoint_usage_prior_is_aggregate_only_and_not_rebilled(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    package = PromptPackage(
+        stage=PromptStage.PLANNERS,
+        task=PromptTask.SLOT_ARRANGEMENT,
+        prompt_version="test",
+        operation="plan",
+        system_prompt="Return JSON",
+        user_prompt="Create slots",
+        response_contract=ResponseContract(
+            version="test",
+            schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+        ),
+        context_keys=(),
+        modality=PromptModality.TEXT,
+    )
+    monkeypatch.setattr(
+        "cutmaster.workflow.shared.execution_context.generate_text",
+        lambda *_args, **_kwargs: model_response(),
+    )
+    config = LLMConfig(
+        model="test",
+        base_url="",
+        api_key="test",
+        input_price_yuan_per_million_tokens=2.0,
+        cached_input_price_yuan_per_million_tokens=0.5,
+        output_price_yuan_per_million_tokens=10.0,
+    )
+    first = WorkflowContext(
+        tmp_path / "first-history.json",
+        model_usage_path=tmp_path / "first-usage.json",
+    )
+    first.call_prompt(package=package, config=config)
+    prior = first.model_usage_summary()
+
+    resumed_usage_path = tmp_path / "resumed-usage.json"
+    resumed = WorkflowContext(
+        tmp_path / "resumed-history.json",
+        model_usage_path=resumed_usage_path,
+        prior_model_usage_summary=prior,
+        prior_model_call_count=1,
+    )
+    resumed.call_prompt(package=package, config=config)
+    resumed.save_model_usage()
+
+    persisted = json.loads(resumed_usage_path.read_text(encoding="utf-8"))
+    assert persisted["current_run"]["summary"]["request_count"] == 1
+    assert persisted["current_run"]["summary"]["total_tokens"] == 120
+    assert persisted["cumulative"]["summary"]["request_count"] == 2
+    assert persisted["cumulative"]["summary"]["total_tokens"] == 240
+    assert persisted["current_run"]["call_ids"] == [2]
+    assert [call["call_id"] for call in persisted["calls"]] == [2]
+
+
 def test_request_failure_logging_does_not_duplicate_operation(
     tmp_path,
     monkeypatch,

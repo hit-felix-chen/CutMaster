@@ -1,12 +1,11 @@
 # Use one migratable Application Data Root
 
-**Status: root resolution and managed namespaces implemented; guarded migration
-and its Settings UI proposed.**
+**Status: implemented, including the guarded background migration and Settings
+control plane.**
 
 The backend stores all managed local state beneath one Application Data Root,
 defaulting to `CutMaster/.cutmaster/`, while allowing the user to choose another
-local directory. An empty root may be changed directly, but once data exists the
-path changes only through a guarded Data Root Migration that requires no active
+local directory. The path changes through a guarded Data Root Migration that requires no active
 Attempt, pauses queued-job dispatch, copies and verifies the complete canonical
 managed database and filesystem state, and atomically switches only after
 success. Direct Workflow Bundles stored under `direct/` are application-owned
@@ -16,11 +15,20 @@ one root avoids split-brain project and Material state; preserving the original
 as authoritative until verification prevents a failed move from making
 existing work unavailable.
 
-The proposed migration will be available only when no Execution Attempt is
-Running, Retrying, or Stopping, and it will never stop active work implicitly.
-Its supervisor/root-lease implementation will pause dispatch and managed-state
-mutation during copy and verification so migration cannot race CLI, Benchmark,
-or queued-job writes. None of that migration coordination is implemented yet.
+Migration is admitted only when no Execution Attempt is Running, Retrying, or
+Stopping, and it never stops active work implicitly. A stable external control
+database and `flock` lease pause new dispatch and fence every persistent
+Application read or mutation across Web, CLI, Benchmark, and worker processes.
+The background worker creates an online SQLite backup, copies the explicit
+canonical namespaces, verifies sizes, SHA-256 digests, SQLite integrity,
+foreign keys, schema, and queued-job count, then atomically replaces the
+external pointer. During maintenance every business API read and write returns
+a typed 503; only health, migration control/status, and static SPA resources
+remain available. A successful switch enters `restart_required`; the next
+backend start validates the destination owner marker and completes the durable
+migration. Cancellation or failure removes only manifest-owned staging files,
+keeps unknown external entries, leaves the original pointer authoritative, and
+restores dispatch.
 
 Direct Workflow Bundles have no automatic retention policy. Settings reports
 their count and size. Bulk deletion with two-click confirmation and active-lock

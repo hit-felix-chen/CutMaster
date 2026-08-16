@@ -13,6 +13,7 @@ from cutmaster.application.jobs import ClaimJobCommand, FailAttemptCommand
 from cutmaster.application.runs import RunSubmissionView
 from cutmaster.domain.attempts import TERMINAL_ATTEMPT_STATUSES
 from cutmaster.domain.ids import JobId
+from cutmaster.infrastructure.observability.logging import error_summary
 
 
 class RunDispatcher(Protocol):
@@ -120,7 +121,8 @@ class SubprocessRunDispatcher:
             self._application.jobs.mark_failed(
                 FailAttemptCommand(
                     claimed.attempt.attempt_id,
-                    f"Unable to launch ASTER Run worker: {error}",
+                    "Unable to launch ASTER Run worker: "
+                    f"{error_summary(error) or type(error).__name__}",
                 )
             )
 

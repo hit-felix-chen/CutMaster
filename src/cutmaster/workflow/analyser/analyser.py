@@ -21,6 +21,7 @@ from cutmaster.workflow.contracts.material import (
     AnalysedMusicRuntimeHandle,
     AnalysedVideoRuntimeHandle,
 )
+from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 
 
 def _valid_music_memory(path: Path, source_audio: Path) -> dict[str, Any] | None:
@@ -72,7 +73,13 @@ class Analyser:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
-    def analyse(self, request: AnalyseVideoRequest) -> VideoAnalysisResult:
+    def analyse(
+        self,
+        request: AnalyseVideoRequest,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> VideoAnalysisResult:
+        raise_if_cancelled(cancellation_token)
         source_video = _require_source(request.material.source_path, "Video")
         subtitle_path = request.material.subtitle_path
         if subtitle_path is not None:
@@ -94,12 +101,25 @@ class Analyser:
             material_id=str(request.material.material_id),
             material_name=request.material.material_name,
         )
-        artifacts = MaterialAnalystAgent(self.config).analyse(
-            source_video,
-            request.options.video_title or request.material.material_name,
-            subtitle_path,
-            material_directory=memory_root,
+        analyst = MaterialAnalystAgent(self.config)
+        video_title = request.options.video_title or request.material.material_name
+        artifacts = (
+            analyst.analyse(
+                source_video,
+                video_title,
+                subtitle_path,
+                material_directory=memory_root,
+            )
+            if cancellation_token is None
+            else analyst.analyse(
+                source_video,
+                video_title,
+                subtitle_path,
+                material_directory=memory_root,
+                cancellation_token=cancellation_token,
+            )
         )
+        raise_if_cancelled(cancellation_token)
         memory_schema_version = str(
             artifacts.video_description.get("schema_version") or ""
         ).strip()
@@ -126,13 +146,12 @@ class Analyser:
                 else None
             ),
             model_usage_summary=artifacts.model_usage_summary,
-            model_usage_cumulative_summary=(
-                artifacts.model_usage_cumulative_summary
-            ),
+            model_usage_cumulative_summary=(artifacts.model_usage_cumulative_summary),
         )
         # Result publication belongs to the Application Material service. The
         # stage writes only its invocation workspace and never marks a Catalog
         # Material READY by creating a canonical file directly.
+        raise_if_cancelled(cancellation_token)
         result.write(workspace / "analysis_result.json")
         log_event(
             "SUCCESS",
@@ -147,7 +166,13 @@ class Analyser:
         )
         return result
 
-    def analyse_music(self, request: AnalyseMusicRequest) -> MusicAnalysisResult:
+    def analyse_music(
+        self,
+        request: AnalyseMusicRequest,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> MusicAnalysisResult:
+        raise_if_cancelled(cancellation_token)
         source_audio = _require_source(request.material.source_path, "Music")
         memory_root = request.material.memory_root.resolve()
         if not memory_root.is_dir() or memory_root.is_symlink():
@@ -169,8 +194,17 @@ class Analyser:
         memory = _valid_music_memory(memory_path, source_audio)
         analysis_reused = memory is not None
         if memory is None:
-            memory = MaterialAnalystAgent(self.config).analyse_music(source_audio)
+            analyst = MaterialAnalystAgent(self.config)
+            if cancellation_token is None:
+                memory = analyst.analyse_music(source_audio)
+            else:
+                memory = analyst.analyse_music(
+                    source_audio,
+                    cancellation_token=cancellation_token,
+                )
+            raise_if_cancelled(cancellation_token)
             write_music_memory(memory_path, memory)
+        raise_if_cancelled(cancellation_token)
         elapsed = time.monotonic() - started
         result = MusicAnalysisResult(
             status="success",
@@ -182,6 +216,7 @@ class Analyser:
             elapsed_sec=elapsed,
             analysis_reused=analysis_reused,
         )
+        raise_if_cancelled(cancellation_token)
         result.write(workspace / "music_analysis_result.json")
         log_event(
             "SUCCESS",

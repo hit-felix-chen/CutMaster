@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from cutmaster.application.materials.service import MaterialsService
+from cutmaster.application.ports.data_root import (
+    DataRootCoordinator,
+    root_shared_operation,
+)
 from cutmaster.application.projects.commands import (
     CreateProjectCommand,
     DeleteProjectCommand,
@@ -16,7 +24,7 @@ from cutmaster.application.projects.commands import (
 )
 from cutmaster.application.projects.views import DeletedProjectView, ProjectView
 from cutmaster.configuration.effective import EffectiveConfiguration
-from cutmaster.domain.ids import MaterialId, ProjectId
+from cutmaster.domain.ids import JobId, MaterialId, ProjectId
 from cutmaster.domain.materials import MaterialType
 from cutmaster.domain.projects import CreativeBrief
 from cutmaster.infrastructure.persistence.sqlite import SQLiteApplicationStore
@@ -27,6 +35,7 @@ class ProjectsService:
 
     __slots__ = (
         "_effective_configuration",
+        "_data_root_coordinator",
         "_materials_instance",
         "_store_instance",
     )
@@ -37,8 +46,10 @@ class ProjectsService:
         store: SQLiteApplicationStore | None = None,
         *,
         materials: MaterialsService | None = None,
+        data_root_coordinator: DataRootCoordinator | None = None,
     ) -> None:
         self._effective_configuration = effective_configuration
+        self._data_root_coordinator = data_root_coordinator
         self._store_instance = store
         self._materials_instance = materials
 
@@ -60,17 +71,23 @@ class ProjectsService:
     def _materials(self) -> MaterialsService:
         materials = self._materials_instance
         if materials is None:
-            materials = MaterialsService(self._effective_configuration)
+            materials = MaterialsService(
+                self._effective_configuration,
+                data_root_coordinator=self._data_root_coordinator,
+            )
             self._materials_instance = materials
         return materials
 
+    @root_shared_operation
     def create(self, command: CreateProjectCommand) -> ProjectView:
         result = self._store.create_project(command.command_id, command.name)
         return _project_view(result.value)
 
+    @root_shared_operation
     def get(self, project_id: ProjectId) -> ProjectView:
         return _project_view(self._store.get_project(project_id))
 
+    @root_shared_operation
     def list(
         self,
         *,
@@ -97,6 +114,7 @@ class ProjectsService:
             )
         return tuple(items)
 
+    @root_shared_operation
     def rename(self, command: RenameProjectCommand) -> ProjectView:
         _require_project_id(command.project_id)
         result = self._store.rename_project(
@@ -106,6 +124,7 @@ class ProjectsService:
         )
         return _project_view(result.value)
 
+    @root_shared_operation
     def set_materials(self, command: SetProjectMaterialsCommand) -> ProjectView:
         _require_project_id(command.project_id)
         if len(command.video_material_ids) > 1 or len(command.music_material_ids) > 1:
@@ -147,6 +166,7 @@ class ProjectsService:
             )
         return _project_view(result.value)
 
+    @root_shared_operation
     def save_creative_brief(
         self,
         command: SaveCreativeBriefCommand,
@@ -164,6 +184,7 @@ class ProjectsService:
         )
         return _project_view(result.value)
 
+    @root_shared_operation
     def save_setup(self, command: SaveProjectSetupCommand) -> ProjectView:
         """Atomically save Material selection and Creative Brief."""
 
@@ -219,14 +240,36 @@ class ProjectsService:
                 )
         return expected_types
 
+    @root_shared_operation
     def delete(self, command: DeleteProjectCommand) -> DeletedProjectView:
         _require_project_id(command.project_id)
         result = self._store.delete_project(command.command_id, command.project_id)
+        self._delete_project_artifacts(result.value)
         return DeletedProjectView(
             project_id=ProjectId.parse(result.value["project_id"]),
             deleted=bool(result.value["deleted"]),
         )
 
+    def _delete_project_artifacts(self, value: Mapping[str, Any]) -> None:
+        owner_raw = value.get("artifact_owner_relative_path")
+        if owner_raw is None:
+            # Historical receipts did not retain exact ownership metadata. Do
+            # not infer deletion targets from mutable state.
+            return
+        project_id = ProjectId.parse(str(value["project_id"]))
+        expected_owner = (Path("projects") / str(project_id)).as_posix()
+        if owner_raw != expected_owner:
+            raise ValueError("Invalid deleted Project artifact ownership metadata")
+        root = self._effective_configuration.data_root.resolve()
+        _delete_owned_directory(root, root / expected_owner)
+        job_ids = value.get("job_ids", ())
+        if not isinstance(job_ids, Sequence) or isinstance(job_ids, (str, bytes)):
+            raise TypeError("Invalid deleted Project Job ownership metadata")
+        for raw in job_ids:
+            job_id = JobId.parse(str(raw))
+            _delete_owned_file(root, root / "logs" / "jobs" / f"{job_id}.log")
+
+    @root_shared_operation
     def references(self, material_id: MaterialId) -> tuple[str, ...]:
         if not isinstance(material_id, MaterialId):
             raise TypeError("material_id must be a MaterialId")
@@ -262,6 +305,51 @@ def _project_view(value: dict[str, object]) -> ProjectView:
         created_at=datetime.fromisoformat(str(value["created_at"])),
         updated_at=datetime.fromisoformat(str(value["updated_at"])),
     )
+
+
+def _require_owned_path(root: Path, target: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Application Data Root is not a safe directory")
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            "Managed Project artifact escapes the Application Data Root"
+        ) from exc
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Managed Project artifact parent cannot be a symlink")
+        if current.exists() and not current.is_dir():
+            raise ValueError("Managed Project artifact parent is not a directory")
+    try:
+        target.parent.resolve().relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            "Managed Project artifact parent escapes the Application Data Root"
+        ) from exc
+
+
+def _delete_owned_directory(root: Path, target: Path) -> None:
+    _require_owned_path(root, target)
+    if target.is_symlink():
+        target.unlink()
+        return
+    if not target.exists():
+        return
+    if not target.is_dir():
+        raise ValueError("Managed Project artifact owner path is not a directory")
+    shutil.rmtree(target)
+
+
+def _delete_owned_file(root: Path, target: Path) -> None:
+    _require_owned_path(root, target)
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+        return
+    if target.exists():
+        raise ValueError("Managed Project Job log path is not a file")
 
 
 __all__ = ["ProjectsService"]

@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cutmaster.application.direct.artifacts import (
     ARTIFACT_MANIFEST_VERSION,
@@ -25,25 +25,26 @@ from cutmaster.application.direct.commands import (
 )
 from cutmaster.application.materials.service import MaterialsService, MaterialView
 from cutmaster.application.ports.material_catalog import MaterialBinding
+from cutmaster.application.ports.data_root import (
+    DataRootCoordinator,
+    root_shared_operation,
+)
 from cutmaster.configuration.effective import EffectiveConfiguration
 from cutmaster.configuration.runtime import resolve_runtime_config
 from cutmaster.contracts.workflow import ExecuteWorkflowCommand, WorkflowResult
 from cutmaster.domain.ids import MaterialId
 from cutmaster.domain.materials import MaterialCondition, MaterialType
 from cutmaster.infrastructure.observability.logging import configure_logging, log_event
-from cutmaster.workflow.ports import ProgressReporter
 from cutmaster.workflow.contracts import (
     AnalyseMusicRequest,
     AnalyseVideoRequest,
     AnalysisWorkspace,
-    AnalysedMusicRuntimeHandle,
-    AnalysedVideoRuntimeHandle,
     MaterialRuntimeHandle,
     MusicAnalysisOptions,
     MusicAnalysisResult,
-    PlannersRequest,
     PlannersBrief,
     PlannersOptions,
+    PlannersRequest,
     PlannersWorkspace,
     RenderOptions,
     RenderOutputTarget,
@@ -53,6 +54,14 @@ from cutmaster.workflow.contracts import (
     VideoAnalysisOptions,
     VideoAnalysisResult,
 )
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    raise_if_cancelled,
+)
+
+if TYPE_CHECKING:
+    from cutmaster.workflow.contracts.checkpoints import PlannersCheckpointStore
 
 
 @dataclass(frozen=True)
@@ -66,12 +75,13 @@ class _ComponentInvocationPaths:
 class DirectService:
     """Execute CutMaster synchronously without HTTP or managed product history."""
 
-    __slots__ = ("_effective_configuration", "_materials")
+    __slots__ = ("_data_root_coordinator", "_effective_configuration", "_materials")
 
     def __init__(
         self,
         effective_configuration: EffectiveConfiguration,
         materials: MaterialsService,
+        data_root_coordinator: DataRootCoordinator | None = None,
     ) -> None:
         if not isinstance(effective_configuration, EffectiveConfiguration):
             raise TypeError("effective_configuration must be EffectiveConfiguration")
@@ -79,7 +89,9 @@ class DirectService:
             raise TypeError("materials must be MaterialsService")
         self._effective_configuration = effective_configuration
         self._materials = materials
+        self._data_root_coordinator = data_root_coordinator
 
+    @root_shared_operation
     def analyse_video(self, command: AnalyseVideoCommand) -> VideoAnalysisResult:
         paths = self._component_paths(command.output_dir, "analyser")
         workspace = paths.workspace
@@ -96,11 +108,13 @@ class DirectService:
                 video_title=command.video_title,
                 subtitle_path=command.subtitle_path,
                 material_reused=view.reused,
+                cancellation_token=command.cancellation_token,
             )
 
     # The CLI spelling is retained as an ergonomic alias.
     analyse = analyse_video
 
+    @root_shared_operation
     def analyse_music(self, command: AnalyseMusicCommand) -> MusicAnalysisResult:
         paths = self._component_paths(command.output_dir, "analyser/music")
         workspace = paths.workspace
@@ -115,8 +129,10 @@ class DirectService:
                 binding,
                 workspace,
                 material_reused=view.reused,
+                cancellation_token=command.cancellation_token,
             )
 
+    @root_shared_operation
     def plan(self, command: PlanCommand):
         paths = self._component_paths(command.output_dir, "planners")
         workspace = paths.workspace
@@ -144,8 +160,11 @@ class DirectService:
                 max_clip_duration_sec=command.max_clip_duration_sec,
                 overwrite=command.overwrite,
                 progress_reporter=command.progress_reporter,
+                cancellation_token=command.cancellation_token,
+                checkpoint_store=command.checkpoint_store,
             )
 
+    @root_shared_operation
     def render(self, command: RenderCommand):
         paths = self._component_paths(command.output_dir, "renderer")
         workspace = paths.workspace
@@ -161,6 +180,7 @@ class DirectService:
                 overwrite=command.overwrite,
             )
 
+    @root_shared_operation
     def execute_workflow(
         self,
         command: ExecuteWorkflowCommand,
@@ -413,14 +433,12 @@ class DirectService:
         if subtitle_path is not None:
             if subtitle_path.is_symlink():
                 raise ValueError(
-                    "A runtime subtitle handle must reference a managed "
-                    "regular file"
+                    "A runtime subtitle handle must reference a managed regular file"
                 )
             managed_subtitle = subtitle_path.resolve(strict=True)
             if not managed_subtitle.is_file():
                 raise ValueError(
-                    "A runtime subtitle handle must reference a managed "
-                    "regular file"
+                    "A runtime subtitle handle must reference a managed regular file"
                 )
             try:
                 managed_subtitle.relative_to(binding.source_path.parent)
@@ -446,6 +464,7 @@ class DirectService:
         video_title: str,
         subtitle_path: Path | None,
         material_reused: bool,
+        cancellation_token: CancellationToken | None = None,
     ) -> VideoAnalysisResult:
         if subtitle_path is not None:
             managed_subtitle = self._materials.ensure_subtitle(
@@ -463,18 +482,26 @@ class DirectService:
             self._effective_configuration,
             required=frozenset(required),
         )
-        result = Analyser(config).analyse(
-            AnalyseVideoRequest(
-                material=self._runtime_handle(
-                    binding,
-                    subtitle_path=managed_subtitle,
-                ),
-                options=VideoAnalysisOptions(video_title=video_title),
-                workspace=AnalysisWorkspace(workspace.resolve()),
+        request = AnalyseVideoRequest(
+            material=self._runtime_handle(
+                binding,
+                subtitle_path=managed_subtitle,
+            ),
+            options=VideoAnalysisOptions(video_title=video_title),
+            workspace=AnalysisWorkspace(workspace.resolve()),
+        )
+        analyser = Analyser(config)
+        result = (
+            analyser.analyse(request)
+            if cancellation_token is None
+            else analyser.analyse(
+                request,
+                cancellation_token=cancellation_token,
             )
         )
         result = replace(result, material_reused=material_reused)
         staged_result = result.write(workspace / "analysis_result.json")
+        raise_if_cancelled(cancellation_token)
         self._materials.publish_analysis_result(binding, staged_result)
         self._copy_memory_artifact(result.source_srt_path, workspace / "source.srt")
         self._copy_memory_artifact(
@@ -555,19 +582,28 @@ class DirectService:
         workspace: Path,
         *,
         material_reused: bool,
+        cancellation_token: CancellationToken | None = None,
     ) -> MusicAnalysisResult:
         from cutmaster.workflow.analyser import Analyser
 
         config = resolve_runtime_config(self._effective_configuration)
-        result = Analyser(config).analyse_music(
-            AnalyseMusicRequest(
-                material=self._runtime_handle(binding),
-                options=MusicAnalysisOptions(),
-                workspace=AnalysisWorkspace(workspace.resolve()),
+        request = AnalyseMusicRequest(
+            material=self._runtime_handle(binding),
+            options=MusicAnalysisOptions(),
+            workspace=AnalysisWorkspace(workspace.resolve()),
+        )
+        analyser = Analyser(config)
+        result = (
+            analyser.analyse_music(request)
+            if cancellation_token is None
+            else analyser.analyse_music(
+                request,
+                cancellation_token=cancellation_token,
             )
         )
         result = replace(result, material_reused=material_reused)
         staged_result = result.write(workspace / "music_analysis_result.json")
+        raise_if_cancelled(cancellation_token)
         self._materials.publish_analysis_result(binding, staged_result)
         self._copy_memory_artifact(
             result.music.music_memory_path,
@@ -589,6 +625,8 @@ class DirectService:
         max_clip_duration_sec: float | None,
         overwrite: bool,
         progress_reporter: ProgressReporter | None = None,
+        cancellation_token: CancellationToken | None = None,
+        checkpoint_store: PlannersCheckpointStore | None = None,
     ):
         from cutmaster.workflow.planners import Planners
 
@@ -596,23 +634,25 @@ class DirectService:
             self._effective_configuration,
             required=frozenset({"llm", "vlm"}),
         )
-        return Planners(config).plan(
-            PlannersRequest(
-                video=analysis.video,
-                music=music_analysis.music,
-                brief=PlannersBrief(prompt, target_output_length_sec),
-                options=PlannersOptions(
-                    target_shot_length_sec=target_shot_length_sec,
-                    prompt_type=prompt_type,
-                    video_title=(
-                        video_title or analysis.video.material.material_name
-                    ),
-                    max_clip_duration_sec=max_clip_duration_sec,
-                ),
-                workspace=PlannersWorkspace(workspace.resolve()),
+        request = PlannersRequest(
+            video=analysis.video,
+            music=music_analysis.music,
+            brief=PlannersBrief(prompt, target_output_length_sec),
+            options=PlannersOptions(
+                target_shot_length_sec=target_shot_length_sec,
+                prompt_type=prompt_type,
+                video_title=(video_title or analysis.video.material.material_name),
+                max_clip_duration_sec=max_clip_duration_sec,
             ),
+            workspace=PlannersWorkspace(workspace.resolve()),
+        )
+        planners = Planners(config)
+        return planners.plan(
+            request,
             overwrite=overwrite,
             progress_reporter=progress_reporter,
+            cancellation_token=cancellation_token,
+            checkpoint_store=checkpoint_store,
         )
 
     @staticmethod
@@ -674,7 +714,9 @@ class DirectService:
             )
             result = None
         if view is None:
-            raise FileNotFoundError("Video Material was not found in the active catalog")
+            raise FileNotFoundError(
+                "Video Material was not found in the active catalog"
+            )
         binding = stack.enter_context(self._materials.lease(view.material_id))
         if result is None:
             result = VideoAnalysisResult.read(

@@ -1,7 +1,6 @@
 # Use portable Managed Artifact References
 
-**Status: domain values and managed SQLite references implemented; Data Root
-Migration proposed.**
+**Status: Implemented, including guarded Data Root Migration.**
 
 Managed backend state stores stable entity identities—including Material ID
 for every Material relation—and Application Data Root-relative artifact paths

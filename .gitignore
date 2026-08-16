@@ -24,4 +24,5 @@ web/test-results/
 
 # local Application bootstrap and non-secret settings
 .cutmaster-location
+.cutmaster-control/
 *.local.toml

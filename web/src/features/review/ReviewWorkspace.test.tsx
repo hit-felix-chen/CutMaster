@@ -5,7 +5,12 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ReviewWorkspace } from '@/features/review/ReviewWorkspace'
-import type { FrozenEditReview } from '@/features/shared/api'
+import type {
+  ExecutionSummary,
+  FrozenEditReview,
+  RenderVariant,
+  RenderVariantListItem,
+} from '@/features/shared/api'
 import i18n from '@/i18n'
 
 function jsonResponse(value: unknown, status = 200) {
@@ -16,11 +21,10 @@ function jsonResponse(value: unknown, status = 200) {
 }
 
 function reviewFixture(
-  options: { editId?: string; sequence?: number; candidateSpace?: boolean } = {},
+  options: { editId?: string; sequence?: number } = {},
 ): FrozenEditReview {
   const editId = options.editId ?? 'edit_1'
   const sequence = options.sequence ?? 1
-  const candidateSpace = options.candidateSpace ?? false
   const edit = {
     edit_id: editId,
     run_id: 'run_1',
@@ -63,8 +67,6 @@ function reviewFixture(
         source_url: '/api/materials/mat_music/source',
       },
     },
-    candidate_space_available: candidateSpace,
-    candidate_space_unavailable_reason: candidateSpace ? null : 'not_persisted',
     slots: [
       {
         slot_id: 'slot_01',
@@ -141,31 +143,27 @@ function reviewFixture(
           salience: 0.8,
           visual_evidence: 'Both protagonists remain visible.',
           selected: true,
-          eligible_for_replacement: candidateSpace,
+          eligible_for_replacement: false,
           media_url: '/api/materials/mat_video/source',
         },
-        ...(candidateSpace
-          ? [
-              {
-                candidate_id: 'candidate_b',
-                slot_id: 'slot_02',
-                source_start_sec: 30,
-                source_end_sec: 34,
-                source_timestamp: '00:00:30,000-00:00:34,000',
-                description: 'A quieter alternate city crossing.',
-                semantic_relevance: 0.9,
-                visual_score: 0.92,
-                protagonist_visibility_score: 0.9,
-                emotional_intensity: 0.7,
-                kinetic_energy: 0.4,
-                salience: 0.85,
-                visual_evidence: 'The alternate preserves screen direction.',
-                selected: false,
-                eligible_for_replacement: true,
-                media_url: '/api/materials/mat_video/source',
-              },
-            ]
-          : []),
+        {
+          candidate_id: 'candidate_b',
+          slot_id: 'slot_02',
+          source_start_sec: 30,
+          source_end_sec: 34,
+          source_timestamp: '00:00:30,000-00:00:34,000',
+          description: 'A quieter alternate city crossing.',
+          semantic_relevance: 0.9,
+          visual_score: 0.92,
+          protagonist_visibility_score: 0.9,
+          emotional_intensity: 0.7,
+          kinetic_energy: 0.4,
+          salience: 0.85,
+          visual_evidence: 'The alternate preserves screen direction.',
+          selected: false,
+          eligible_for_replacement: true,
+          media_url: '/api/materials/mat_video/source',
+        },
       ],
     },
     variants: [],
@@ -182,6 +180,88 @@ function reviewFixture(
       music_beats_sec: [0, 2, 4, 6],
       music_beats_available: true,
     },
+  }
+}
+
+function renderVariant(
+  status: RenderVariant['status'],
+  audioMode: RenderVariant['specification']['audio_mode'] = 'dialogue',
+): RenderVariant {
+  return {
+    render_variant_id: `variant_${status}_${audioMode}`,
+    project_id: 'project_1',
+    run_id: 'run_1',
+    run_sequence: 1,
+    edit_id: 'edit_1',
+    edit_sequence: 1,
+    edit_origin: 'initial',
+    status,
+    specification: {
+      schema_version: '1.0',
+      audio_mode: audioMode,
+      renderer: {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        encoder: 'libx264',
+        threads: 8,
+        bgm_volume: 0.3,
+        original_volume: 0,
+        audio_sample_rate: 48000,
+        dialogue_audio: {},
+      },
+    },
+    frame_count: status === 'ready' ? 240 : null,
+    duration_sec: status === 'ready' ? 8 : null,
+    size_bytes: status === 'ready' ? 12_345 : null,
+    failure_message: status === 'failed' ? 'ffmpeg failed' : null,
+    media_url:
+      status === 'ready'
+        ? `/api/render-variants/variant_${status}_${audioMode}/media`
+        : null,
+    download_url:
+      status === 'ready'
+        ? `/api/render-variants/variant_${status}_${audioMode}/download`
+        : null,
+    created_at: '2026-08-13T00:02:00Z',
+    updated_at: '2026-08-13T00:02:00Z',
+  }
+}
+
+function renderExecution(status: string): ExecutionSummary {
+  return {
+    attempt: {
+      attempt_id: 'attempt_render_1',
+      operation_type: 'renderer',
+      owner_type: 'render_variant',
+      owner_id: 'variant_1',
+      sequence: 1,
+      status,
+      created_at: '2026-08-13T00:02:00Z',
+      updated_at: '2026-08-13T00:02:00Z',
+    },
+    job: {
+      job_id: 'job_render_1',
+      attempt_id: 'attempt_render_1',
+      status,
+      stop_requested: false,
+      progress: {},
+      created_at: '2026-08-13T00:02:00Z',
+      updated_at: '2026-08-13T00:02:00Z',
+    },
+  }
+}
+
+function renderItem(
+  status: RenderVariant['status'],
+  audioMode: RenderVariant['specification']['audio_mode'] = 'dialogue',
+): RenderVariantListItem {
+  return {
+    render_variant: renderVariant(status, audioMode),
+    execution:
+      status === 'queued' || status === 'rendering'
+        ? renderExecution(status === 'queued' ? 'queued' : 'running')
+        : null,
   }
 }
 
@@ -222,7 +302,65 @@ afterEach(() => {
 })
 
 describe('Review workspace', () => {
-  it('renders a historical Frozen Edit from real projection data and simulates its source sequence', async () => {
+  it('accepts a complete Candidate Bundle without legacy availability fields', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(reviewFixture())),
+    )
+    renderReview('/projects/project_1/runs/run_1/review/edit_1?slot=slot_02')
+    const user = userEvent.setup()
+
+    expect(await screen.findByText('A quieter alternate city crossing.')).toBeVisible()
+    expect(
+      screen.queryByText(
+        /Candidate Space is unavailable|before Candidate Space persistence/,
+      ),
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Use candidate' }))
+    expect(screen.getByText('Unsaved changes')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Save revision' })).toBeEnabled()
+  })
+
+  it.each([
+    {
+      locale: 'en-US',
+      message: 'A required Review artifact is unavailable or failed validation.',
+    },
+    {
+      locale: 'zh-CN',
+      message: '审阅所需的产物不可用或校验失败。',
+    },
+  ])(
+    'shows the localised Review artifact error for a 409 in $locale',
+    async ({ locale, message }) => {
+      await i18n.changeLanguage(locale)
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) =>
+          String(input).endsWith('/api/frozen-edits/edit_1/review')
+            ? jsonResponse(
+                {
+                  code: 'review_artifact_unavailable',
+                  status: 409,
+                  detail: 'private artifact path and validation detail',
+                },
+                409,
+              )
+            : jsonResponse({ items: [], count: 0 }),
+        ),
+      )
+      renderReview('/projects/project_1/runs/run_1/review/edit_1?slot=slot_02')
+
+      expect(await screen.findByText(message)).toBeVisible()
+      expect(
+        screen.queryByText('private artifact path and validation detail'),
+      ).not.toBeInTheDocument()
+      expect(screen.queryByText('The selected city crossing.')).not.toBeInTheDocument()
+      expect(document.querySelector('video')).not.toBeInTheDocument()
+    },
+  )
+
+  it('renders a Frozen Edit from a complete Candidate Bundle and simulates its source sequence', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse(reviewFixture())),
@@ -235,7 +373,6 @@ describe('Review workspace', () => {
       await screen.findByText('The opening line establishes the story.'),
     ).toBeVisible()
     expect(screen.getByText('Story Anchor')).toBeVisible()
-    expect(screen.getByText(/created before Candidate Space persistence/)).toBeVisible()
     expect(document.querySelectorAll('video')).toHaveLength(1)
     expect(document.querySelector('video')).toHaveAttribute(
       'src',
@@ -267,8 +404,8 @@ describe('Review workspace', () => {
       }
       return jsonResponse(
         url.endsWith('/edit_2/review')
-          ? reviewFixture({ editId: 'edit_2', sequence: 2, candidateSpace: true })
-          : reviewFixture({ candidateSpace: true }),
+          ? reviewFixture({ editId: 'edit_2', sequence: 2 })
+          : reviewFixture(),
       )
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -300,7 +437,7 @@ describe('Review workspace', () => {
   it('blocks leaving a dirty revision and supports accessible discard confirmation', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => jsonResponse(reviewFixture({ candidateSpace: true }))),
+      vi.fn(async () => jsonResponse(reviewFixture())),
     )
     const router = renderReview(
       '/projects/project_1/runs/run_1/review/edit_1?slot=slot_02',
@@ -325,5 +462,187 @@ describe('Review workspace', () => {
     await user.click(screen.getByRole('link', { name: 'Back to Run' }))
     await user.click(screen.getByRole('button', { name: 'Discard changes and leave' }))
     expect(await screen.findByRole('heading', { name: 'Run detail' })).toBeVisible()
+  })
+
+  it('creates an explicit Dialogue Preview and selects its real queued Variant', async () => {
+    let items: RenderVariantListItem[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/frozen-edits/edit_1/review')) {
+        return jsonResponse(reviewFixture())
+      }
+      if (url.endsWith('/api/frozen-edits/edit_1/render-variants')) {
+        if (init?.method === 'POST') {
+          const queued = renderItem('queued')
+          items = [queued]
+          return jsonResponse(
+            {
+              render_variant: queued.render_variant,
+              execution: queued.execution,
+              created: true,
+            },
+            202,
+          )
+        }
+        return jsonResponse({ items, count: items.length })
+      }
+      return new Response(null, { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const router = renderReview(
+      '/projects/project_1/runs/run_1/review/edit_1?slot=slot_01',
+    )
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Render Dialogue Preview' }),
+    )
+
+    await waitFor(() =>
+      expect(router.state.location.search).toContain('variant=variant_queued_dialogue'),
+    )
+    expect(
+      screen.getByRole('option', {
+        name: 'Variant 1 · Dialogue Preview · Queued',
+      }),
+    ).toBeVisible()
+    expect(screen.getByText('Variant 1')).toBeVisible()
+    expect(screen.queryByText('variant_queued_dialogue')).not.toBeInTheDocument()
+    expect((await screen.findAllByText('Queued'))[0]).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeVisible()
+    const createCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith('/api/frozen-edits/edit_1/render-variants') &&
+        init?.method === 'POST',
+    )
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+      audio_mode: 'dialogue',
+    })
+    expect(createCall?.[1]?.headers).toMatchObject({
+      'Idempotency-Key': expect.any(String),
+    })
+  })
+
+  it('resumes only an Interrupted Variant through its recovery endpoint', async () => {
+    let item = renderItem('interrupted', 'bgm_only')
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/frozen-edits/edit_1/review')) {
+        return jsonResponse(reviewFixture())
+      }
+      if (url.endsWith('/api/frozen-edits/edit_1/render-variants')) {
+        return jsonResponse({ items: [item], count: 1 })
+      }
+      if (
+        url.endsWith('/api/render-variants/variant_interrupted_bgm_only/resume') &&
+        init?.method === 'POST'
+      ) {
+        item = {
+          ...item,
+          render_variant: {
+            ...item.render_variant,
+            status: 'queued',
+            updated_at: '2026-08-13T00:03:00Z',
+          },
+          execution: renderExecution('queued'),
+        }
+        return jsonResponse(
+          {
+            render_variant: item.render_variant,
+            execution: item.execution,
+            created: false,
+          },
+          202,
+        )
+      }
+      return new Response(null, { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderReview(
+      '/projects/project_1/runs/run_1/review/edit_1?variant=variant_interrupted_bgm_only',
+    )
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Resume' }))
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/render-variants/variant_interrupted_bgm_only/resume',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    )
+    expect((await screen.findAllByText('Queued'))[0]).toBeVisible()
+  })
+
+  it('shows a localised render failure without exposing the worker summary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).endsWith('/api/frozen-edits/edit_1/review')
+          ? jsonResponse(reviewFixture())
+          : jsonResponse({ items: [renderItem('failed')], count: 1 }),
+      ),
+    )
+    renderReview(
+      '/projects/project_1/runs/run_1/review/edit_1?variant=variant_failed_dialogue',
+    )
+
+    expect(
+      await screen.findByText(
+        'Rendering did not complete. Check the source materials and render settings, then retry.',
+      ),
+    ).toHaveAttribute('role', 'alert')
+    expect(screen.queryByText('ffmpeg failed')).not.toBeInTheDocument()
+  })
+
+  it('plays a Ready Variant and deletes it only on the second click without leaving the Edit', async () => {
+    let items = [renderItem('ready')]
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/frozen-edits/edit_1/review')) {
+        return jsonResponse(reviewFixture())
+      }
+      if (url.endsWith('/api/frozen-edits/edit_1/render-variants')) {
+        return jsonResponse({ items, count: items.length })
+      }
+      if (
+        url.endsWith('/api/render-variants/variant_ready_dialogue') &&
+        init?.method === 'DELETE'
+      ) {
+        items = []
+        return jsonResponse({
+          render_variant_id: 'variant_ready_dialogue',
+          deleted: true,
+        })
+      }
+      return new Response(null, { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const router = renderReview(
+      '/projects/project_1/runs/run_1/review/edit_1?variant=variant_ready_dialogue',
+    )
+    const user = userEvent.setup()
+
+    await waitFor(() => expect(document.querySelector('video')).not.toBeNull())
+    const video = document.querySelector('video')
+    expect(video).toHaveAttribute(
+      'src',
+      '/api/render-variants/variant_ready_dialogue/media',
+    )
+    expect(screen.getByRole('link', { name: 'Download copy' })).toHaveAttribute(
+      'href',
+      '/api/render-variants/variant_ready_dialogue/download',
+    )
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(
+      false,
+    )
+    await user.click(screen.getByRole('button', { name: 'Click again to delete' }))
+
+    await waitFor(() => expect(router.state.location.search).not.toContain('variant='))
+    expect(router.state.location.pathname).toBe(
+      '/projects/project_1/runs/run_1/review/edit_1',
+    )
+    expect(await screen.findByText('Source review')).toBeVisible()
   })
 })

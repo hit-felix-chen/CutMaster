@@ -198,6 +198,23 @@ def plan_edit_slots(
     *,
     target_clip_duration_sec: float,
 ) -> list[dict[str, Any]]:
+    prime_arrangement_context(request, music_profile, context)
+    return _plan_edit_slots_from_context(
+        request,
+        music_profile,
+        config,
+        context,
+        target_clip_duration_sec=target_clip_duration_sec,
+    )
+
+
+def prime_arrangement_context(
+    request: PlannersRequest,
+    music_profile: dict[str, Any],
+    context: WorkflowContext,
+) -> None:
+    """Rebuild request-derived in-memory context without a model call."""
+
     context.set_artifact("request", _request_metadata(request))
     context.set_artifact(
         "music_profile",
@@ -213,6 +230,23 @@ def plan_edit_slots(
         "source_story_context",
         _source_story_context(video_description, video_summary),
     )
+    return None
+
+
+def _plan_edit_slots_from_context(
+    request: PlannersRequest,
+    music_profile: dict[str, Any],
+    config: LLMConfig,
+    context: WorkflowContext,
+    *,
+    target_clip_duration_sec: float,
+) -> list[dict[str, Any]]:
+    video_description = context.get_artifact("video_description")
+    if video_description is None:
+        raise RuntimeError("Video description must be available before Slot arrangement")
+    video_summary = context.get_artifact("video_summary")
+    if video_summary is None:
+        raise RuntimeError("Video summary must be available before Slot arrangement")
     planners_feedback = context.get_artifact("planners_feedback")
     forbidden_segment_ids = {
         str(value)

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
   ChevronLeft,
+  Clapperboard,
   Film,
   Lock,
   Music2,
@@ -22,21 +23,26 @@ import {
 } from 'react-router-dom'
 
 import { appRoutes } from '@/app/routes'
-import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
+import { useEventStream } from '@/app/providers/event-stream-context'
+import { LoadingState } from '@/components/ui/AsyncState'
+import { OperationProblem } from '@/components/ui/OperationProblem'
 import { StatusBadge } from '@/components/ui/StatusBadge'
 import {
   changesReviewContext,
   revisionReplacements,
   type RevisionDraft,
 } from '@/features/review/review-draft'
+import { RenderVariantActions } from '@/features/renders/RenderVariantActions'
+import { isRenderExecutionActive } from '@/features/renders/render-state'
 import {
-  ApiError,
   api,
   type FrozenEditReview,
+  type RenderAudioMode,
   type ReviewCandidate,
   type ReviewRenderVariant,
   type ReviewSlot,
 } from '@/features/shared/api'
+import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
 
 function padSequence(value: number) {
   return String(value).padStart(2, '0')
@@ -109,10 +115,6 @@ function scoreLabel(value: number | null) {
   if (value === null || !Number.isFinite(value)) return '—'
   const normalized = value > 1 ? value / 5 : value
   return `${Math.round(Math.max(0, Math.min(1, normalized)) * 100)}%`
-}
-
-function errorDetail(error: unknown) {
-  return error instanceof ApiError ? (error.problem?.detail ?? error.message) : null
 }
 
 function selectedCandidate(
@@ -263,15 +265,6 @@ function SlotInspector({
             <p>{t('review.anchorLocked')}</p>
           </div>
         ) : null}
-        {!data.candidate_space_available ? (
-          <div className="review-notice">
-            <p>
-              {data.candidate_space_unavailable_reason === 'not_persisted'
-                ? t('review.candidateSpaceNotPersisted')
-                : t('review.candidateSpaceUnavailable')}
-            </p>
-          </div>
-        ) : null}
         <div className="review-candidate-list">
           {candidates.map((candidate) => (
             <CandidateCard
@@ -279,7 +272,7 @@ function SlotInspector({
               candidate={candidate}
               active={candidate.candidate_id === currentId}
               original={candidate.candidate_id === slot.selected_candidate_id}
-              disabled={slot.is_anchor || !data.candidate_space_available}
+              disabled={slot.is_anchor}
               onPreview={() => onPreview(candidate)}
               onChoose={() => onChoose(candidate)}
             />
@@ -303,6 +296,7 @@ function ReviewPlayer({
   previewCandidate,
   nextSlotId,
   onAdvanceSlot,
+  onMediaError,
 }: {
   data: FrozenEditReview
   slot: ReviewSlot
@@ -311,15 +305,20 @@ function ReviewPlayer({
   previewCandidate: ReviewCandidate | undefined
   nextSlotId: string | null
   onAdvanceSlot: (slotId: string) => void
+  onMediaError: () => void
 }) {
   const { t } = useTranslation('common')
   const player = useRef<HTMLVideoElement>(null)
   const advancing = useRef(false)
   const resumeAfterSeek = useRef(false)
   const sourceCandidate = previewCandidate ?? candidate
-  const useVariant = Boolean(variant?.media_url && !previewCandidate)
+  const variantMediaUrl =
+    variant?.status === 'ready'
+      ? (variant.media_url ?? api.renderVariants.mediaUrl(variant.render_variant_id))
+      : null
+  const useVariant = Boolean(variantMediaUrl && !previewCandidate)
   const src = useVariant
-    ? (variant?.media_url ?? '')
+    ? (variantMediaUrl ?? '')
     : sourceCandidate?.media_url || data.media.video.source_url
   const start = useVariant
     ? slot.output_start_sec
@@ -345,13 +344,19 @@ function ReviewPlayer({
     return () => video.removeEventListener('loadedmetadata', seek)
   }, [src, start])
 
-  if (variant && !variant.media_url && !previewCandidate) {
+  if (variant && variant.status !== 'ready' && !previewCandidate) {
     return (
       <section className="review-player review-player--empty">
         <Film size={32} aria-hidden="true" />
         <h2>{t('review.variantUnavailable')}</h2>
         <StatusBadge status={variant.status} />
-        {variant.failure_message ? <p>{variant.failure_message}</p> : null}
+        {variant.failure_message ? (
+          <ExecutionFailure
+            operationType="rendering"
+            ownerType="render_variant"
+            status={variant.status}
+          />
+        ) : null}
       </section>
     )
   }
@@ -365,6 +370,7 @@ function ReviewPlayer({
         controls
         playsInline
         preload="metadata"
+        onError={onMediaError}
         onTimeUpdate={(event) => {
           if (event.currentTarget.currentTime < end || advancing.current) return
           if (!useVariant && !previewCandidate && nextSlotId) {
@@ -578,10 +584,17 @@ export function ReviewWorkspace() {
   const { t } = useTranslation('common')
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { isConnected } = useEventStream()
   const { projectId = '', runId = '', editId = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [draft, setDraft] = useState<RevisionDraft>({})
   const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null)
+  const updateSelection = (key: 'slot' | 'variant', value: string | null) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    setSearchParams(next, { replace: true })
+  }
   const dirty = Object.keys(draft).length > 0
   const dirtyRef = useRef(dirty)
   useEffect(() => {
@@ -594,6 +607,64 @@ export function ReviewWorkspace() {
     queryKey: ['frozen-edit-review', editId],
     queryFn: () => api.frozenEdits.review(editId),
     enabled: Boolean(editId),
+  })
+  const renderVariants = useQuery({
+    queryKey: ['render-variants', 'edit', editId],
+    queryFn: () => api.renderVariants.listForEdit(editId),
+    enabled: Boolean(editId),
+    refetchInterval: (query) =>
+      !isConnected &&
+      query.state.data?.items?.some(({ render_variant: variant, execution }) =>
+        isRenderExecutionActive(variant, execution),
+      )
+        ? 2000
+        : false,
+  })
+
+  const refreshRenders = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: ['render-variants', 'edit', editId],
+      }),
+      queryClient.invalidateQueries({ queryKey: ['frozen-edit-review', editId] }),
+      queryClient.invalidateQueries({
+        queryKey: ['project-render-variants', projectId],
+      }),
+      queryClient.invalidateQueries({ queryKey: ['project-workspace', projectId] }),
+      queryClient.invalidateQueries({ queryKey: ['activity'] }),
+    ])
+  }
+  const createRender = useMutation({
+    mutationFn: (audioMode: RenderAudioMode) =>
+      api.renderVariants.create(editId, audioMode),
+    onSuccess: async ({ render_variant: variant }) => {
+      setPreviewCandidateId(null)
+      updateSelection('variant', variant.render_variant_id)
+      await refreshRenders()
+    },
+  })
+  const recoverRender = useMutation({
+    mutationFn: ({
+      variantId,
+      action,
+    }: {
+      variantId: string
+      action: 'retry' | 'resume' | 'renderAgain'
+    }) => api.renderVariants[action](variantId),
+    onSuccess: refreshRenders,
+  })
+  const stopRender = useMutation({
+    mutationFn: (attemptId: string) => api.attempts.stop(attemptId),
+    onSuccess: refreshRenders,
+  })
+  const deleteRender = useMutation({
+    mutationFn: (variantId: string) => api.renderVariants.delete(variantId),
+    onSuccess: async (_, variantId) => {
+      if (searchParams.get('variant') === variantId) {
+        updateSelection('variant', null)
+      }
+      await refreshRenders()
+    },
   })
 
   useEffect(() => {
@@ -623,7 +694,18 @@ export function ReviewWorkspace() {
 
   if (review.isPending) return <LoadingState />
   if (review.isError) {
-    return <ErrorState onRetry={() => void review.refetch()} />
+    return (
+      <div className="async-state async-state--error">
+        <OperationProblem error={review.error} />
+        <button
+          className="button button--secondary"
+          type="button"
+          onClick={() => void review.refetch()}
+        >
+          {t('common.retry')}
+        </button>
+      </div>
+    )
   }
 
   const data = review.data
@@ -639,9 +721,19 @@ export function ReviewWorkspace() {
     )
   }
   const requestedVariantId = searchParams.get('variant')
-  const selectedVariant = data.variants.find(
-    (variant) => variant.render_variant_id === requestedVariantId,
+  const variantItems =
+    renderVariants.data?.items ??
+    data.variants.map((render_variant) => ({
+      render_variant,
+      execution: null,
+    }))
+  const selectedVariantItem = variantItems.find(
+    ({ render_variant: variant }) => variant.render_variant_id === requestedVariantId,
   )
+  const selectedVariantNumber = selectedVariantItem
+    ? variantItems.indexOf(selectedVariantItem) + 1
+    : null
+  const selectedVariant = selectedVariantItem?.render_variant
   const currentCandidate = selectedCandidate(data, selectedSlot, draft)
   const selectedSlotIndex = data.slots.findIndex(
     (slot) => slot.slot_id === selectedSlot.slot_id,
@@ -652,14 +744,17 @@ export function ReviewWorkspace() {
         (candidate) => candidate.candidate_id === previewCandidateId,
       )
     : undefined
-  const saveError = errorDetail(save.error)
-
-  const updateSelection = (key: 'slot' | 'variant', value: string | null) => {
-    const next = new URLSearchParams(searchParams)
-    if (value) next.set(key, value)
-    else next.delete(key)
-    setSearchParams(next, { replace: true })
-  }
+  const renderOperation =
+    createRender.isPending ||
+    recoverRender.isPending ||
+    stopRender.isPending ||
+    deleteRender.isPending
+  const renderError =
+    createRender.error ??
+    recoverRender.error ??
+    stopRender.error ??
+    deleteRender.error ??
+    renderVariants.error
 
   return (
     <div className="project-section project-section--review">
@@ -708,12 +803,14 @@ export function ReviewWorkspace() {
               }}
             >
               <option value="">{t('review.sourceReview')}</option>
-              {data.variants.map((variant, index) => (
+              {variantItems.map(({ render_variant: variant }, index) => (
                 <option
                   key={variant.render_variant_id}
                   value={variant.render_variant_id}
                 >
-                  {t('review.variantLabel', { number: index + 1 })} · {variant.status}
+                  {t('review.variantLabel', { number: index + 1 })} ·{' '}
+                  {t(`renders.audioMode.${variant.specification.audio_mode}`)} ·{' '}
+                  {t(`renders.status.${variant.status}`)}
                 </option>
               ))}
             </select>
@@ -736,7 +833,7 @@ export function ReviewWorkspace() {
           <button
             className="button button--primary"
             type="button"
-            disabled={!dirty || !data.candidate_space_available || save.isPending}
+            disabled={!dirty || save.isPending}
             onClick={() => save.mutate()}
           >
             <Save size={15} aria-hidden="true" />
@@ -745,10 +842,82 @@ export function ReviewWorkspace() {
         </div>
       </header>
 
+      <section className="review-render-console" aria-label={t('renders.title')}>
+        <header>
+          <div>
+            <span className="eyebrow">Renderer</span>
+            <h2>
+              {t('renders.targetEdit', { sequence: padSequence(data.edit.sequence) })}
+            </h2>
+            <p>{t('renders.targetHelp')}</p>
+          </div>
+          <div className="review-render-console__create">
+            <button
+              className="button button--secondary"
+              type="button"
+              disabled={dirty || renderOperation}
+              onClick={() => createRender.mutate('dialogue')}
+            >
+              <Clapperboard size={15} aria-hidden="true" />
+              {t('renders.renderDialoguePreview')}
+            </button>
+            <button
+              className="button button--secondary"
+              type="button"
+              disabled={dirty || renderOperation}
+              onClick={() => createRender.mutate('bgm_only')}
+            >
+              <Music2 size={15} aria-hidden="true" />
+              {t('renders.createBgmOnly')}
+            </button>
+          </div>
+        </header>
+        {dirty ? <p className="render-hint">{t('renders.saveRevisionFirst')}</p> : null}
+        {renderVariants.isPending ? (
+          <p className="render-hint">{t('renders.loadingVariants')}</p>
+        ) : null}
+        {selectedVariantItem ? (
+          <div className="review-render-console__selected">
+            <div>
+              <strong>
+                {t(
+                  `renders.audioMode.${selectedVariantItem.render_variant.specification.audio_mode}`,
+                )}
+              </strong>
+              <span>{t('review.variantLabel', { number: selectedVariantNumber })}</span>
+              <StatusBadge status={selectedVariantItem.render_variant.status} />
+            </div>
+            <RenderVariantActions
+              variant={selectedVariantItem.render_variant}
+              execution={selectedVariantItem.execution}
+              busy={renderOperation}
+              onRecover={(action) =>
+                recoverRender.mutate({
+                  variantId: selectedVariantItem.render_variant.render_variant_id,
+                  action,
+                })
+              }
+              onStop={(attemptId) => stopRender.mutate(attemptId)}
+              onDelete={() =>
+                deleteRender.mutate(
+                  selectedVariantItem.render_variant.render_variant_id,
+                )
+              }
+            />
+          </div>
+        ) : null}
+        {renderError ? (
+          <div className="review-save-error" role="alert">
+            <strong>{t('renders.operationFailed')}</strong>
+            <OperationProblem error={renderError} />
+          </div>
+        ) : null}
+      </section>
+
       {save.isError ? (
         <div className="review-save-error" role="alert">
           <strong>{t('review.saveFailed')}</strong>
-          {saveError ? <p>{saveError}</p> : null}
+          <OperationProblem error={save.error} />
         </div>
       ) : null}
 
@@ -790,6 +959,7 @@ export function ReviewWorkspace() {
           previewCandidate={previewCandidate}
           nextSlotId={nextSlotId}
           onAdvanceSlot={(slotId) => updateSelection('slot', slotId)}
+          onMediaError={() => void renderVariants.refetch()}
         />
       </div>
       <ReviewTimeline

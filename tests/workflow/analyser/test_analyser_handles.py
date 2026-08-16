@@ -4,12 +4,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import cutmaster.workflow.analyser.analyser as analyser_module
+import pytest
 
+import cutmaster.workflow.analyser.analyser as analyser_module
 from cutmaster.configuration.schema import (
-    ASRConfig,
     AnalyserConfig,
     AppConfig,
+    ASRConfig,
     LLMConfig,
     MaterialAnalysisConfig,
     PlannersConfig,
@@ -30,6 +31,7 @@ from cutmaster.workflow.contracts.analysis import (
     VideoAnalysisOptions,
 )
 from cutmaster.workflow.contracts.material import MaterialRuntimeHandle
+from cutmaster.workflow.ports import WorkflowCancelledError
 
 
 def _config(tmp_path: Path) -> AppConfig:
@@ -132,6 +134,49 @@ class _FakeMaterialAnalyst:
             "energy_curve": [{"time_sec": 0.0, "energy": 0.5}],
             "sections": [{"start_sec": 0.0, "end_sec": 120.0}],
         }
+
+
+def test_video_stage_stops_after_analysis_boundary_before_result_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Token:
+        cancelled = False
+
+        def raise_if_cancelled(self) -> None:
+            if self.cancelled:
+                raise WorkflowCancelledError("analysis stopped")
+
+    token = _Token()
+
+    class _CancellingMaterialAnalyst(_FakeMaterialAnalyst):
+        def analyse(self, *args, cancellation_token, **kwargs):
+            artifacts = super().analyse(*args, **kwargs)
+            assert cancellation_token is token
+            token.cancelled = True
+            return artifacts
+
+    monkeypatch.setattr(
+        analyser_module,
+        "MaterialAnalystAgent",
+        _CancellingMaterialAnalyst,
+    )
+    handle = _handle(tmp_path, MaterialType.VIDEO)
+    workspace = (tmp_path / "cancelled-workspace").resolve()
+    request = AnalyseVideoRequest(
+        material=handle,
+        options=VideoAnalysisOptions(video_title="Feature"),
+        workspace=AnalysisWorkspace(workspace),
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="analysis stopped"):
+        Analyser(_config(tmp_path)).analyse(
+            request,
+            cancellation_token=token,
+        )
+
+    assert (handle.memory_root / "video_description.json").is_file()
+    assert not (workspace / "analysis_result.json").exists()
 
 
 def test_video_stage_uses_handle_memory_and_reuses_completed_analysis(

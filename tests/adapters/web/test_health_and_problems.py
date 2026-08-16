@@ -10,6 +10,12 @@ def test_health_is_real_secret_free_application_state(client: TestClient) -> Non
     assert response.json() == {
         "status": "ok",
         "service": "cutmaster",
+        "data_root": {
+            "maintenance": False,
+            "restart_required": False,
+            "migration_id": None,
+            "migration_status": None,
+        },
         "configured": {"llm": False, "vlm": False, "asr": False},
     }
 

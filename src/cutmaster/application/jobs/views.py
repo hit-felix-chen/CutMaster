@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from cutmaster.domain.attempts import AttemptStatus
 from cutmaster.domain.ids import AttemptId, JobId
@@ -21,6 +22,7 @@ class AttemptView:
     status: AttemptStatus
     command_id: str
     error_message: str | None
+    model_usage_summary: Mapping[str, Any] | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -61,7 +63,40 @@ class EventView:
     schema_version: str
 
 
+@dataclass(frozen=True)
+class EventBoundsView:
+    first_event_id: int | None
+    last_event_id: int | None
+
+    def __post_init__(self) -> None:
+        first = self.first_event_id
+        last = self.last_event_id
+        if (first is None) != (last is None):
+            raise ValueError("Durable Event bounds must both be present or absent")
+        if first is None:
+            return
+        assert last is not None
+        if (
+            not isinstance(first, int)
+            or isinstance(first, bool)
+            or not isinstance(last, int)
+            or isinstance(last, bool)
+            or first <= 0
+            or last < first
+        ):
+            raise ValueError("Durable Event bounds are invalid")
+
+
+@dataclass(frozen=True)
+class EventPageView:
+    items: tuple[EventView, ...]
+    bounds: EventBoundsView
+
+
 def attempt_view(value: Mapping[str, Any]) -> AttemptView:
+    usage = value.get("model_usage_summary")
+    if usage is not None and not isinstance(usage, Mapping):
+        raise TypeError("Invalid Attempt model usage persistence result")
     return AttemptView(
         attempt_id=AttemptId.parse(str(value["attempt_id"])),
         operation_type=str(value["operation_type"]),
@@ -72,6 +107,9 @@ def attempt_view(value: Mapping[str, Any]) -> AttemptView:
         command_id=str(value["command_id"]),
         error_message=(
             None if value.get("error_message") is None else str(value["error_message"])
+        ),
+        model_usage_summary=(
+            None if usage is None else MappingProxyType(dict(usage))
         ),
         created_at=datetime.fromisoformat(str(value["created_at"])),
         started_at=(
@@ -114,10 +152,11 @@ def job_view(value: Mapping[str, Any]) -> JobView:
 
 __all__ = [
     "AttemptView",
+    "EventBoundsView",
+    "EventPageView",
     "EventView",
     "JobSubmissionView",
     "JobView",
     "attempt_view",
     "job_view",
 ]
-

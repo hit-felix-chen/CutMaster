@@ -7,11 +7,17 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from cutmaster.application.jobs.views import AttemptView, JobView, attempt_view, job_view
+from cutmaster.application.jobs.views import (
+    AttemptView,
+    JobView,
+    attempt_view,
+    job_view,
+)
 from cutmaster.application.renders.views import RenderVariantView
+from cutmaster.domain.attempts import AttemptStatus
 from cutmaster.domain.artifacts import ManagedArtifactReference
 from cutmaster.domain.edits import FrozenEditOrigin
-from cutmaster.domain.ids import FrozenEditId, MaterialId, ProjectId, RunId
+from cutmaster.domain.ids import AttemptId, FrozenEditId, MaterialId, ProjectId, RunId
 from cutmaster.domain.projects import CreativeBrief
 from cutmaster.domain.runs import RunStatus
 
@@ -64,6 +70,20 @@ class DeletedRunView:
 
 
 @dataclass(frozen=True)
+class AttemptUsageView:
+    attempt_id: AttemptId
+    sequence: int
+    status: AttemptStatus
+    model_usage_summary: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class RunUsageView:
+    attempt_usage: tuple[AttemptUsageView, ...]
+    run_total: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class FrozenEditReviewView:
     """Transport-neutral projection of one immutable Frozen Edit."""
 
@@ -73,8 +93,6 @@ class FrozenEditReviewView:
     plan: Mapping[str, Any]
     video_material_id: MaterialId
     music_material_id: MaterialId
-    candidate_space_available: bool
-    candidate_space_unavailable_reason: str | None
     slots: tuple[Mapping[str, Any], ...]
     candidates: Mapping[str, tuple[Mapping[str, Any], ...]]
     dialogue_cues: tuple[Mapping[str, Any], ...]
@@ -104,7 +122,9 @@ def run_view(value: Mapping[str, Any]) -> RunView:
         ),
         configuration=MappingProxyType(dict(configuration)),
         failure_message=(
-            None if value.get("failure_message") is None else str(value["failure_message"])
+            None
+            if value.get("failure_message") is None
+            else str(value["failure_message"])
         ),
         created_at=datetime.fromisoformat(str(value["created_at"])),
         updated_at=datetime.fromisoformat(str(value["updated_at"])),
@@ -145,11 +165,13 @@ def run_submission_view(value: Mapping[str, Any]) -> RunSubmissionView:
 
 
 __all__ = [
+    "AttemptUsageView",
     "CompletedRunView",
     "DeletedRunView",
     "FrozenEditView",
     "FrozenEditReviewView",
     "RunSubmissionView",
+    "RunUsageView",
     "RunView",
     "frozen_edit_view",
     "run_submission_view",

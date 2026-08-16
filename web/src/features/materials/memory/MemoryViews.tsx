@@ -1,5 +1,18 @@
-import { AudioWaveform, Captions, Clock3, Film, Gauge, Music2 } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import {
+  AudioWaveform,
+  Camera,
+  Captions,
+  ChevronLeft,
+  Clock3,
+  Eye,
+  Film,
+  Gauge,
+  MapPin,
+  MessageSquareText,
+  Music2,
+  Users,
+} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { formatDuration, formatFrameRate, formatNumber } from '@/i18n/formatters'
@@ -15,6 +28,24 @@ function record(value: unknown): DataRecord {
 function recordsPage(value: unknown): DataRecord[] {
   const items = record(value).items
   return Array.isArray(items) ? items.map(record) : []
+}
+
+function records(value: unknown): DataRecord[] {
+  return Array.isArray(value) ? value.map(record) : []
+}
+
+function numericItems(value: unknown): number[] {
+  const items = record(value).items
+  return Array.isArray(items)
+    ? items.filter(
+        (item): item is number => typeof item === 'number' && Number.isFinite(item),
+      )
+    : []
+}
+
+function pageTotal(value: unknown) {
+  const page = record(value)
+  return numberValue(page.total) ?? recordsPage(value).length
 }
 
 function numberValue(value: unknown): number | null {
@@ -39,6 +70,26 @@ function timeRange(value: unknown) {
   }
 }
 
+function parseTimecode(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string') return null
+  const parts = value.trim().replace('.', ',').split(':')
+  if (parts.length !== 3) return null
+  const hours = Number(parts[0])
+  const minutes = Number(parts[1])
+  const seconds = Number(parts[2].replace(',', '.'))
+  if (![hours, minutes, seconds].every(Number.isFinite)) return null
+  return hours * 3600 + minutes * 60 + seconds
+}
+
+function dialogueRange(value: DataRecord) {
+  const range = timeRange(value.time_range)
+  return {
+    start: numberValue(value.start_sec) ?? parseTimecode(value.start) ?? range.start,
+    end: numberValue(value.end_sec) ?? parseTimecode(value.end) ?? range.end,
+  }
+}
+
 function clock(value: number) {
   const seconds = Math.max(0, Math.round(value))
   const hours = Math.floor(seconds / 3600)
@@ -49,37 +100,168 @@ function clock(value: number) {
     : `${minutes}:${String(remainder).padStart(2, '0')}`
 }
 
+function values(...items: unknown[]) {
+  return items
+    .flatMap((item) => (Array.isArray(item) ? item : [item]))
+    .filter(
+      (item): item is string | number =>
+        (typeof item === 'string' && Boolean(item.trim())) ||
+        (typeof item === 'number' && Number.isFinite(item)),
+    )
+}
+
+function DetailChips({ items }: { items: Array<string | number> }) {
+  if (!items.length) return null
+  return (
+    <div className="selection-metadata">
+      {items.map((item, index) => (
+        <span key={`${item}-${index}`}>{item}</span>
+      ))}
+    </div>
+  )
+}
+
+function DialogueCards({ items }: { items: DataRecord[] }) {
+  const { t } = useTranslation('common')
+  if (!items.length) return null
+  return (
+    <section className="memory-detail-section">
+      <h4>
+        <MessageSquareText size={14} aria-hidden="true" />
+        {t('materials.dialogue')}
+      </h4>
+      <div className="memory-dialogue-cards">
+        {items.map((item, index) => {
+          const range = timeRange(item.time_range)
+          return (
+            <article key={text(item.dialogue_id) || index}>
+              <header>
+                <strong>{text(item.speaker) || t('common.unknown')}</strong>
+                {range.end > range.start ? (
+                  <time>
+                    {clock(range.start)} — {clock(range.end)}
+                  </time>
+                ) : null}
+              </header>
+              <p>{text(item.text)}</p>
+            </article>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function CharacterCards({ items }: { items: DataRecord[] }) {
+  const { t } = useTranslation('common')
+  if (!items.length) return null
+  return (
+    <section className="memory-detail-section">
+      <h4>
+        <Users size={14} aria-hidden="true" />
+        {t('materials.characters')}
+      </h4>
+      <div className="memory-character-cards">
+        {items.map((item, index) => (
+          <article key={text(item.character_id) || text(item.name) || index}>
+            <strong>{text(item.name) || text(item.character_id)}</strong>
+            {text(item.description) ? <p>{text(item.description)}</p> : null}
+            {text(item.identity_evidence) ? (
+              <small>{text(item.identity_evidence)}</small>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export function TimelineMemoryView({
   materialId,
   payload,
+  selectedSegmentId: requestedSegmentId = '',
+  selectedShotId: requestedShotId = '',
+  onSelectionChange,
 }: {
   materialId: string
   payload: DataRecord
+  selectedSegmentId?: string
+  selectedShotId?: string
+  onSelectionChange?: (segmentId: string, shotId?: string) => void
 }) {
   const { t } = useTranslation('common')
-  const segments = recordsPage(payload.segments)
-  const [selectedId, setSelectedId] = useState(() => text(segments[0]?.segment_id))
-  const [selectedShotId, setSelectedShotId] = useState('')
+  const segments = useMemo(() => recordsPage(payload.segments), [payload.segments])
+  const [localSelectedId, setLocalSelectedId] = useState(() =>
+    segments.some((item) => text(item.segment_id) === requestedSegmentId)
+      ? requestedSegmentId
+      : text(segments[0]?.segment_id),
+  )
+  const [localSelectedShotId, setLocalSelectedShotId] = useState(requestedShotId)
   const player = useRef<HTMLVideoElement>(null)
   const source = record(payload.source)
   const sourceDuration =
     numberValue(source.duration_sec) ??
     Math.max(1, ...segments.map((item) => timeRange(item.time_range).end))
+  const requestedSegment = segments.find(
+    (item) => text(item.segment_id) === requestedSegmentId,
+  )
+  const selectedId =
+    requestedSegmentId && requestedSegment ? requestedSegmentId : localSelectedId
   const selected =
     segments.find((item) => text(item.segment_id) === selectedId) ?? segments[0]
   const shots = Array.isArray(selected?.shots) ? selected.shots.map(record) : []
+  const selectedShotId =
+    requestedSegmentId === selectedId &&
+    shots.some((shot) => text(shot.shot_id) === requestedShotId)
+      ? requestedShotId
+      : localSelectedShotId
   const selectedShot = shots.find((shot) => text(shot.shot_id) === selectedShotId)
+  const scene = record(selectedShot?.scene)
+  const shotCharacters = records(selectedShot?.characters)
+  const segmentCharacters = textArray(selected?.appearing_characters)
+  const dialogue = records(selectedShot?.dialogue ?? selected?.dialogue_items)
+  const sampledFrames = Array.isArray(selectedShot?.sampled_frame_times_sec)
+    ? selectedShot.sampled_frame_times_sec.filter(
+        (item): item is number => typeof item === 'number' && Number.isFinite(item),
+      )
+    : []
+
+  useEffect(() => {
+    if (
+      !requestedSegmentId ||
+      !segments.some((item) => text(item.segment_id) === requestedSegmentId)
+    ) {
+      return
+    }
+    const segment = segments.find(
+      (item) => text(item.segment_id) === requestedSegmentId,
+    )
+    const requestedShot = records(segment?.shots).find(
+      (shot) => text(shot.shot_id) === requestedShotId,
+    )
+    const start = requestedShot
+      ? timeRange(requestedShot.time_range).start
+      : timeRange(segment?.time_range).start
+    if (player.current) player.current.currentTime = start
+  }, [requestedSegmentId, requestedShotId, segments])
 
   const selectSegment = (segment: DataRecord) => {
-    setSelectedId(text(segment.segment_id))
-    setSelectedShotId('')
+    const segmentId = text(segment.segment_id)
+    setLocalSelectedId(segmentId)
+    setLocalSelectedShotId('')
     const start = timeRange(segment.time_range).start
     if (player.current) player.current.currentTime = start
+    onSelectionChange?.(segmentId)
   }
   const selectShot = (shot: DataRecord) => {
-    setSelectedShotId(text(shot.shot_id))
+    const shotId = text(shot.shot_id)
+    setLocalSelectedShotId(shotId)
     const start = timeRange(shot.time_range).start
     if (player.current) player.current.currentTime = start
+    if (selected) onSelectionChange?.(text(selected.segment_id), shotId)
+  }
+  const returnToSegment = () => {
+    if (selected) selectSegment(selected)
   }
 
   return (
@@ -127,29 +309,37 @@ export function TimelineMemoryView({
           />
         </div>
         {selected ? (
-          <div className="selection-inspector">
-            <div>
-              <span className="eyebrow">
-                {selectedShot ? t('materials.shots') : t('materials.segments')}
-              </span>
-              <h3>{text(selectedShot?.shot_id) || text(selected.segment_id)}</h3>
-            </div>
-            <p>
-              {text(selectedShot?.visual_description) ||
-                text(selected.segment_summary) ||
-                text(selected.narrative_function)}
-            </p>
-            <div className="selection-metadata">
-              <span>
-                {text(selectedShot?.emotional_tone) || text(selected.emotional_tone)}
-              </span>
-              <span>
-                {text(selectedShot?.dominant_action) ||
-                  text(selected.narrative_function)}
-              </span>
+          <div
+            className={
+              shots.length
+                ? 'selection-inspector'
+                : 'selection-inspector selection-inspector--no-shots'
+            }
+          >
+            <div className="selection-inspector__header">
+              <div>
+                <span className="eyebrow">
+                  {selectedShot ? t('materials.shots') : t('materials.segments')}
+                </span>
+                <h3>{text(selectedShot?.shot_id) || text(selected.segment_id)}</h3>
+              </div>
+              {selectedShot ? (
+                <button
+                  type="button"
+                  className="selection-inspector__back"
+                  onClick={returnToSegment}
+                >
+                  <ChevronLeft size={15} aria-hidden="true" />
+                  {t('materials.backToSegment')}
+                </button>
+              ) : null}
             </div>
             {shots.length ? (
-              <div className="shot-strip">
+              <div
+                className="shot-strip"
+                role="group"
+                aria-label={t('materials.shots')}
+              >
                 {shots.map((shot) => (
                   <button
                     type="button"
@@ -167,6 +357,111 @@ export function TimelineMemoryView({
                 ))}
               </div>
             ) : null}
+            <div className="selection-inspector__details">
+              <p>
+                {text(selectedShot?.visual_description) ||
+                  text(selected.segment_summary) ||
+                  text(selected.narrative_function)}
+              </p>
+              <DetailChips
+                items={values(
+                  text(selectedShot?.content_type) || text(selected.content_type),
+                  text(selectedShot?.narrative_function) ||
+                    text(selected.narrative_function),
+                  text(selectedShot?.emotional_tone) || text(selected.emotional_tone),
+                  numberValue(
+                    selectedShot?.emotional_intensity ?? selected.emotional_intensity,
+                  ) === null
+                    ? null
+                    : t('materials.emotionalIntensityValue', {
+                        value: numberValue(
+                          selectedShot?.emotional_intensity ??
+                            selected.emotional_intensity,
+                        ),
+                      }),
+                  text(selectedShot?.dominant_action),
+                  selectedShot
+                    ? null
+                    : values(text(selected.speech_mode), text(selected.timeline_role)),
+                )}
+              />
+              {!selectedShot && segmentCharacters.length ? (
+                <section className="memory-detail-section">
+                  <h4>
+                    <Users size={14} aria-hidden="true" />
+                    {t('materials.characters')}
+                  </h4>
+                  <DetailChips items={segmentCharacters} />
+                </section>
+              ) : null}
+              {selectedShot ? <CharacterCards items={shotCharacters} /> : null}
+              <DialogueCards items={dialogue} />
+              {selectedShot ? (
+                <>
+                  <section className="memory-detail-section">
+                    <h4>
+                      <Camera size={14} aria-hidden="true" />
+                      {t('materials.camera')}
+                    </h4>
+                    <DetailChips
+                      items={values(
+                        text(selectedShot.shot_scale),
+                        text(selectedShot.camera_angle),
+                        text(selectedShot.camera_movement),
+                      )}
+                    />
+                    {text(selectedShot.composition) ? (
+                      <p>{text(selectedShot.composition)}</p>
+                    ) : null}
+                  </section>
+                  {Object.keys(scene).length ? (
+                    <section className="memory-detail-section">
+                      <h4>
+                        <MapPin size={14} aria-hidden="true" />
+                        {t('materials.scene')}
+                      </h4>
+                      <DetailChips
+                        items={values(
+                          text(scene.interior_exterior),
+                          text(scene.location),
+                          text(scene.time_of_day),
+                          text(scene.weather),
+                          text(scene.atmosphere),
+                          scene.environment_lighting,
+                          scene.color_palette,
+                          text(scene.color_tone),
+                          scene.set_details,
+                        )}
+                      />
+                    </section>
+                  ) : null}
+                  {text(selectedShot.visual_evidence) || sampledFrames.length ? (
+                    <section className="memory-detail-section">
+                      <h4>
+                        <Eye size={14} aria-hidden="true" />
+                        {t('materials.visualEvidence')}
+                      </h4>
+                      {text(selectedShot.visual_evidence) ? (
+                        <p>{text(selectedShot.visual_evidence)}</p>
+                      ) : null}
+                      {sampledFrames.length ? (
+                        <div>
+                          <small>{t('materials.sampledFrames')}</small>
+                          <DetailChips items={sampledFrames.map(clock)} />
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
+                  {text(selectedShot.visual_annotation_status) ===
+                  'provider_rejected' ? (
+                    <p className="field-error">
+                      {text(selectedShot.visual_annotation_failure) ||
+                        t('materials.providerRejected')}
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </section>
@@ -203,7 +498,13 @@ export function TimelineMemoryView({
   )
 }
 
-export function StoryMemoryView({ payload }: { payload: DataRecord }) {
+export function StoryMemoryView({
+  payload,
+  onOpenTimelineSegment,
+}: {
+  payload: DataRecord
+  onOpenTimelineSegment?: (segmentId: string) => void
+}) {
   const { t } = useTranslation('common')
   const beats = Array.isArray(payload.chronological_story_beats)
     ? payload.chronological_story_beats.map(record)
@@ -237,6 +538,20 @@ export function StoryMemoryView({ payload }: { payload: DataRecord }) {
                   <span key={name}>{name}</span>
                 ))}
               </div>
+              {textArray(beat.source_segment_ids).length ? (
+                <footer className="story-evidence">
+                  <span>{t('materials.sourceEvidence')}</span>
+                  {textArray(beat.source_segment_ids).map((segmentId) => (
+                    <button
+                      type="button"
+                      key={segmentId}
+                      onClick={() => onOpenTimelineSegment?.(segmentId)}
+                    >
+                      {segmentId}
+                    </button>
+                  ))}
+                </footer>
+              ) : null}
             </article>
           ))}
         </div>
@@ -248,6 +563,20 @@ export function StoryMemoryView({ payload }: { payload: DataRecord }) {
             <article className="arc-card" key={index}>
               <strong>{text(arc.character) || text(arc.name)}</strong>
               <p>{text(arc.arc) || text(arc.summary)}</p>
+              {textArray(arc.key_segment_ids).length ? (
+                <div className="story-evidence">
+                  <span>{t('materials.sourceEvidence')}</span>
+                  {textArray(arc.key_segment_ids).map((segmentId) => (
+                    <button
+                      type="button"
+                      key={segmentId}
+                      onClick={() => onOpenTimelineSegment?.(segmentId)}
+                    >
+                      {segmentId}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </article>
           ))}
         </section>
@@ -266,11 +595,20 @@ export function StoryMemoryView({ payload }: { payload: DataRecord }) {
   )
 }
 
-export function DialogueMemoryView({ payload }: { payload: DataRecord }) {
+export function DialogueMemoryView({
+  materialId,
+  payload,
+}: {
+  materialId: string
+  payload: DataRecord
+}) {
   const { t } = useTranslation('common')
   const [query, setQuery] = useState('')
   const [speaker, setSpeaker] = useState('')
-  const sentences = recordsPage(payload.sentences)
+  const [activeSentenceId, setActiveSentenceId] = useState('')
+  const player = useRef<HTMLVideoElement>(null)
+  const sentenceElements = useRef(new Map<string, HTMLButtonElement>())
+  const sentences = useMemo(() => recordsPage(payload.sentences), [payload.sentences])
   const speakers = useMemo(
     () =>
       Array.from(
@@ -284,6 +622,32 @@ export function DialogueMemoryView({ payload }: { payload: DataRecord }) {
       (!query ||
         text(item.text).toLocaleLowerCase().includes(query.toLocaleLowerCase())),
   )
+  const sentenceId = (sentence: DataRecord) =>
+    String(
+      sentence.sentence_id ??
+        `${text(sentence.start)}-${text(sentence.end)}-${text(sentence.text)}`,
+    )
+  const seekSentence = (sentence: DataRecord) => {
+    const range = dialogueRange(sentence)
+    if (player.current) player.current.currentTime = range.start
+    setActiveSentenceId(sentenceId(sentence))
+  }
+  const followPlayback = (currentTime: number) => {
+    const activeIndex = sentences.findIndex((sentence) => {
+      const range = dialogueRange(sentence)
+      return currentTime >= range.start && currentTime < range.end
+    })
+    if (activeIndex < 0) {
+      setActiveSentenceId('')
+      return
+    }
+    const id = sentenceId(sentences[activeIndex])
+    setActiveSentenceId(id)
+    sentenceElements.current.get(id)?.scrollIntoView?.({
+      block: 'nearest',
+      behavior: 'smooth',
+    })
+  }
   return (
     <div className="dialogue-memory">
       <div className="dialogue-toolbar">
@@ -306,19 +670,53 @@ export function DialogueMemoryView({ payload }: { payload: DataRecord }) {
         </label>
         <span>
           <Captions size={15} />
-          {filtered.length}
+          {t('materials.loadedCount', {
+            loaded: filtered.length,
+            total: pageTotal(payload.sentences),
+          })}
         </span>
       </div>
-      <div className="dialogue-list">
-        {filtered.map((sentence, index) => (
-          <article key={text(sentence.sentence_id) || index}>
-            <time>
-              {text(sentence.start)} — {text(sentence.end)}
-            </time>
-            <strong>{text(sentence.speaker) || t('common.unknown')}</strong>
-            <p>{text(sentence.text)}</p>
-          </article>
-        ))}
+      <div className="dialogue-memory__content">
+        <section className="dialogue-memory__player">
+          {/* The source endpoint exposes the original audio but no public WebVTT track. */}
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <video
+            ref={player}
+            controls
+            preload="metadata"
+            src={`/api/materials/${encodeURIComponent(materialId)}/source`}
+            onTimeUpdate={(event) => followPlayback(event.currentTarget.currentTime)}
+          />
+          <p>{t('materials.dialoguePlaybackHelp')}</p>
+        </section>
+        <div className="dialogue-list" aria-live="polite">
+          {filtered.map((sentence) => {
+            const id = sentenceId(sentence)
+            return (
+              <button
+                type="button"
+                key={id}
+                ref={(element) => {
+                  if (element) sentenceElements.current.set(id, element)
+                  else sentenceElements.current.delete(id)
+                }}
+                className={
+                  id === activeSentenceId
+                    ? 'dialogue-item dialogue-item--active'
+                    : 'dialogue-item'
+                }
+                aria-pressed={id === activeSentenceId}
+                onClick={() => seekSentence(sentence)}
+              >
+                <time>
+                  {text(sentence.start)} — {text(sentence.end)}
+                </time>
+                <strong>{text(sentence.speaker) || t('common.unknown')}</strong>
+                <p>{text(sentence.text)}</p>
+              </button>
+            )
+          })}
+        </div>
       </div>
     </div>
   )
@@ -394,21 +792,30 @@ export function MusicStructureView({
   materialId: string
   payload: DataRecord
 }) {
-  const { t } = useTranslation('common')
+  const { t, i18n } = useTranslation('common')
   const duration = numberValue(payload.source_duration_sec) ?? 1
   const sections = recordsPage(payload.sections)
   const energy = recordsPage(payload.energy_curve)
-  const beats = record(payload.beats_sec).items
-  const accents = record(payload.accents_sec).items
+  const beats = numericItems(payload.beats_sec)
+  const accents = numericItems(payload.accents_sec)
+  const [playhead, setPlayhead] = useState(0)
+  const player = useRef<HTMLAudioElement>(null)
+  const seek = (time: number) => {
+    const bounded = Math.max(0, Math.min(duration, time))
+    if (player.current) player.current.currentTime = bounded
+    setPlayhead(bounded)
+  }
   return (
     <div className="music-structure">
       {/* Music Material Memory contains no speech track, so a caption track is not applicable. */}
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <audio
+        ref={player}
         className="structure-audio"
         controls
         preload="metadata"
         src={`/api/materials/${encodeURIComponent(materialId)}/source`}
+        onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}
       />
       <div className="music-metrics">
         <article>
@@ -424,14 +831,102 @@ export function MusicStructureView({
         <article>
           <AudioWaveform size={17} />
           <span>{t('materials.beats')}</span>
-          <strong>{Array.isArray(beats) ? beats.length : 0}</strong>
+          <strong>{pageTotal(payload.beats_sec)}</strong>
         </article>
       </div>
+      <section className="music-timeline" aria-label={t('materials.musicTimeline')}>
+        <header>
+          <h3>{t('materials.musicTimeline')}</h3>
+          <time>{clock(playhead)}</time>
+        </header>
+        <div className="music-timeline__canvas">
+          <i
+            className="music-timeline__playhead"
+            style={{ left: `${(playhead / duration) * 100}%` }}
+            aria-hidden="true"
+          />
+          <div className="music-timeline__row music-timeline__row--sections">
+            <span>{t('materials.sections')}</span>
+            <div>
+              {sections.map((section, index) => {
+                const start = numberValue(section.start_sec) ?? 0
+                const end = numberValue(section.end_sec) ?? start
+                return (
+                  <button
+                    type="button"
+                    key={text(section.section_id) || index}
+                    style={{
+                      left: `${(start / duration) * 100}%`,
+                      width: `${Math.max(0.4, ((end - start) / duration) * 100)}%`,
+                    }}
+                    onClick={() => seek(start)}
+                    aria-label={t('materials.seekSection', {
+                      section: text(section.role) || text(section.section_id),
+                      time: clock(start),
+                    })}
+                  >
+                    {text(section.role) || text(section.section_id)}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div className="music-timeline__row music-timeline__row--beats">
+            <span>{t('materials.beats')}</span>
+            <div>
+              {beats.map((beat, index) => (
+                <button
+                  type="button"
+                  key={`${beat}-${index}`}
+                  style={{ left: `${(beat / duration) * 100}%` }}
+                  onClick={() => seek(beat)}
+                  aria-label={t('materials.seekBeat', { time: clock(beat) })}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="music-timeline__row music-timeline__row--accents">
+            <span>{t('materials.accents')}</span>
+            <div>
+              {accents.map((accent, index) => (
+                <button
+                  type="button"
+                  key={`${accent}-${index}`}
+                  style={{ left: `${(accent / duration) * 100}%` }}
+                  onClick={() => seek(accent)}
+                  aria-label={t('materials.seekAccent', { time: clock(accent) })}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+        <footer>
+          <span>00:00</span>
+          <span>
+            {t('materials.loadedLayerCount', {
+              loaded: beats.length,
+              total: pageTotal(payload.beats_sec),
+              layer: t('materials.beats'),
+            })}
+          </span>
+          <span>
+            {t('materials.loadedLayerCount', {
+              loaded: accents.length,
+              total: pageTotal(payload.accents_sec),
+              layer: t('materials.accents'),
+            })}
+          </span>
+          <span>{clock(duration)}</span>
+        </footer>
+      </section>
       <section className="energy-panel">
         <header>
           <h3>{t('materials.energy')}</h3>
           <span>
-            {t('materials.accents')}: {Array.isArray(accents) ? accents.length : 0}
+            {t('materials.loadedCount', {
+              loaded: energy.length,
+              total: pageTotal(payload.energy_curve),
+            })}
           </span>
         </header>
         <div className="energy-bars">
@@ -459,7 +954,9 @@ export function MusicStructureView({
                   style={{ width: `${Math.max(3, ((end - start) / duration) * 100)}%` }}
                 />
                 <header>
-                  <strong>{text(section.role) || text(section.section_id)}</strong>
+                  <button type="button" onClick={() => seek(start)}>
+                    {text(section.role) || text(section.section_id)}
+                  </button>
                   <time>
                     {clock(start)} — {clock(end)}
                   </time>
@@ -468,6 +965,21 @@ export function MusicStructureView({
                   {text(section.energy_trend)} ·{' '}
                   {numberValue(section.mean_energy)?.toFixed(2)}
                 </p>
+                {Array.isArray(section.suggested_clip_duration_sec) &&
+                section.suggested_clip_duration_sec.length >= 2 ? (
+                  <small>
+                    {t('materials.suggestedClipRange', {
+                      min: `${formatNumber(
+                        numberValue(section.suggested_clip_duration_sec[0]) ?? 0,
+                        i18n.language,
+                      )}s`,
+                      max: `${formatNumber(
+                        numberValue(section.suggested_clip_duration_sec[1]) ?? 0,
+                        i18n.language,
+                      )}s`,
+                    })}
+                  </small>
+                ) : null}
               </article>
             )
           })}
@@ -482,17 +994,39 @@ export function MemoryTabView({
   tab,
   materialId,
   payload,
+  selectedSegmentId,
+  selectedShotId,
+  onTimelineSelectionChange,
+  onOpenTimelineSegment,
 }: {
   type: 'video' | 'music'
   tab: string
   materialId: string
   payload: DataRecord
+  selectedSegmentId?: string
+  selectedShotId?: string
+  onTimelineSelectionChange?: (segmentId: string, shotId?: string) => void
+  onOpenTimelineSegment?: (segmentId: string) => void
 }) {
   if (type === 'video' && tab === 'timeline')
-    return <TimelineMemoryView materialId={materialId} payload={payload} />
-  if (type === 'video' && tab === 'story') return <StoryMemoryView payload={payload} />
+    return (
+      <TimelineMemoryView
+        materialId={materialId}
+        payload={payload}
+        selectedSegmentId={selectedSegmentId}
+        selectedShotId={selectedShotId}
+        onSelectionChange={onTimelineSelectionChange}
+      />
+    )
+  if (type === 'video' && tab === 'story')
+    return (
+      <StoryMemoryView
+        payload={payload}
+        onOpenTimelineSegment={onOpenTimelineSegment}
+      />
+    )
   if (type === 'video' && tab === 'dialogue')
-    return <DialogueMemoryView payload={payload} />
+    return <DialogueMemoryView materialId={materialId} payload={payload} />
   if (type === 'music' && tab === 'structure')
     return <MusicStructureView materialId={materialId} payload={payload} />
   return <TechnicalMemoryView payload={payload} />

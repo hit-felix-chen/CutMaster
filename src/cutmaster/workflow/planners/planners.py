@@ -8,19 +8,33 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig
+from cutmaster.infrastructure.observability.logging import error_summary, log_event
 from cutmaster.workflow.contracts.planners import PlannersRequest, PlannersResult
+from cutmaster.workflow.contracts.checkpoints import (
+    PlannersCheckpoint,
+    PlannersCheckpointStage,
+    PlannersCheckpointStore,
+)
 from cutmaster.workflow.planners.aster_team import ASTERTeam
+from cutmaster.workflow.planners.arrangement_architect import (
+    prime_arrangement_context,
+)
+from cutmaster.workflow.planners.tools.errors import NoFeasiblePathError
 from cutmaster.workflow.planners.tools.plan_compiler import (
     compile_render_plan,
     write_script,
 )
-from cutmaster.workflow.planners.tools.errors import NoFeasiblePathError
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
+    WorkflowCancelledError,
+    raise_if_cancelled,
+)
 from cutmaster.workflow.prompting.failure_catalog import (
     PromptFailureCode,
     build_prompt_failure,
 )
-from cutmaster.infrastructure.observability.logging import error_summary, log_event
-from cutmaster.workflow.ports import ProgressReporter, ProgressUpdate
 from cutmaster.workflow.shared.execution_context import WorkflowContext
 
 
@@ -73,6 +87,28 @@ def _report_agent(
     reporter.report(ProgressUpdate(completed, 5, agent, "agent"))
 
 
+_CHECKPOINT_STAGE_RANK = {
+    PlannersCheckpointStage.REPLAN_PENDING: 0,
+    PlannersCheckpointStage.ARRANGEMENT: 1,
+    PlannersCheckpointStage.STORY: 2,
+    PlannersCheckpointStage.TIMELINE: 3,
+    PlannersCheckpointStage.EDIT: 4,
+    PlannersCheckpointStage.REVISION: 5,
+}
+
+
+def _checkpoint_feedback(value: Any) -> dict[str, Any] | None:
+    """Remove the prompt-like retry instruction from persisted workflow state."""
+
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: item
+        for key, item in value.items()
+        if key != "instruction"
+    }
+
+
 class Planners:
     """Make all semantic and frame-timing edit decisions."""
 
@@ -85,7 +121,15 @@ class Planners:
         *,
         overwrite: bool = False,
         progress_reporter: ProgressReporter | None = None,
+        cancellation_token: CancellationToken | None = None,
+        checkpoint_store: PlannersCheckpointStore | None = None,
     ) -> PlannersResult:
+        if checkpoint_store is not None and not isinstance(
+            checkpoint_store,
+            PlannersCheckpointStore,
+        ):
+            raise TypeError("checkpoint_store must implement PlannersCheckpointStore")
+        raise_if_cancelled(cancellation_token)
         _validate_request(request)
         output_dir = request.output_dir.resolve()
         diagnostics_dir = output_dir / "diagnostics"
@@ -115,7 +159,6 @@ class Planners:
         result_path = output_dir / "planners_result.json"
 
         started = time.monotonic()
-        timings: dict[str, float] = {}
         video_description = _read_json_object(
             request.video.video_description_path,
             "Video Description",
@@ -128,210 +171,395 @@ class Planners:
             request.music.music_memory_path,
             "Music Memory",
         )
+        checkpoint = checkpoint_store.load() if checkpoint_store is not None else None
+        timings = (
+            {}
+            if checkpoint is None
+            else dict(checkpoint.stage_timings_sec)
+        )
         context = WorkflowContext(
             planners_history_path,
             model_call_tree_path=planners_calls_path,
             model_usage_path=model_usage_path,
             stage_name="planners",
+            prior_model_usage_summary=(
+                None if checkpoint is None else checkpoint.prior_model_usage
+            ),
+            prior_model_call_count=(
+                0 if checkpoint is None else checkpoint.prior_model_call_count
+            ),
         )
         context.set_artifact("video_description", video_description)
         context.set_artifact("video_summary", video_summary)
         team = ASTERTeam(request.video_path, self.config, context)
 
-        stage_started = time.monotonic()
-        music_profile = team.profile_music(
-            music_memory,
-            request.target_output_length_sec,
-            music_profile_path,
-        )
-        timings["music_profile"] = time.monotonic() - stage_started
+        if checkpoint is None:
+            stage_started = time.monotonic()
+            raise_if_cancelled(cancellation_token)
+            music_profile = team.profile_music(
+                music_memory,
+                request.target_output_length_sec,
+                music_profile_path,
+            )
+            raise_if_cancelled(cancellation_token)
+            timings["music_profile"] = time.monotonic() - stage_started
+            slots: list[dict[str, Any]] = []
+            dialogue_anchors: list[dict[str, Any]] = []
+            candidate_pool: dict[str, list[dict[str, Any]]] = {}
+            beam_path: list[dict[str, Any]] = []
+            pairwise_scores: dict[str, dict[str, Any]] = {}
+            selection: dict[str, Any] = {}
+            raw_script: list[dict[str, Any]] = []
+            completed_rank = 0
+            first_aster_attempt = 1
+        else:
+            restored = checkpoint.to_dict()
+            music_profile = dict(restored["music_profile"])
+            slots = list(restored["slots"])
+            dialogue_anchors = list(restored["dialogue_anchors"] or [])
+            candidate_pool = dict(restored["candidate_pool"] or {})
+            beam_path = list(restored["beam_path"] or [])
+            pairwise_scores = dict(restored["pairwise_scores"] or {})
+            selection = dict(restored["selection"] or {})
+            raw_script = list(restored["raw_script"] or [])
+            completed_rank = _CHECKPOINT_STAGE_RANK[checkpoint.completed_stage]
+            first_aster_attempt = checkpoint.aster_attempt
+            feedback = restored["planners_feedback"]
+            if feedback is not None:
+                context.set_artifact("planners_feedback", feedback)
+            _write_json(music_profile_path, music_profile)
+        if checkpoint is not None:
+            prime_arrangement_context(request, music_profile, context)
 
-        arrangement_seconds = 0.0
-        anchor_seconds = 0.0
-        retrieval_seconds = 0.0
-        selection_seconds = 0.0
-        slots: list[dict[str, Any]] = []
-        candidate_pool: dict[str, list[dict[str, Any]]] = {}
-        beam_path: list[dict[str, Any]] = []
-        pairwise_scores: dict[str, dict[str, Any]] = {}
-        selection: dict[str, Any] = {}
-        max_replans = self.config.planners.arrangement_architect.replan_max_rounds
-        for aster_attempt in range(1, max_replans + 2):
+        def save_boundary(
+            stage: PlannersCheckpointStage,
+            *,
+            aster_attempt: int,
+        ) -> None:
+            if checkpoint_store is None:
+                return
+            rank = _CHECKPOINT_STAGE_RANK[stage]
+            context.save_model_usage()
+            checkpoint_store.save(
+                PlannersCheckpoint(
+                    completed_stage=stage,
+                    aster_attempt=aster_attempt,
+                    music_profile=music_profile,
+                    slots=tuple(slots),
+                    dialogue_anchors=(
+                        tuple(dialogue_anchors) if rank >= 2 else None
+                    ),
+                    candidate_pool=(
+                        {
+                            slot_id: tuple(candidates)
+                            for slot_id, candidates in candidate_pool.items()
+                        }
+                        if rank >= 3
+                        else None
+                    ),
+                    beam_path=tuple(beam_path) if rank >= 4 else None,
+                    selection=selection if rank >= 4 else None,
+                    pairwise_scores=pairwise_scores if rank >= 4 else None,
+                    raw_script=tuple(raw_script) if rank >= 5 else None,
+                    planners_feedback=_checkpoint_feedback(
+                        context.get_artifact("planners_feedback")
+                    ),
+                    stage_timings_sec=timings,
+                    prior_model_usage=context.model_usage_summary(
+                        include_prior=True
+                    ),
+                    prior_model_call_count=context.model_call_count(
+                        include_prior=True
+                    ),
+                )
+            )
+
+        try:
+            max_replans = self.config.planners.arrangement_architect.replan_max_rounds
+            for aster_attempt in range(first_aster_attempt, max_replans + 2):
+                if completed_rank < 1 or aster_attempt != first_aster_attempt:
+                    raise_if_cancelled(cancellation_token)
+                    _report_agent(
+                        progress_reporter,
+                        completed=0,
+                        agent="arrangement_architect",
+                    )
+                    stage_started = time.monotonic()
+                    log_event(
+                        "INFO",
+                        "aster.arrangement",
+                        "stage.start",
+                        "Slot arrangement started",
+                        stage="slot_arrangement",
+                        attempt=aster_attempt,
+                    )
+                    slots = team.arrange(request, music_profile)
+                    context.set_artifact("edit_plan", slots)
+                    _write_json(edit_plan_path, slots)
+                    elapsed = time.monotonic() - stage_started
+                    timings["slot_arrangement"] = (
+                        timings.get("slot_arrangement", 0.0) + elapsed
+                    )
+                    log_event(
+                        "INFO",
+                        "aster.arrangement",
+                        "stage.complete",
+                        "Slot arrangement completed",
+                        stage="slot_arrangement",
+                        attempt=aster_attempt,
+                        slots=len(slots),
+                        elapsed_sec=elapsed,
+                    )
+                    dialogue_anchors = []
+                    candidate_pool = {}
+                    beam_path = []
+                    pairwise_scores = {}
+                    selection = {}
+                    raw_script = []
+                    completed_rank = 1
+                    save_boundary(
+                        PlannersCheckpointStage.ARRANGEMENT,
+                        aster_attempt=aster_attempt,
+                    )
+                    raise_if_cancelled(cancellation_token)
+                else:
+                    context.set_artifact("edit_plan", slots)
+                    _write_json(edit_plan_path, slots)
+
+                try:
+                    retrieval_call_active = False
+                    if completed_rank < 2:
+                        _report_agent(
+                            progress_reporter,
+                            completed=1,
+                            agent="story_editor",
+                        )
+                        attempt_stage = "dialogue_anchor_selection"
+                        stage_started = time.monotonic()
+                        raise_if_cancelled(cancellation_token)
+                        slots = team.anchor_story(slots)
+                        context.set_artifact("edit_plan", slots)
+                        dialogue_anchors = list(
+                            context.get_artifact("dialogue_anchors", [])
+                        )
+                        _write_json(edit_plan_path, slots)
+                        _write_json(dialogue_anchors_path, dialogue_anchors)
+                        timings["dialogue_anchor_selection"] = (
+                            timings.get("dialogue_anchor_selection", 0.0)
+                            + time.monotonic()
+                            - stage_started
+                        )
+                        completed_rank = 2
+                        save_boundary(
+                            PlannersCheckpointStage.STORY,
+                            aster_attempt=aster_attempt,
+                        )
+                        raise_if_cancelled(cancellation_token)
+                    else:
+                        context.set_artifact("dialogue_anchors", dialogue_anchors)
+                        _write_json(dialogue_anchors_path, dialogue_anchors)
+
+                    if completed_rank < 3:
+                        _report_agent(
+                            progress_reporter,
+                            completed=2,
+                            agent="timeline_scout",
+                        )
+                        attempt_stage = "retrieval"
+                        stage_started = time.monotonic()
+                        raise_if_cancelled(cancellation_token)
+                        retrieval_call_active = True
+                        candidate_pool = team.scout(slots)
+                        retrieval_call_active = False
+                        context.set_artifact("edit_plan", slots)
+                        dialogue_anchors = list(
+                            context.get_artifact("dialogue_anchors", [])
+                        )
+                        _write_json(edit_plan_path, slots)
+                        _write_json(dialogue_anchors_path, dialogue_anchors)
+                        timings["candidate_retrieval"] = (
+                            timings.get("candidate_retrieval", 0.0)
+                            + time.monotonic()
+                            - stage_started
+                        )
+                        completed_rank = 3
+                        save_boundary(
+                            PlannersCheckpointStage.TIMELINE,
+                            aster_attempt=aster_attempt,
+                        )
+                        raise_if_cancelled(cancellation_token)
+                    else:
+                        context.set_artifact("candidate_pool", candidate_pool)
+
+                    if completed_rank < 4:
+                        _report_agent(
+                            progress_reporter,
+                            completed=3,
+                            agent="edit_composer",
+                        )
+                        attempt_stage = "chronology_preflight"
+                        stage_started = time.monotonic()
+                        raise_if_cancelled(cancellation_token)
+                        team.validate_composition(slots, candidate_pool)
+                        attempt_stage = "beam_selection"
+                        beam_path, selection, pairwise_scores = team.compose(
+                            slots,
+                            candidate_pool,
+                        )
+                        selection["aster_attempt"] = aster_attempt
+                        timings["sequence_selection"] = (
+                            timings.get("sequence_selection", 0.0)
+                            + time.monotonic()
+                            - stage_started
+                        )
+                        completed_rank = 4
+                        save_boundary(
+                            PlannersCheckpointStage.EDIT,
+                            aster_attempt=aster_attempt,
+                        )
+                        raise_if_cancelled(cancellation_token)
+                    break
+                except (NoFeasiblePathError, ValueError) as exc:
+                    elapsed = max(0.0, time.monotonic() - stage_started)
+                    timing_key = (
+                        "candidate_retrieval"
+                        if attempt_stage == "retrieval"
+                        else "sequence_selection"
+                    )
+                    timings[timing_key] = timings.get(timing_key, 0.0) + elapsed
+                    if (
+                        not isinstance(exc, NoFeasiblePathError)
+                        and not (
+                            attempt_stage == "retrieval"
+                            and retrieval_call_active
+                        )
+                    ):
+                        raise
+                    failure = build_prompt_failure(
+                        PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE,
+                        attempt=aster_attempt,
+                        stage=attempt_stage,
+                        error_type=type(exc).__name__,
+                        error_message=error_summary(exc),
+                    )
+                    diagnostics = (
+                        exc.diagnostics
+                        if isinstance(exc, NoFeasiblePathError)
+                        else context.get_artifact("retrieval_failure", failure)
+                    )
+                    shortages = diagnostics.get("shortages") or {}
+                    failed_slot_ids = set(shortages)
+                    failed_slot_id = diagnostics.get("failed_slot_id")
+                    if failed_slot_id:
+                        failed_slot_ids.add(str(failed_slot_id))
+                    failed_slots = [
+                        {
+                            "slot_id": slot["slot_id"],
+                            "content_description": slot["content_description"],
+                            "source_segment_ids": slot.get("source_segment_ids") or [],
+                            "missing_candidates": shortages.get(slot["slot_id"]),
+                        }
+                        for slot in slots
+                        if slot["slot_id"] in failed_slot_ids
+                    ]
+                    team.record_failure(
+                        attempt=aster_attempt,
+                        error=str(exc),
+                        diagnostics=diagnostics,
+                        failed_slots=failed_slots,
+                    )
+                    if aster_attempt > max_replans:
+                        raise
+                    completed_rank = 0
+                    save_boundary(
+                        PlannersCheckpointStage.REPLAN_PENDING,
+                        aster_attempt=aster_attempt + 1,
+                    )
+                    raise_if_cancelled(cancellation_token)
+                    log_event(
+                        "WARNING",
+                        "aster.composition",
+                        "validation.reject",
+                        "ASTER attempt was infeasible; retrying with diagnostics",
+                        failed_slots=sorted(failed_slot_ids),
+                        **failure,
+                    )
+            else:
+                raise RuntimeError("ASTER loop ended without a feasible path")
+
+            _write_json(candidate_pool_path, candidate_pool)
+            if completed_rank < 5:
+                stage_started = time.monotonic()
+                raise_if_cancelled(cancellation_token)
+                raw_script = team.build_script(slots, beam_path)
+                context.set_artifact("selection_diagnostics", selection)
+                context.record_script_version(raw_script, source="beam_search")
+                _report_agent(
+                    progress_reporter,
+                    completed=4,
+                    agent="revision_editor",
+                )
+                for _ in range(self.config.planners.script_review.review_rounds):
+                    raise_if_cancelled(cancellation_token)
+                    raw_script, _ = team.revise(
+                        slots,
+                        candidate_pool,
+                        raw_script,
+                        pairwise_scores,
+                    )
+                timings["revision_review"] = (
+                    timings.get("revision_review", 0.0)
+                    + time.monotonic()
+                    - stage_started
+                )
+                completed_rank = 5
+                context.save_model_call_tree()
+                save_boundary(
+                    PlannersCheckpointStage.REVISION,
+                    aster_attempt=aster_attempt,
+                )
+                raise_if_cancelled(cancellation_token)
+
+            context.save_model_call_tree()
+            context.save_model_usage()
+            write_script(raw_script_path, raw_script)
+            _write_json(selection_path, selection)
+
+            stage_started = time.monotonic()
+            raise_if_cancelled(cancellation_token)
+            render_plan = compile_render_plan(
+                request=request,
+                raw_script=raw_script,
+                music_profile=music_profile,
+                video_description=video_description,
+                config=self.config,
+            )
+            raise_if_cancelled(cancellation_token)
+            render_plan.write(render_plan_path)
+            timings["plan_compilation"] = time.monotonic() - stage_started
             _report_agent(
                 progress_reporter,
-                completed=0,
-                agent="arrangement_architect",
+                completed=5,
+                agent="revision_editor",
             )
-            stage_started = time.monotonic()
-            log_event(
-                "INFO",
-                "aster.arrangement",
-                "stage.start",
-                "Slot arrangement started",
-                stage="slot_arrangement",
-                attempt=aster_attempt,
-            )
-            slots = team.arrange(request, music_profile)
-            context.set_artifact("edit_plan", slots)
-            _write_json(edit_plan_path, slots)
-            elapsed = time.monotonic() - stage_started
-            arrangement_seconds += elapsed
-            log_event(
-                "INFO",
-                "aster.arrangement",
-                "stage.complete",
-                "Slot arrangement completed",
-                stage="slot_arrangement",
-                attempt=aster_attempt,
-                slots=len(slots),
-                elapsed_sec=elapsed,
-            )
+        except BaseException as exc:
             try:
-                _report_agent(
-                    progress_reporter,
-                    completed=1,
-                    agent="story_editor",
+                context.save_model_usage()
+                context.save_model_call_tree(
+                    status=(
+                        "interrupted"
+                        if isinstance(exc, WorkflowCancelledError)
+                        else "failed"
+                    )
                 )
-                attempt_stage = "dialogue_anchor_selection"
-                stage_started = time.monotonic()
-                slots = team.anchor_story(slots)
-                context.set_artifact("edit_plan", slots)
-                _write_json(edit_plan_path, slots)
-                anchors = context.get_artifact("dialogue_anchors", [])
-                _write_json(dialogue_anchors_path, anchors)
-                anchor_seconds += time.monotonic() - stage_started
+            except Exception:
+                pass
+            raise
 
-                _report_agent(
-                    progress_reporter,
-                    completed=2,
-                    agent="timeline_scout",
-                )
-                attempt_stage = "retrieval"
-                stage_started = time.monotonic()
-                candidate_pool = team.scout(slots)
-                context.set_artifact("edit_plan", slots)
-                _write_json(edit_plan_path, slots)
-                anchors = context.get_artifact("dialogue_anchors", [])
-                _write_json(dialogue_anchors_path, anchors)
-                retrieval_seconds += time.monotonic() - stage_started
-
-                _report_agent(
-                    progress_reporter,
-                    completed=3,
-                    agent="edit_composer",
-                )
-                attempt_stage = "chronology_preflight"
-                stage_started = time.monotonic()
-                team.validate_composition(slots, candidate_pool)
-                selection_seconds += time.monotonic() - stage_started
-
-                attempt_stage = "beam_selection"
-                stage_started = time.monotonic()
-                beam_path, selection, pairwise_scores = team.compose(
-                    slots,
-                    candidate_pool,
-                )
-                selection_seconds += time.monotonic() - stage_started
-                selection["aster_attempt"] = aster_attempt
-                break
-            except (NoFeasiblePathError, ValueError) as exc:
-                elapsed = max(0.0, time.monotonic() - stage_started)
-                if attempt_stage == "retrieval":
-                    retrieval_seconds += elapsed
-                else:
-                    selection_seconds += elapsed
-                if not isinstance(exc, NoFeasiblePathError) and attempt_stage != "retrieval":
-                    raise
-                failure = build_prompt_failure(
-                    PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE,
-                    attempt=aster_attempt,
-                    stage=attempt_stage,
-                    error_type=type(exc).__name__,
-                    error_message=error_summary(exc),
-                )
-                diagnostics = (
-                    exc.diagnostics
-                    if isinstance(exc, NoFeasiblePathError)
-                    else context.get_artifact("retrieval_failure", failure)
-                )
-                shortages = diagnostics.get("shortages") or {}
-                failed_slot_ids = set(shortages)
-                failed_slot_id = diagnostics.get("failed_slot_id")
-                if failed_slot_id:
-                    failed_slot_ids.add(str(failed_slot_id))
-                failed_slots = [
-                    {
-                        "slot_id": slot["slot_id"],
-                        "content_description": slot["content_description"],
-                        "source_segment_ids": slot.get("source_segment_ids") or [],
-                        "missing_candidates": shortages.get(slot["slot_id"]),
-                    }
-                    for slot in slots
-                    if slot["slot_id"] in failed_slot_ids
-                ]
-                team.record_failure(
-                    attempt=aster_attempt,
-                    error=str(exc),
-                    diagnostics=diagnostics,
-                    failed_slots=failed_slots,
-                )
-                if aster_attempt > max_replans:
-                    context.save_model_call_tree(status="failed")
-                    raise
-                log_event(
-                    "WARNING",
-                    "aster.composition",
-                    "validation.reject",
-                    "ASTER attempt was infeasible; retrying with diagnostics",
-                    failed_slots=sorted(failed_slot_ids),
-                    **failure,
-                )
-        else:
-            raise RuntimeError("ASTER loop ended without a feasible path")
-
-        _write_json(candidate_pool_path, candidate_pool)
-        timings["slot_arrangement"] = arrangement_seconds
-        timings["dialogue_anchor_selection"] = anchor_seconds
-        timings["candidate_retrieval"] = retrieval_seconds
-
-        stage_started = time.monotonic()
-        raw_script = team.build_script(slots, beam_path)
-        context.set_artifact("selection_diagnostics", selection)
-        context.record_script_version(raw_script, source="beam_search")
-        _report_agent(
-            progress_reporter,
-            completed=4,
-            agent="revision_editor",
-        )
-        for _ in range(self.config.planners.script_review.review_rounds):
-            raw_script, _ = team.revise(
-                slots,
-                candidate_pool,
-                raw_script,
-                pairwise_scores,
-            )
-        context.save_model_call_tree()
-        context.save_model_usage()
-        write_script(raw_script_path, raw_script)
-        _write_json(selection_path, selection)
-        timings["sequence_selection_and_review"] = (
-            selection_seconds + time.monotonic() - stage_started
-        )
-
-        stage_started = time.monotonic()
-        render_plan = compile_render_plan(
-            request=request,
-            raw_script=raw_script,
-            music_profile=music_profile,
-            video_description=video_description,
-            config=self.config,
-        )
-        render_plan.write(render_plan_path)
-        timings["plan_compilation"] = time.monotonic() - stage_started
-        _report_agent(
-            progress_reporter,
-            completed=5,
-            agent="revision_editor",
+        result_timings = dict(timings)
+        result_timings["sequence_selection_and_review"] = (
+            result_timings.pop("sequence_selection", 0.0)
+            + result_timings.pop("revision_review", 0.0)
         )
         result = PlannersResult(
             status="success",
@@ -349,7 +577,7 @@ class Planners:
             planned_output_length_sec=render_plan.duration_sec,
             num_raw_clips=len(raw_script),
             num_planned_clips=len(render_plan.clips),
-            stage_timings_sec=timings,
+            stage_timings_sec=result_timings,
             wall_clock_sec=time.monotonic() - started,
             music_memory_path=request.music.music_memory_path.resolve(),
             model_usage_path=model_usage_path.resolve(),
@@ -358,6 +586,7 @@ class Planners:
                 include_prior=True
             ),
         )
+        raise_if_cancelled(cancellation_token)
         result.write(result_path)
         log_event(
             "SUCCESS",

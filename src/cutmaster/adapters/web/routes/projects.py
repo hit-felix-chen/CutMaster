@@ -14,6 +14,7 @@ from cutmaster.adapters.web.presenters import (
     material_view,
     project_view,
     run_view,
+    run_usage_total_view,
 )
 from cutmaster.adapters.web.routes._execution import latest_run_execution
 from cutmaster.adapters.web.schemas.projects import (
@@ -23,16 +24,17 @@ from cutmaster.adapters.web.schemas.projects import (
     SaveProjectSetupBody,
     SetProjectMaterialsBody,
 )
+from cutmaster.application import CutMasterApplication
 from cutmaster.application.projects import (
     CreateProjectCommand,
     DeleteProjectCommand,
+    ProjectView,
     RenameProjectCommand,
     SaveCreativeBriefCommand,
     SaveProjectSetupCommand,
     SetProjectMaterialsCommand,
 )
 from cutmaster.domain.ids import MaterialId, ProjectId
-
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -52,11 +54,59 @@ def list_projects(
 ) -> dict[str, object]:
     items = application.projects.list(search=search, sort=sort.value)
     return {
-        "items": [project_view(item) for item in items],
+        "items": [_project_card_view(application, item) for item in items],
         "total": len(items),
         "search": search,
         "sort": sort.value,
     }
+
+
+def _project_card_view(
+    application: CutMasterApplication,
+    project: ProjectView,
+) -> dict[str, object]:
+    payload = project_view(project)
+
+    def selected(values: tuple[MaterialId, ...]) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for material_id in values:
+            material = application.materials.get(material_id)
+            if material is not None:
+                result.append(material_view(material))
+        return result
+
+    runs = application.runs.list(project.project_id)
+    latest = max(runs, key=lambda item: item.sequence) if runs else None
+    latest_state: str | None = None
+    if latest is not None:
+        execution = latest_run_execution(application, latest.run_id)
+        attempt = execution.get("attempt") if execution is not None else None
+        latest_state = (
+            str(attempt["status"])
+            if isinstance(attempt, dict) and isinstance(attempt.get("status"), str)
+            else latest.status.value
+        )
+    selected_videos = selected(project.video_material_ids)
+    selected_music = selected(project.music_material_ids)
+    ready_video = next(
+        (
+            item
+            for item in selected_videos
+            if item.get("condition") == "ready"
+        ),
+        None,
+    )
+    payload["latest_run_state"] = latest_state
+    payload["selected_materials"] = {
+        "video": selected_videos,
+        "music": selected_music,
+    }
+    payload["preview_url"] = (
+        f"/api/materials/{ready_video['material_id']}/thumbnail"
+        if ready_video is not None
+        else None
+    )
+    return payload
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -119,6 +169,9 @@ def list_project_runs(
             {
                 "run": run_view(run),
                 "execution": latest_run_execution(application, run.run_id),
+                "model_usage_total": run_usage_total_view(
+                    application.runs.usage(run.run_id)
+                ),
             }
             for run in runs
         ]

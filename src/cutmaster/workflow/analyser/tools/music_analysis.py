@@ -12,6 +12,8 @@ from typing import Any
 import librosa
 import numpy as np
 
+from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
+
 
 def _normalize(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
@@ -77,14 +79,17 @@ def analyze_music_memory(
     sample_rate: int = 22050,
     hop_length: int = 512,
     energy_step_sec: float = 0.5,
+    cancellation_token: CancellationToken | None = None,
 ) -> dict[str, Any]:
     """Analyse the complete source track without any edit-duration input."""
+    raise_if_cancelled(cancellation_token)
     try:
         samples, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
     except Exception as exc:
         raise RuntimeError(f"Could not decode music material: {audio_path}") from exc
     if samples.size == 0:
         raise ValueError(f"Music material contains no audio samples: {audio_path}")
+    raise_if_cancelled(cancellation_token)
 
     source_duration = float(librosa.get_duration(y=samples, sr=sr))
     if source_duration <= 0.0:
@@ -116,6 +121,7 @@ def analyze_music_memory(
     )
     if len(energy) >= 3:
         energy = np.convolve(energy, np.ones(3) / 3.0, mode="same")
+    raise_if_cancelled(cancellation_token)
 
     fine_onset = librosa.onset.onset_strength(
         y=samples,
@@ -137,15 +143,14 @@ def analyze_music_memory(
     beat_indices = np.asarray(beat_frames, dtype=int)
     beat_strengths = fine_onset[beat_indices] if beat_indices.size else np.array([])
     accent_threshold = (
-        float(np.percentile(beat_strengths, 70))
-        if beat_strengths.size
-        else math.inf
+        float(np.percentile(beat_strengths, 70)) if beat_strengths.size else math.inf
     )
     source_accents = [
         float(time)
         for time, strength in zip(source_beats, beat_strengths, strict=True)
         if float(strength) >= accent_threshold
     ]
+    raise_if_cancelled(cancellation_token)
 
     curve = [
         {
@@ -160,6 +165,7 @@ def analyze_music_memory(
     for index, (start, end) in enumerate(
         zip(boundaries[:-1], boundaries[1:], strict=True)
     ):
+        raise_if_cancelled(cancellation_token)
         start_i = min(len(energy), int(start / energy_step_sec))
         end_i = min(
             len(energy),
@@ -186,6 +192,7 @@ def analyze_music_memory(
             }
         )
 
+    raise_if_cancelled(cancellation_token)
     return {
         "schema_version": "1.0",
         "audio_path": str(audio_path),
