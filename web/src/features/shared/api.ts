@@ -175,6 +175,100 @@ export interface RenderSummary {
   created_at?: string
 }
 
+export interface ReviewPlanSummary {
+  schema_version: string
+  plan_id: string
+  fps: number
+  total_frames: number
+  duration_sec: number
+}
+
+export interface ReviewMediaBinding {
+  material_id: string
+  source_url: string
+}
+
+export interface ReviewSlot {
+  slot_id: string
+  position: number
+  is_anchor: boolean
+  output_start_sec: number
+  output_end_sec: number
+  source_start_sec: number
+  source_end_sec: number
+  source_timestamp: string
+  selected_candidate_id: string
+  picture: string
+  selection_scores: Record<string, number>
+  dialogue_anchor: Record<string, unknown> | null
+}
+
+export interface ReviewCandidate {
+  candidate_id: string
+  slot_id: string
+  source_start_sec: number
+  source_end_sec: number
+  source_timestamp: string
+  description: string
+  semantic_relevance: number | null
+  visual_score: number | null
+  protagonist_visibility_score: number | null
+  emotional_intensity: number | null
+  kinetic_energy: number | null
+  salience: number | null
+  visual_evidence: string | null
+  selected: boolean
+  eligible_for_replacement: boolean
+  media_url: string
+}
+
+export interface ReviewRenderVariant {
+  render_variant_id: string
+  status: string
+  specification: Record<string, unknown>
+  duration_sec: number | null
+  failure_message: string | null
+  media_url: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ReviewDialogueCue {
+  slot_id: string
+  start_sec: number
+  end_sec: number
+  text: string
+  speaker?: string | null
+}
+
+export interface ReviewTimeline {
+  dialogue_cues: ReviewDialogueCue[]
+  music_beats_sec: number[]
+  music_beats_available: boolean
+}
+
+export interface FrozenEditReview {
+  edit: FrozenEditSummary
+  run: RunSummary
+  versions: FrozenEditSummary[]
+  plan: ReviewPlanSummary
+  media: {
+    video: ReviewMediaBinding
+    music: ReviewMediaBinding
+  }
+  candidate_space_available: boolean
+  candidate_space_unavailable_reason: string | null
+  slots: ReviewSlot[]
+  candidates: Record<string, ReviewCandidate[]>
+  variants: ReviewRenderVariant[]
+  timeline: ReviewTimeline
+}
+
+export interface CreateRevisionResult {
+  frozen_edit: FrozenEditSummary
+  review_url: string
+}
+
 export interface ProjectWorkspace {
   project: ProjectSummary
   materials?: {
@@ -199,9 +293,29 @@ export interface AttemptSummary {
   updated_at: string
 }
 
+export type ActivityNavigation =
+  | {
+      type: 'material'
+      material_type: MaterialType
+      material_id: string
+    }
+  | {
+      type: 'run'
+      project_id: string
+      run_id: string
+    }
+  | {
+      type: 'render_variant'
+      project_id: string
+      run_id: string
+      edit_id: string
+      render_variant_id: string
+    }
+
 export interface ActivityItem {
   attempt: AttemptSummary
   job: JobSummary
+  navigation: ActivityNavigation | null
 }
 
 export interface SettingsView {
@@ -375,6 +489,24 @@ export const api = {
       ),
     get: (runId: string) =>
       apiRequest<RunDetailView>(`/api/runs/${encodeURIComponent(runId)}`),
+  },
+  frozenEdits: {
+    review: (editId: string) =>
+      apiRequest<FrozenEditReview>(
+        `/api/frozen-edits/${encodeURIComponent(editId)}/review`,
+      ),
+    createRevision: (
+      editId: string,
+      replacements: Array<{ slot_id: string; candidate_id: string }>,
+    ) =>
+      apiRequest<CreateRevisionResult>(
+        `/api/frozen-edits/${encodeURIComponent(editId)}/revisions`,
+        {
+          method: 'POST',
+          headers: commandHeaders(),
+          body: JSON.stringify({ replacements }),
+        },
+      ),
   },
   activity: {
     list: () =>

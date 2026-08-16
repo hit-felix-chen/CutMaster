@@ -16,9 +16,16 @@ from cutmaster.adapters.web.presenters import (
     execution_view,
     job_view,
 )
+from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import StopAttemptCommand
+from cutmaster.application.jobs.views import AttemptView
 from cutmaster.domain.attempts import AttemptStatus
-from cutmaster.domain.ids import AttemptId
+from cutmaster.domain.ids import (
+    AttemptId,
+    MaterialId,
+    RenderVariantId,
+    RunId,
+)
 
 
 router = APIRouter(tags=["activity"])
@@ -45,15 +52,60 @@ def activity(
     )
     return {
         "items": [
-            execution_view(
-                item,
-                application.jobs.get_job_for_attempt(item.attempt_id),
-            )
+            _activity_item(application, item)
             for item in items
         ],
         "limit": limit,
         "offset": offset,
     }
+
+
+def _activity_item(
+    application: CutMasterApplication,
+    attempt: AttemptView,
+) -> dict[str, object]:
+    result = execution_view(
+        attempt,
+        application.jobs.get_job_for_attempt(attempt.attempt_id),
+    )
+    result["navigation"] = _owner_navigation(application, attempt)
+    return result
+
+
+def _owner_navigation(
+    application: CutMasterApplication,
+    attempt: AttemptView,
+) -> dict[str, str] | None:
+    """Project an owner hierarchy without leaking browser-route strings."""
+
+    if attempt.owner_type == "material":
+        material = application.materials.get(MaterialId.parse(attempt.owner_id))
+        if material is None:
+            return None
+        return {
+            "type": "material",
+            "material_type": material.material_type.value,
+            "material_id": str(material.material_id),
+        }
+    if attempt.owner_type == "run":
+        run = application.runs.get(RunId.parse(attempt.owner_id))
+        return {
+            "type": "run",
+            "project_id": str(run.project_id),
+            "run_id": str(run.run_id),
+        }
+    if attempt.owner_type == "render_variant":
+        variant = application.renders.get(RenderVariantId.parse(attempt.owner_id))
+        edit = application.runs.get_frozen_edit(variant.edit_id)
+        run = application.runs.get(edit.run_id)
+        return {
+            "type": "render_variant",
+            "project_id": str(run.project_id),
+            "run_id": str(run.run_id),
+            "edit_id": str(edit.edit_id),
+            "render_variant_id": str(variant.render_variant_id),
+        }
+    return None
 
 
 @router.get("/events")

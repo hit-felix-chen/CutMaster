@@ -15,7 +15,8 @@ from cutmaster.application.materials import (
     MaterialView,
 )
 from cutmaster.application.projects import ProjectView
-from cutmaster.application.runs import FrozenEditView, RunView
+from cutmaster.application.renders import RenderVariantView
+from cutmaster.application.runs import FrozenEditReviewView, FrozenEditView, RunView
 from cutmaster.application.settings import SettingsView, StorageReportView
 from cutmaster.domain.ids import EntityId
 from cutmaster.domain.projects import CreativeBrief
@@ -126,6 +127,65 @@ def frozen_edit_view(value: FrozenEditView) -> dict[str, Any]:
     }
 
 
+def frozen_edit_review_view(value: FrozenEditReviewView) -> dict[str, Any]:
+    video_source_url = f"/api/materials/{value.video_material_id}/source"
+    candidates = {
+        slot_id: [
+            {
+                **json_value(candidate),
+                "media_url": video_source_url,
+            }
+            for candidate in values
+        ]
+        for slot_id, values in value.candidates.items()
+    }
+    return {
+        "edit": frozen_edit_view(value.edit),
+        "run": run_view(value.run),
+        "versions": [frozen_edit_view(item) for item in value.versions],
+        "plan": json_value(value.plan),
+        "media": {
+            "video": {
+                "material_id": str(value.video_material_id),
+                "source_url": video_source_url,
+            },
+            "music": {
+                "material_id": str(value.music_material_id),
+                "source_url": f"/api/materials/{value.music_material_id}/source",
+            },
+        },
+        "candidate_space_available": value.candidate_space_available,
+        "candidate_space_unavailable_reason": (
+            value.candidate_space_unavailable_reason
+        ),
+        "slots": [json_value(item) for item in value.slots],
+        "candidates": candidates,
+        "variants": [_review_variant_view(item) for item in value.variants],
+        "timeline": {
+            "dialogue_cues": [json_value(item) for item in value.dialogue_cues],
+            "music_beats_sec": list(value.music_beats_sec),
+            "music_beats_available": value.music_beats_available,
+        },
+    }
+
+
+def _review_variant_view(value: RenderVariantView) -> dict[str, Any]:
+    return {
+        "render_variant_id": str(value.render_variant_id),
+        "status": value.status.value,
+        "specification": json_value(value.specification),
+        "duration_sec": value.duration_sec,
+        "failure_message": value.failure_message,
+        "media_url": (
+            f"/api/render-variants/{value.render_variant_id}/media"
+            if value.master is not None and value.status.value == "ready"
+            else None
+        ),
+        "created_at": value.created_at.isoformat(),
+        "updated_at": value.updated_at.isoformat(),
+    }
+
+
 def attempt_view(value: AttemptView) -> dict[str, Any]:
     return {
         "attempt_id": str(value.attempt_id),
@@ -223,6 +283,7 @@ __all__ = [
     "attempt_view",
     "event_view",
     "execution_view",
+    "frozen_edit_review_view",
     "frozen_edit_view",
     "job_view",
     "json_value",

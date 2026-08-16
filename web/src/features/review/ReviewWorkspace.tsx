@@ -1,0 +1,817 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  Check,
+  ChevronLeft,
+  Film,
+  Lock,
+  Music2,
+  Play,
+  RotateCcw,
+  Save,
+  Undo2,
+  Waves,
+} from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import {
+  Link,
+  useBlocker,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router-dom'
+
+import { appRoutes } from '@/app/routes'
+import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
+import { StatusBadge } from '@/components/ui/StatusBadge'
+import {
+  changesReviewContext,
+  revisionReplacements,
+  type RevisionDraft,
+} from '@/features/review/review-draft'
+import {
+  ApiError,
+  api,
+  type FrozenEditReview,
+  type ReviewCandidate,
+  type ReviewRenderVariant,
+  type ReviewSlot,
+} from '@/features/shared/api'
+
+function padSequence(value: number) {
+  return String(value).padStart(2, '0')
+}
+
+function formatSeconds(value: number) {
+  const safe = Math.max(0, value)
+  const minutes = Math.floor(safe / 60)
+  const seconds = safe - minutes * 60
+  return `${String(minutes).padStart(2, '0')}:${seconds.toFixed(1).padStart(4, '0')}`
+}
+
+function vttTimestamp(value: number) {
+  const milliseconds = Math.max(0, Math.round(value * 1000))
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000)
+  const seconds = Math.floor((milliseconds % 60_000) / 1000)
+  const remainder = milliseconds % 1000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(remainder).padStart(3, '0')}`
+}
+
+function sourceDialogueCues(slots: ReviewSlot[]) {
+  const cues: Array<{ start: number; end: number; text: string }> = []
+  for (const slot of slots) {
+    const items = slot.dialogue_anchor?.dialogue_items
+    if (!Array.isArray(items)) continue
+    for (const item of items) {
+      if (typeof item !== 'object' || item === null) continue
+      const value = item as Record<string, unknown>
+      const range = value.time_range
+      if (typeof range !== 'object' || range === null) continue
+      const start = (range as Record<string, unknown>).start_sec
+      const end = (range as Record<string, unknown>).end_sec
+      const text = value.text
+      const speaker = value.speaker
+      if (
+        typeof start !== 'number' ||
+        typeof end !== 'number' ||
+        typeof text !== 'string'
+      )
+        continue
+      cues.push({
+        start,
+        end,
+        text: typeof speaker === 'string' ? `${speaker}: ${text}` : text,
+      })
+    }
+  }
+  return cues
+}
+
+function captionTrack(data: FrozenEditReview, rendered: boolean) {
+  const cues = rendered
+    ? data.timeline.dialogue_cues.map((cue) => ({
+        start: cue.start_sec,
+        end: cue.end_sec,
+        text: cue.speaker ? `${cue.speaker}: ${cue.text}` : cue.text,
+      }))
+    : sourceDialogueCues(data.slots)
+  const body = cues
+    .map(
+      (cue, index) =>
+        `${index + 1}\n${vttTimestamp(cue.start)} --> ${vttTimestamp(cue.end)}\n${cue.text.replaceAll('-->', '→')}\n`,
+    )
+    .join('\n')
+  return `data:text/vtt;charset=utf-8,${encodeURIComponent(`WEBVTT\n\n${body}`)}`
+}
+
+function scoreLabel(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '—'
+  const normalized = value > 1 ? value / 5 : value
+  return `${Math.round(Math.max(0, Math.min(1, normalized)) * 100)}%`
+}
+
+function errorDetail(error: unknown) {
+  return error instanceof ApiError ? (error.problem?.detail ?? error.message) : null
+}
+
+function selectedCandidate(
+  data: FrozenEditReview,
+  slot: ReviewSlot,
+  draft: RevisionDraft,
+) {
+  const candidateId = draft[slot.slot_id] ?? slot.selected_candidate_id
+  return data.candidates[slot.slot_id]?.find(
+    (candidate) => candidate.candidate_id === candidateId,
+  )
+}
+
+function CandidateCard({
+  candidate,
+  active,
+  original,
+  disabled,
+  onPreview,
+  onChoose,
+}: {
+  candidate: ReviewCandidate
+  active: boolean
+  original: boolean
+  disabled: boolean
+  onPreview: () => void
+  onChoose: () => void
+}) {
+  const { t } = useTranslation('common')
+  return (
+    <article className={`review-candidate${active ? ' is-active' : ''}`}>
+      <header>
+        <div>
+          <strong>{candidate.candidate_id}</strong>
+          <span>{candidate.source_timestamp}</span>
+        </div>
+        {active ? <Check size={16} aria-label={t('review.currentChoice')} /> : null}
+      </header>
+      <p>{candidate.description}</p>
+      <dl className="review-candidate__scores">
+        <div>
+          <dt>{t('review.visualScore')}</dt>
+          <dd>{scoreLabel(candidate.visual_score)}</dd>
+        </div>
+        <div>
+          <dt>{t('review.semanticScore')}</dt>
+          <dd>{scoreLabel(candidate.semantic_relevance)}</dd>
+        </div>
+        <div>
+          <dt>{t('review.emotionScore')}</dt>
+          <dd>{scoreLabel(candidate.emotional_intensity)}</dd>
+        </div>
+      </dl>
+      {candidate.visual_evidence ? (
+        <p className="review-candidate__evidence">{candidate.visual_evidence}</p>
+      ) : null}
+      <footer>
+        <button className="button button--secondary" type="button" onClick={onPreview}>
+          <Play size={14} aria-hidden="true" />
+          {t('review.previewSource')}
+        </button>
+        {!original || !active ? (
+          <button
+            className="button button--primary"
+            type="button"
+            disabled={disabled || active || !candidate.eligible_for_replacement}
+            onClick={onChoose}
+          >
+            {t('review.useCandidate')}
+          </button>
+        ) : null}
+      </footer>
+    </article>
+  )
+}
+
+function SlotInspector({
+  data,
+  slot,
+  draft,
+  previewCandidateId,
+  onPreview,
+  onChoose,
+  onUndo,
+}: {
+  data: FrozenEditReview
+  slot: ReviewSlot
+  draft: RevisionDraft
+  previewCandidateId: string | null
+  onPreview: (candidate: ReviewCandidate) => void
+  onChoose: (candidate: ReviewCandidate) => void
+  onUndo: () => void
+}) {
+  const { t } = useTranslation('common')
+  const candidates = data.candidates[slot.slot_id] ?? []
+  const currentId = draft[slot.slot_id] ?? slot.selected_candidate_id
+  const dialogueText =
+    slot.dialogue_anchor && typeof slot.dialogue_anchor.text === 'string'
+      ? slot.dialogue_anchor.text
+      : null
+  return (
+    <aside className="review-inspector" aria-label={t('review.inspector')}>
+      <header className="review-inspector__header">
+        <div>
+          <span className="eyebrow">
+            {t('review.slotNumber', { number: padSequence(slot.position) })}
+          </span>
+          <h2>{slot.picture}</h2>
+        </div>
+        {slot.is_anchor ? (
+          <span className="review-anchor-badge">
+            <Lock size={13} aria-hidden="true" />
+            {t('review.storyAnchor')}
+          </span>
+        ) : null}
+      </header>
+      <dl className="review-slot-facts">
+        <div>
+          <dt>{t('review.outputRange')}</dt>
+          <dd>
+            {formatSeconds(slot.output_start_sec)}–{formatSeconds(slot.output_end_sec)}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('review.sourceRange')}</dt>
+          <dd>{slot.source_timestamp}</dd>
+        </div>
+      </dl>
+      {dialogueText ? (
+        <blockquote className="review-dialogue-quote">“{dialogueText}”</blockquote>
+      ) : null}
+      <section className="review-candidate-space">
+        <header>
+          <div>
+            <h3>{t('review.candidateSpace')}</h3>
+            <p>{t('review.candidateCount', { count: candidates.length })}</p>
+          </div>
+          {draft[slot.slot_id] ? (
+            <button className="button button--secondary" type="button" onClick={onUndo}>
+              <Undo2 size={14} aria-hidden="true" />
+              {t('review.undoSlot')}
+            </button>
+          ) : null}
+        </header>
+        {slot.is_anchor ? (
+          <div className="review-notice review-notice--locked">
+            <Lock size={16} aria-hidden="true" />
+            <p>{t('review.anchorLocked')}</p>
+          </div>
+        ) : null}
+        {!data.candidate_space_available ? (
+          <div className="review-notice">
+            <p>
+              {data.candidate_space_unavailable_reason === 'not_persisted'
+                ? t('review.candidateSpaceNotPersisted')
+                : t('review.candidateSpaceUnavailable')}
+            </p>
+          </div>
+        ) : null}
+        <div className="review-candidate-list">
+          {candidates.map((candidate) => (
+            <CandidateCard
+              key={candidate.candidate_id}
+              candidate={candidate}
+              active={candidate.candidate_id === currentId}
+              original={candidate.candidate_id === slot.selected_candidate_id}
+              disabled={slot.is_anchor || !data.candidate_space_available}
+              onPreview={() => onPreview(candidate)}
+              onChoose={() => onChoose(candidate)}
+            />
+          ))}
+        </div>
+        {previewCandidateId ? (
+          <span className="review-previewing">
+            {t('review.previewingCandidate', { candidate: previewCandidateId })}
+          </span>
+        ) : null}
+      </section>
+    </aside>
+  )
+}
+
+function ReviewPlayer({
+  data,
+  slot,
+  candidate,
+  variant,
+  previewCandidate,
+  nextSlotId,
+  onAdvanceSlot,
+}: {
+  data: FrozenEditReview
+  slot: ReviewSlot
+  candidate: ReviewCandidate | undefined
+  variant: ReviewRenderVariant | undefined
+  previewCandidate: ReviewCandidate | undefined
+  nextSlotId: string | null
+  onAdvanceSlot: (slotId: string) => void
+}) {
+  const { t } = useTranslation('common')
+  const player = useRef<HTMLVideoElement>(null)
+  const advancing = useRef(false)
+  const resumeAfterSeek = useRef(false)
+  const sourceCandidate = previewCandidate ?? candidate
+  const useVariant = Boolean(variant?.media_url && !previewCandidate)
+  const src = useVariant
+    ? (variant?.media_url ?? '')
+    : sourceCandidate?.media_url || data.media.video.source_url
+  const start = useVariant
+    ? slot.output_start_sec
+    : (sourceCandidate?.source_start_sec ?? slot.source_start_sec)
+  const end = useVariant
+    ? slot.output_end_sec
+    : (sourceCandidate?.source_end_sec ?? slot.source_end_sec)
+  const captions = captionTrack(data, useVariant)
+
+  useEffect(() => {
+    const video = player.current
+    if (!video || !src) return
+    const seek = () => {
+      if (Number.isFinite(start)) video.currentTime = start
+      advancing.current = false
+      if (resumeAfterSeek.current) {
+        resumeAfterSeek.current = false
+        void video.play().catch(() => undefined)
+      }
+    }
+    if (video.readyState >= 1) seek()
+    else video.addEventListener('loadedmetadata', seek, { once: true })
+    return () => video.removeEventListener('loadedmetadata', seek)
+  }, [src, start])
+
+  if (variant && !variant.media_url && !previewCandidate) {
+    return (
+      <section className="review-player review-player--empty">
+        <Film size={32} aria-hidden="true" />
+        <h2>{t('review.variantUnavailable')}</h2>
+        <StatusBadge status={variant.status} />
+        {variant.failure_message ? <p>{variant.failure_message}</p> : null}
+      </section>
+    )
+  }
+
+  return (
+    <section className="review-player">
+      <video
+        key={src}
+        ref={player}
+        src={src}
+        controls
+        playsInline
+        preload="metadata"
+        onTimeUpdate={(event) => {
+          if (event.currentTarget.currentTime < end || advancing.current) return
+          if (!useVariant && !previewCandidate && nextSlotId) {
+            advancing.current = true
+            resumeAfterSeek.current = true
+            onAdvanceSlot(nextSlotId)
+          } else if (!useVariant) {
+            event.currentTarget.pause()
+          }
+        }}
+      >
+        <track
+          default
+          kind="captions"
+          src={captions}
+          srcLang="en"
+          label={t('review.dialogue')}
+        />
+      </video>
+      <div className="review-player__hud">
+        <span>
+          {useVariant
+            ? t('review.renderVariant')
+            : previewCandidate
+              ? t('review.sourcePreview')
+              : t('review.sourceSequencePreview')}
+        </span>
+        <strong>
+          {t('review.slotNumber', { number: padSequence(slot.position) })} ·{' '}
+          {formatSeconds(start)}–{formatSeconds(end)}
+        </strong>
+      </div>
+    </section>
+  )
+}
+
+function ReviewTimeline({
+  data,
+  selectedSlotId,
+  draft,
+  onSelectSlot,
+}: {
+  data: FrozenEditReview
+  selectedSlotId: string
+  draft: RevisionDraft
+  onSelectSlot: (slotId: string) => void
+}) {
+  const { t } = useTranslation('common')
+  const duration = Math.max(data.plan.duration_sec, 0.001)
+  const timelineWidth = Math.max(920, data.slots.length * 76)
+  return (
+    <section className="review-timeline" aria-label={t('review.timeline')}>
+      <header>
+        <div>
+          <h2>{t('review.slotTimeline')}</h2>
+          <p>{t('review.timelineHelp')}</p>
+        </div>
+        <span>{formatSeconds(data.plan.duration_sec)}</span>
+      </header>
+      <div className="review-timeline__scroll">
+        <div className="review-timeline__canvas" style={{ minWidth: timelineWidth }}>
+          <div className="review-slot-lane">
+            {data.slots.map((slot) => {
+              const width =
+                ((slot.output_end_sec - slot.output_start_sec) / duration) * 100
+              return (
+                <button
+                  key={slot.slot_id}
+                  className={`review-slot${selectedSlotId === slot.slot_id ? ' is-active' : ''}${draft[slot.slot_id] ? ' is-dirty' : ''}`}
+                  type="button"
+                  style={{ width: `${width}%` }}
+                  onClick={() => onSelectSlot(slot.slot_id)}
+                  aria-pressed={selectedSlotId === slot.slot_id}
+                >
+                  <span>{padSequence(slot.position)}</span>
+                  {slot.is_anchor ? (
+                    <Lock size={11} aria-label={t('review.storyAnchor')} />
+                  ) : null}
+                  {draft[slot.slot_id] ? (
+                    <span
+                      className="review-slot__dirty"
+                      aria-label={t('common.unsaved')}
+                    />
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+          <div className="review-audio-lane review-audio-lane--dialogue">
+            <span className="review-audio-lane__label">
+              <Waves size={14} aria-hidden="true" />
+              {t('review.dialogue')}
+            </span>
+            <div className="review-audio-lane__track">
+              {data.timeline.dialogue_cues.map((cue, index) => (
+                <span
+                  key={`${cue.slot_id}-${cue.start_sec}-${index}`}
+                  className="review-dialogue-cue"
+                  style={{
+                    left: `${(cue.start_sec / duration) * 100}%`,
+                    width: `${((cue.end_sec - cue.start_sec) / duration) * 100}%`,
+                  }}
+                  title={`${cue.speaker ? `${cue.speaker}: ` : ''}${cue.text}`}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="review-audio-lane review-audio-lane--music">
+            <span className="review-audio-lane__label">
+              <Music2 size={14} aria-hidden="true" />
+              {t('review.musicBeats')}
+            </span>
+            <div className="review-audio-lane__track">
+              {data.timeline.music_beats_available ? (
+                data.timeline.music_beats_sec.map((beat, index) => (
+                  <span
+                    key={`${beat}-${index}`}
+                    className="review-music-beat"
+                    style={{ left: `${(beat / duration) * 100}%` }}
+                  />
+                ))
+              ) : (
+                <span className="review-audio-lane__empty">
+                  {t('review.musicBeatsUnavailable')}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function UnsavedChangesDialog({
+  onStay,
+  onDiscard,
+}: {
+  onStay: () => void
+  onDiscard: () => void
+}) {
+  const { t } = useTranslation('common')
+  const stayButton = useRef<HTMLButtonElement>(null)
+  const discardButton = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    const previousFocus = document.activeElement
+    stayButton.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onStay()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const first = stayButton.current
+      const last = discardButton.current
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      if (previousFocus instanceof HTMLElement) previousFocus.focus()
+    }
+  }, [onStay])
+
+  return (
+    <div className="dialog-layer">
+      <div
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="review-leave-title"
+        aria-describedby="review-leave-body"
+      >
+        <header>
+          <h2 id="review-leave-title">{t('review.leaveTitle')}</h2>
+        </header>
+        <p id="review-leave-body">{t('review.leaveBody')}</p>
+        <footer>
+          <button
+            ref={stayButton}
+            className="button button--secondary"
+            type="button"
+            onClick={onStay}
+          >
+            {t('review.stayOnPage')}
+          </button>
+          <button
+            ref={discardButton}
+            className="button button--primary"
+            type="button"
+            onClick={onDiscard}
+          >
+            {t('review.discardAndLeave')}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+export function ReviewWorkspace() {
+  const { t } = useTranslation('common')
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const { projectId = '', runId = '', editId = '' } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [draft, setDraft] = useState<RevisionDraft>({})
+  const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null)
+  const dirty = Object.keys(draft).length > 0
+  const dirtyRef = useRef(dirty)
+  useEffect(() => {
+    dirtyRef.current = dirty
+  }, [dirty])
+  const blocker = useBlocker(({ currentLocation, nextLocation }) =>
+    dirtyRef.current ? changesReviewContext(currentLocation, nextLocation) : false,
+  )
+  const review = useQuery({
+    queryKey: ['frozen-edit-review', editId],
+    queryFn: () => api.frozenEdits.review(editId),
+    enabled: Boolean(editId),
+  })
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (dirtyRef.current) event.preventDefault()
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [])
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.frozenEdits.createRevision(editId, revisionReplacements(draft)),
+    onSuccess: async (result) => {
+      dirtyRef.current = false
+      setDraft({})
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['run', runId] }),
+        queryClient.invalidateQueries({ queryKey: ['project-runs', projectId] }),
+      ])
+      navigate(
+        result.review_url ||
+          appRoutes.review(projectId, runId, result.frozen_edit.edit_id),
+      )
+    },
+  })
+
+  if (review.isPending) return <LoadingState />
+  if (review.isError) {
+    return <ErrorState onRetry={() => void review.refetch()} />
+  }
+
+  const data = review.data
+  const requestedSlotId = searchParams.get('slot')
+  const selectedSlot =
+    data.slots.find((slot) => slot.slot_id === requestedSlotId) ?? data.slots[0]
+  if (!selectedSlot) {
+    return (
+      <section className="empty-panel">
+        <Film size={28} aria-hidden="true" />
+        <h2>{t('review.noSlots')}</h2>
+      </section>
+    )
+  }
+  const requestedVariantId = searchParams.get('variant')
+  const selectedVariant = data.variants.find(
+    (variant) => variant.render_variant_id === requestedVariantId,
+  )
+  const currentCandidate = selectedCandidate(data, selectedSlot, draft)
+  const selectedSlotIndex = data.slots.findIndex(
+    (slot) => slot.slot_id === selectedSlot.slot_id,
+  )
+  const nextSlotId = data.slots[selectedSlotIndex + 1]?.slot_id ?? null
+  const previewCandidate = previewCandidateId
+    ? data.candidates[selectedSlot.slot_id]?.find(
+        (candidate) => candidate.candidate_id === previewCandidateId,
+      )
+    : undefined
+  const saveError = errorDetail(save.error)
+
+  const updateSelection = (key: 'slot' | 'variant', value: string | null) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    setSearchParams(next, { replace: true })
+  }
+
+  return (
+    <div className="project-section project-section--review">
+      <header className="review-toolbar">
+        <Link
+          className="review-toolbar__back"
+          to={appRoutes.runDetail(projectId, runId)}
+        >
+          <ChevronLeft size={16} aria-hidden="true" />
+          {t('review.backToRun')}
+        </Link>
+        <div className="review-toolbar__selectors">
+          <label>
+            <span>{t('review.frozenEdit')}</span>
+            <select
+              aria-label={t('review.frozenEdit')}
+              value={data.edit.edit_id}
+              onChange={(event) =>
+                navigate(appRoutes.review(projectId, runId, event.target.value))
+              }
+            >
+              {data.versions.map((version) => (
+                <option key={version.edit_id} value={version.edit_id}>
+                  {t('review.editLabel', { sequence: padSequence(version.sequence) })}
+                  {version.parent_edit_id
+                    ? ` · ${t('review.basedOn', {
+                        sequence: padSequence(
+                          data.versions.find(
+                            (item) => item.edit_id === version.parent_edit_id,
+                          )?.sequence ?? 0,
+                        ),
+                      })}`
+                    : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{t('review.renderVariant')}</span>
+            <select
+              aria-label={t('review.renderVariant')}
+              value={selectedVariant?.render_variant_id ?? ''}
+              onChange={(event) => {
+                setPreviewCandidateId(null)
+                updateSelection('variant', event.target.value || null)
+              }}
+            >
+              <option value="">{t('review.sourceReview')}</option>
+              {data.variants.map((variant, index) => (
+                <option
+                  key={variant.render_variant_id}
+                  value={variant.render_variant_id}
+                >
+                  {t('review.variantLabel', { number: index + 1 })} · {variant.status}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="review-toolbar__actions">
+          {dirty ? <span className="dirty-label">{t('common.unsaved')}</span> : null}
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={!dirty || save.isPending}
+            onClick={() => {
+              setDraft({})
+              setPreviewCandidateId(null)
+            }}
+          >
+            <RotateCcw size={15} aria-hidden="true" />
+            {t('review.resetChanges')}
+          </button>
+          <button
+            className="button button--primary"
+            type="button"
+            disabled={!dirty || !data.candidate_space_available || save.isPending}
+            onClick={() => save.mutate()}
+          >
+            <Save size={15} aria-hidden="true" />
+            {save.isPending ? t('review.savingRevision') : t('review.saveRevision')}
+          </button>
+        </div>
+      </header>
+
+      {save.isError ? (
+        <div className="review-save-error" role="alert">
+          <strong>{t('review.saveFailed')}</strong>
+          {saveError ? <p>{saveError}</p> : null}
+        </div>
+      ) : null}
+
+      <div className="review-workspace-grid">
+        <SlotInspector
+          data={data}
+          slot={selectedSlot}
+          draft={draft}
+          previewCandidateId={previewCandidateId}
+          onPreview={(candidate) => setPreviewCandidateId(candidate.candidate_id)}
+          onChoose={(candidate) => {
+            setPreviewCandidateId(null)
+            setDraft((current) => {
+              if (candidate.candidate_id === selectedSlot.selected_candidate_id) {
+                const next = { ...current }
+                delete next[selectedSlot.slot_id]
+                return next
+              }
+              return {
+                ...current,
+                [selectedSlot.slot_id]: candidate.candidate_id,
+              }
+            })
+          }}
+          onUndo={() => {
+            setPreviewCandidateId(null)
+            setDraft((current) => {
+              const next = { ...current }
+              delete next[selectedSlot.slot_id]
+              return next
+            })
+          }}
+        />
+        <ReviewPlayer
+          data={data}
+          slot={selectedSlot}
+          candidate={currentCandidate}
+          variant={selectedVariant}
+          previewCandidate={previewCandidate}
+          nextSlotId={nextSlotId}
+          onAdvanceSlot={(slotId) => updateSelection('slot', slotId)}
+        />
+      </div>
+      <ReviewTimeline
+        data={data}
+        selectedSlotId={selectedSlot.slot_id}
+        draft={draft}
+        onSelectSlot={(slotId) => {
+          setPreviewCandidateId(null)
+          updateSelection('slot', slotId)
+        }}
+      />
+
+      {blocker.state === 'blocked' ? (
+        <UnsavedChangesDialog
+          onStay={() => blocker.reset()}
+          onDiscard={() => {
+            dirtyRef.current = false
+            setDraft({})
+            blocker.proceed()
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}

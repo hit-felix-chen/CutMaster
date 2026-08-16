@@ -61,6 +61,7 @@ const destinations = [
     },
     pathname: '/projects/project_1/runs/run_1',
     search: '',
+    accessibleOwner: 'Run',
   },
   {
     name: 'material',
@@ -77,6 +78,7 @@ const destinations = [
     },
     pathname: '/materials/video/material_1',
     search: '',
+    accessibleOwner: 'Material',
   },
   {
     name: 'render variant',
@@ -95,6 +97,7 @@ const destinations = [
     },
     pathname: '/projects/project_1/runs/run_1/review/edit_1',
     search: '?variant=variant_1',
+    accessibleOwner: 'Render Variant',
   },
 ] as const
 
@@ -109,7 +112,13 @@ afterEach(() => {
 describe('Activity owner navigation', () => {
   it.each(destinations)(
     'opens the canonical $name route from a Recent row',
-    async ({ attempt: ownerAttempt, navigation, pathname, search }) => {
+    async ({
+      attempt: ownerAttempt,
+      navigation,
+      pathname,
+      search,
+      accessibleOwner,
+    }) => {
       vi.stubGlobal(
         'fetch',
         vi.fn(async () =>
@@ -132,7 +141,7 @@ describe('Activity owner navigation', () => {
       )
 
       const link = await screen.findByRole('link', {
-        name: `Open ${ownerAttempt.owner_type} ${ownerAttempt.owner_id}`,
+        name: `Open ${accessibleOwner} ${ownerAttempt.owner_id}`,
       })
       await userEvent.click(link)
 

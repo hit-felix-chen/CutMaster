@@ -49,9 +49,11 @@ M + ASTER = MASTER
 > The FastAPI + React/Vite local Web workspace is now implemented alongside
 > the backend foundations. CLI, Web, and Mashup-Benchmark all enter through the
 > Application Layer. Web `Start editing` now runs real ASTER planning in an
-> isolated subprocess and persists its RenderPlan and initial Frozen Edit.
-> Web-managed Material Analysis, Renderer, Review, SSE, and Data Root Migration
-> remain Proposed.
+> isolated subprocess and persists its RenderPlan, initial Frozen Edit, and a
+> Candidate Bundle for newly completed Runs. Frozen Edit Review, read-only
+> fallback for historical artifacts, and atomic Guided Revision are implemented.
+> Web-managed Material Analysis and Renderer jobs, automatic Preview/Variant
+> creation, SSE, the general supervisor, and Data Root Migration remain Proposed.
 
 ```mermaid
 flowchart LR
@@ -240,8 +242,12 @@ Setup**, **Runs**, and **Outputs**. Project Setup combines video/music selection
 Editing Intent, and Target Duration on one explicitly saved page. **Start
 editing** then creates an immutable ASTER Run; an isolated local subprocess
 executes the real Planners call, and Run details show its state and resulting
-Frozen Edit. Web Import & Analyse, Renderer, Review, and SSE remain Proposed;
-the complete CLI and Benchmark generation paths remain available.
+Frozen Edit. Opening that edit loads the real Review workspace. Candidate
+Bundles persisted for new Runs enable atomic, candidate-constrained Guided
+Revision; historical edits created without a bundle degrade explicitly to
+read-only Review. Web Import & Analyse, automatic Renderer Preview/Variant
+creation, SSE, and the general supervisor remain Proposed; the complete CLI
+and Benchmark generation paths remain available.
 
 ### CLI
 

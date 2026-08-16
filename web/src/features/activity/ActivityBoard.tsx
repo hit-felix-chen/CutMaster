@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, CheckCircle2, Clock3, Radio, Rows3, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
 
 import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
 import { StatusBadge } from '@/components/ui/StatusBadge'
+import { activityNavigationPath } from '@/features/activity/activity-route'
 import { AsterProgress } from '@/features/shared/AsterProgress'
 import { api, collectionItems, type ActivityItem } from '@/features/shared/api'
 import { hasActiveActivity } from '@/features/shared/execution-state'
@@ -123,8 +125,21 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
   const showProgress =
     attempt.operation_type === 'aster_planning' &&
     ['queued', 'running', 'retrying', 'stopping'].includes(attempt.status.toLowerCase())
+  const ownerLabel = ownerKey[attempt.owner_type]
+    ? t(ownerKey[attempt.owner_type])
+    : attempt.owner_type
+  const destination = item.navigation ? activityNavigationPath(item.navigation) : null
   return (
-    <article className="activity-row">
+    <article className={`activity-row${destination ? ' activity-row--linked' : ''}`}>
+      {destination ? (
+        <Link
+          className="activity-row__link"
+          to={destination}
+          aria-label={t('activity.openOwner', {
+            owner: `${ownerLabel} ${attempt.owner_id}`,
+          })}
+        />
+      ) : null}
       <div className="activity-row__identity">
         <strong>
           {operationKey[attempt.operation_type]
@@ -132,10 +147,7 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
             : attempt.operation_type || t('activity.attempt')}
         </strong>
         <span>
-          {ownerKey[attempt.owner_type]
-            ? t(ownerKey[attempt.owner_type])
-            : attempt.owner_type}{' '}
-          · {attempt.owner_id}
+          {ownerLabel} · {attempt.owner_id}
         </span>
       </div>
       <span className="activity-row__sequence">#{attempt.sequence}</span>

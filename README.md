@@ -48,8 +48,10 @@ M + ASTER = MASTER
 > 以及 FastAPI + React/Vite 本地 Web 工作台。CLI、Web 和
 > Mashup-Benchmark 均经由 Application Layer 调用真实后端。Web 已支持
 > `Start editing`，并通过独立子进程执行真实 ASTER planning、持久化
-> RenderPlan 和初始 Frozen Edit；素材分析、Renderer、Review 的 Web 长任务、
-> SSE 和 Data Root Migration 仍为 Proposed。
+> RenderPlan、初始 Frozen Edit 和后续新 Run 的 Candidate Bundle。Frozen Edit
+> Review、历史产物的只读降级和原子 Guided Revision 已实现；素材分析与
+> Renderer 的 Web 长任务、自动 Preview/Variant 创建、SSE、通用 supervisor
+> 和 Data Root Migration 仍为 Proposed。
 
 ```mermaid
 flowchart LR
@@ -234,9 +236,11 @@ Projects、Material Library、Video/Music Memory Explorer、Activity 与
 Settings。项目内部使用 **Project Setup / Runs / Outputs** 三个标签；
 Project Setup 在同一页选择视频和音乐、填写剪辑意图与目标时长，并显式保存。
 保存后可点击 **Start editing** 创建不可变 ASTER Run；本地子进程执行真实
-Planners 调用，Run 详情页展示执行状态与生成的 Frozen Edit。Import &
-Analyse、Renderer、Review 和 SSE 尚未实现，CLI 与 Benchmark 的完整生成
-链路不受影响。
+Planners 调用，Run 详情页展示执行状态与生成的 Frozen Edit。点击 Frozen
+Edit 可进入真实 Review：新 Run 持久化的 Candidate Bundle 支持候选约束内的
+原子 Guided Revision；升级前没有该 Bundle 的历史 Edit 会诚实降级为只读
+Review。Import & Analyse、自动 Renderer Preview/Variant 创建、SSE 和通用
+supervisor 尚未实现，CLI 与 Benchmark 的完整生成链路不受影响。
 
 ### 命令行
 

@@ -5,7 +5,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { appRoutes } from '@/app/routes'
-import { ReviewUnavailable, RunDetail } from '@/features/projects/ProjectWorkspace'
+import { RunDetail } from '@/features/projects/ProjectWorkspace'
 import i18n from '@/i18n'
 
 function jsonResponse(value: unknown) {
@@ -67,7 +67,7 @@ describe('Frozen Edit navigation', () => {
         },
         {
           path: '/projects/:projectId/runs/:runId/review/:editId',
-          element: <ReviewUnavailable />,
+          element: <h1>Review</h1>,
         },
       ],
       { initialEntries: ['/projects/project_1/runs/run_1'] },
@@ -90,6 +90,6 @@ describe('Frozen Edit navigation', () => {
     await user.click(editLink)
 
     expect(router.state.location.pathname).toBe(destination)
-    expect(await screen.findByRole('heading', { name: 'Unavailable' })).toBeVisible()
+    expect(await screen.findByRole('heading', { name: 'Review' })).toBeVisible()
   })
 })

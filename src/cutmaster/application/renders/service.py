@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from cutmaster.application.errors import RenderMediaUnavailableError
 from cutmaster.application.jobs.views import attempt_view, job_view
 from cutmaster.application.renders.commands import (
     CompleteRenderVariantCommand,
@@ -71,6 +72,36 @@ class RendersService:
             render_variant_view(value)
             for value in self._store.list_render_variants(edit_id)
         )
+
+    def media_path(self, render_id: RenderVariantId) -> Path:
+        """Resolve one verified Ready master for local HTTP streaming."""
+
+        _require_render_id(render_id)
+        variant = self.get(render_id)
+        if (
+            variant.status is not RenderVariantStatus.READY
+            or variant.master is None
+            or variant.master_size_bytes is None
+            or variant.master_sha256 is None
+        ):
+            raise RenderMediaUnavailableError(
+                "Render Variant has no Ready managed master"
+            )
+        try:
+            path = self._resolve_managed_file(variant.master.relative_path)
+            metadata = _fingerprint_master(path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise RenderMediaUnavailableError(
+                "Render Variant managed master is unavailable"
+            ) from exc
+        if (
+            metadata["size_bytes"] != variant.master_size_bytes
+            or metadata["sha256"] != variant.master_sha256
+        ):
+            raise RenderMediaUnavailableError(
+                "Render Variant managed master failed integrity validation"
+            )
+        return path
 
     def complete(
         self,

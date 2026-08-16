@@ -48,11 +48,11 @@ root workflow facade, root CLI module, raw-path stage contracts, and generic
 ## Repository layout and Web expansion
 
 **Status:** the Python backend, FastAPI adapter, React/Vite client, SPA packaging,
-Project Setup, and managed ASTER planning worker are implemented. Some leaf
-files in the fuller map below remain a design map for the proposed general
-long-job supervisor, SSE, advanced Review/Renderer flows, and Data Root
-Migration; consolidated modules need not be split merely to match every
-proposed filename.
+Project Setup, managed ASTER planning worker, Frozen Edit Review, and atomic
+Guided Revision are implemented. Some leaf files in the fuller map below remain
+a design map for the proposed general long-job supervisor, SSE, automatic
+Renderer Preview/Variant flows, and Data Root Migration; consolidated modules
+need not be split merely to match every proposed filename.
 
 CutMaster remains a standard Python `src`-layout repository. The backend is not
 wrapped in another `backend/` directory, and the React client lives in the
@@ -694,10 +694,12 @@ The backend migration completed these boundaries on 2026-08-12:
    Variants, Attempts, jobs, durable events, command receipts, and settings.
 
 The next work is **Proposed**: extend the implemented ASTER subprocess path into
-a general supervisor for Material Analysis, Renderer, Review, shared scheduling,
-and orphan recovery; add SSE; complete Review/Render flows; and then implement
-guarded Data Root Migration. OpenAPI, media Range requests, SPA packaging,
-Project Setup/Run route tests, and ASTER worker tests are already implemented.
+a general supervisor for Material Analysis, Renderer, shared scheduling, and
+orphan recovery; add SSE; add automatic Renderer Preview/Variant creation; and
+then implement guarded Data Root Migration. Frozen Edit Review and atomic Guided
+Revision already execute synchronously through the Application Layer. OpenAPI,
+media Range requests, SPA packaging, Project Setup/Run route tests, and ASTER
+worker tests are already implemented.
 Historical output
 directories and v1 plans remain
 untouched; they are not compatibility inputs for the handle-only stage API.
@@ -807,7 +809,7 @@ directories are left byte-for-byte unchanged and are never migrated.
 ASTER agents produce editorial decisions; they do not create product records.
 The deterministic Plan Compiler at the end of Planners turns those accepted
 decisions into RenderPlan. For managed execution, the Application atomically
-commits that plan as the sole immutable payload of a new Frozen Edit and stores
+commits that plan as the sole immutable timeline payload of a new Frozen Edit and stores
 only Frozen Edit identity, ASTER Run ownership, optional parent, origin
 (`initial` or `guided_revision`), and the plan's portable artifact reference in
 product persistence. Timeline fields are never duplicated as independently
@@ -816,14 +818,20 @@ identity rather than to an ASTER execution attempt or a plan file path. Product
 persistence has no mutable `current_frozen_edit_id` or `final_frozen_edit_id`;
 the newest creation sequence is only a default query result for adapters.
 
-**Proposed:** Guided Revision will not rerun ASTER. It will validate a
-user-selected replacement against the existing Candidate Space and
-deterministically recompile a new RenderPlan. The implemented Application
-persistence can commit a derived Frozen Edit that points back to its source,
-permits multiple children in one ASTER Run, and rejects cross-Run parentage;
-candidate-space validation and recompilation are not wired yet. Direct CLI and
-Benchmark workflows use RenderPlan without creating Frozen Edit product
-history.
+For newly completed managed ASTER Runs, the worker also publishes a versioned
+Review Candidate Bundle whose manifest is committed after its integrity-addressed
+Candidate Space, edit plan, music profile, and selection diagnostics. Historical
+Frozen Edits created before this publication remain fully inspectable through
+their RenderPlan but expose read-only Review rather than inferred candidates.
+
+Guided Revision is implemented without rerunning ASTER. The Application validates
+the complete replacement set against the persisted Candidate Space, rejects
+Story Anchor, identity, and chronology violations before history changes,
+deterministically compiles one child RenderPlan, and atomically commits one
+derived Frozen Edit linked to its source. Any failure leaves the source and
+history unchanged. Automatic Renderer Preview/Variant creation after that
+commit remains **Proposed**. Direct CLI and Benchmark workflows use RenderPlan
+without creating Frozen Edit product history.
 
 ## Implemented ownership
 
@@ -1001,12 +1009,13 @@ while managed groups open those resources only when accessed.
 
 The implemented FastAPI adapter exposes noun-based queries for Projects,
 Materials, sanitized Material Memory, leased source-media Range streams,
-Activity/events, Settings, storage, and Run details. It exposes Project Setup,
-Settings, Stop Attempt, and Start editing commands through Application use
-cases. Start editing returns a durable Run/Attempt/job submission and dispatches
-real ASTER planning to an isolated subprocess. The proposed general supervisor
-expansion adds Material Analysis, Retry/Resume, Save revision, and Render. The
-adapter has no generic
+Activity/events, Settings, storage, Run details, and Frozen Edit Review. It
+exposes Project Setup, Settings, Stop Attempt, Start editing, and atomic Save
+revision commands through Application use cases. Start editing returns a durable
+Run/Attempt/job submission and dispatches real ASTER planning to an isolated
+subprocess. The proposed general supervisor expansion adds Material Analysis,
+Retry/Resume, and Render; automatic Preview/Variant creation also remains
+Proposed. The adapter has no generic
 `/commands` endpoint and does not expose database-shaped CRUD.
 Each route maps a transport DTO to one Application use case and maps its result
 or domain error back to HTTP; authorization-free local transport concerns never
@@ -1064,9 +1073,9 @@ GET  /api/projects/{project_id}/runs
 POST /api/projects/{project_id}/runs
 GET  /api/runs/{run_id}
 POST /api/runs/{run_id}/retry
-GET  /api/frozen-edits/{edit_id}
-POST /api/frozen-edits/{edit_id}/revisions
-POST /api/frozen-edits/{edit_id}/render-variants
+GET  /api/frozen-edits/{edit_id}/review           # implemented
+POST /api/frozen-edits/{edit_id}/revisions        # implemented atomically
+POST /api/frozen-edits/{edit_id}/render-variants  # proposed
 ```
 
 The adapter does not mirror the full Project → Run → Frozen Edit → Variant
@@ -1196,9 +1205,10 @@ available for component-level evaluation and debugging.
 
 The implemented CLI surface contains those five synchronous commands plus
 `cutmaster serve`. The Web slice exposes Project, Material, Activity, Settings,
-and managed ASTER planning use cases. Retry/Resume, Material Analysis, Render,
-Review, and other long-running Web commands wait for the proposed general
-supervisor expansion.
+managed ASTER planning, Frozen Edit Review, and atomic Guided Revision use cases.
+Retry/Resume, Material Analysis, Render, automatic Preview/Variant creation, and
+other long-running Web commands wait for the proposed general supervisor
+expansion.
 
 The official Mashup-Benchmark adapter may call the same direct Application API
 as a peer adapter instead of spawning this CLI adapter. Both routes execute the
@@ -1341,10 +1351,11 @@ app.settings     # models, execution settings, storage, and Data Root
 Material operations, SQLite-backed managed use cases, and Settings reads,
 writes, and storage reporting are implemented. CLI and Mashup-Benchmark both
 invoke the Direct service; FastAPI maps its supported routes to the same
-Application and dispatches implemented ASTER planning in a managed subprocess.
-Persistent application notifications, SSE, the general supervisor and other
-managed workers, and Data Root Migration are **Proposed** additions over this
-boundary.
+Application, dispatches implemented ASTER planning in a managed subprocess, and
+serves Frozen Edit Review plus atomic Guided Revision through `app.runs`.
+Persistent application notifications, automatic Renderer Preview/Variant
+creation, SSE, the general supervisor and other managed workers, and Data Root
+Migration are **Proposed** additions over this boundary.
 
 The complete direct workflow uses a stable versioned contract from
 `cutmaster.contracts.workflow`:

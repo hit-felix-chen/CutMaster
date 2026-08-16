@@ -844,24 +844,3 @@ export function RunDetail() {
     </div>
   )
 }
-
-export function ReviewUnavailable() {
-  const { t } = useTranslation('common')
-  const navigate = useNavigate()
-  return (
-    <div className="page">
-      <section className="empty-panel">
-        <PlaySquare size={30} />
-        <h1>{t('common.unavailable')}</h1>
-        <p>{t('common.notAvailable')}</p>
-        <button
-          className="button button--secondary"
-          type="button"
-          onClick={() => navigate(-1)}
-        >
-          {t('common.back')}
-        </button>
-      </section>
-    </div>
-  )
-}

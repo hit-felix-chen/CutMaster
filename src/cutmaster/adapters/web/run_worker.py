@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any
@@ -20,6 +22,12 @@ from cutmaster.application.jobs import (
     HeartbeatJobCommand,
 )
 from cutmaster.application.runs import CompleteRunCommand, RunView
+from cutmaster.application.runs.review import (
+    REVIEW_BUNDLE_FILENAME,
+    REVIEW_BUNDLE_SCHEMA_VERSION,
+    artifact_manifest_entry,
+    write_json_atomic,
+)
 from cutmaster.configuration.effective import (
     EffectiveConfiguration,
     SecretReferences,
@@ -39,6 +47,15 @@ _ASTER_AGENTS = (
     "edit_composer",
     "revision_editor",
 )
+
+
+@dataclass(frozen=True)
+class _RunPlanArtifacts:
+    render_plan: Path
+    candidate_pool: Path
+    edit_plan: Path
+    music_profile: Path
+    selection_diagnostics: Path
 
 
 class ASTERJobProgressReporter(ProgressReporter):
@@ -136,7 +153,7 @@ def execute_run_job(
         daemon=True,
     )
     heartbeat.start()
-    published_plan: Path | None = None
+    published_paths: list[Path] = []
     try:
         application.jobs.heartbeat(
             HeartbeatJobCommand(
@@ -158,7 +175,7 @@ def execute_run_job(
         )
         with tempfile.TemporaryDirectory(prefix=f"cutmaster-{run_id}-") as raw:
             workspace = Path(raw).resolve()
-            source_plan = (
+            planned = (
                 _plan_run(
                     application,
                     run,
@@ -169,15 +186,22 @@ def execute_run_job(
                 else planner(application, run, workspace)
             )
             relative_plan = _run_plan_relative_path(run)
+            source_plan = planned.render_plan if isinstance(planned, _RunPlanArtifacts) else planned
             published_plan = _publish_plan(
                 source_plan,
                 application.settings.effective_configuration.data_root,
                 relative_plan,
             )
+            published_paths.append(published_plan)
+            if isinstance(planned, _RunPlanArtifacts):
+                published_paths.extend(
+                    _publish_review_bundle(planned, published_plan.parent)
+                )
 
         latest_job = application.jobs.get_job(job_id)
         if latest_job.stop_requested:
-            published_plan.unlink(missing_ok=True)
+            for path in reversed(published_paths):
+                path.unlink(missing_ok=True)
             application.jobs.mark_interrupted(attempt.attempt_id)
             return RunStatus.INTERRUPTED
 
@@ -191,8 +215,8 @@ def execute_run_job(
         )
         return completed.run.status
     except Exception as error:
-        if published_plan is not None:
-            published_plan.unlink(missing_ok=True)
+        for path in reversed(published_paths):
+            path.unlink(missing_ok=True)
         _finish_failed_or_interrupted(application, job_id, attempt.attempt_id, error)
         return application.runs.get(run_id).status
     finally:
@@ -206,7 +230,7 @@ def _plan_run(
     workspace: Path,
     *,
     progress_reporter: ProgressReporter | None = None,
-) -> Path:
+) -> _RunPlanArtifacts:
     if len(run.video_material_ids) != 1 or len(run.music_material_ids) != 1:
         raise ValueError("ASTER Run snapshot requires exactly one video and one music")
     video = application.materials.get(run.video_material_ids[0])
@@ -230,7 +254,13 @@ def _plan_run(
             progress_reporter=progress_reporter,
         )
     )
-    return result.render_plan_path
+    return _RunPlanArtifacts(
+        render_plan=result.render_plan_path,
+        candidate_pool=result.candidate_pool_path,
+        edit_plan=result.edit_plan_path,
+        music_profile=result.music_profile_path,
+        selection_diagnostics=result.selection_diagnostics_path,
+    )
 
 
 def _snapshot_secret_references(
@@ -259,8 +289,10 @@ def _run_plan_relative_path(run: RunView) -> str:
 
 
 def _publish_plan(source: Path, data_root: Path, relative_path: str) -> Path:
+    if source.is_symlink():
+        raise ValueError("Run planner produced a symlinked RenderPlan")
     resolved_source = source.resolve(strict=True)
-    if not resolved_source.is_file() or resolved_source.is_symlink():
+    if not resolved_source.is_file():
         raise ValueError("Run planner did not produce a regular RenderPlan file")
     resolved_root = data_root.resolve()
     target = resolved_root.joinpath(*relative_path.split("/"))
@@ -285,6 +317,82 @@ def _publish_plan(source: Path, data_root: Path, relative_path: str) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return target
+
+
+def _publish_review_bundle(
+    artifacts: _RunPlanArtifacts,
+    target_directory: Path,
+) -> list[Path]:
+    """Publish the immutable Review inputs and manifest commit point."""
+
+    sources = {
+        "candidate_pool": artifacts.candidate_pool,
+        "edit_plan": artifacts.edit_plan,
+        "music_profile": artifacts.music_profile,
+        "selection_diagnostics": artifacts.selection_diagnostics,
+    }
+    published: list[Path] = []
+    try:
+        entries: dict[str, dict[str, str]] = {}
+        for logical_name, source in sources.items():
+            if source.is_symlink() or not source.is_file():
+                raise ValueError(
+                    f"Run planner did not produce a regular {logical_name} artifact"
+                )
+            digest = _file_sha256(source)
+            target = _publish_sibling(
+                source,
+                target_directory,
+                f"{logical_name}.{digest[:16]}.json",
+            )
+            published.append(target)
+            entries[logical_name] = artifact_manifest_entry(target)
+        manifest = target_directory / REVIEW_BUNDLE_FILENAME
+        write_json_atomic(
+            manifest,
+            {
+                "schema_version": REVIEW_BUNDLE_SCHEMA_VERSION,
+                "artifacts": entries,
+            },
+        )
+        published.append(manifest)
+        return published
+    except Exception:
+        for path in reversed(published):
+            path.unlink(missing_ok=True)
+        raise
+
+
+def _publish_sibling(source: Path, directory: Path, name: str) -> Path:
+    if source.is_symlink():
+        raise ValueError(f"Run planner produced a symlinked {name}")
+    resolved = source.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"Run planner did not produce {name}")
+    target = directory / name
+    descriptor, raw_temporary = tempfile.mkstemp(
+        dir=directory,
+        prefix=f".{name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as destination, resolved.open("rb") as source_stream:
+            shutil.copyfileobj(source_stream, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, target)
+        return target
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _heartbeat_loop(

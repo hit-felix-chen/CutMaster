@@ -117,13 +117,15 @@ export function TimelineMemoryView({
         </div>
       </aside>
       <section className="timeline-explorer__player">
-        <video
-          ref={player}
-          controls
-          muted
-          preload="metadata"
-          src={`/api/materials/${encodeURIComponent(materialId)}/source`}
-        />
+        <div className="timeline-explorer__media">
+          <video
+            ref={player}
+            controls
+            muted
+            preload="metadata"
+            src={`/api/materials/${encodeURIComponent(materialId)}/source`}
+          />
+        </div>
         {selected ? (
           <div className="selection-inspector">
             <div>

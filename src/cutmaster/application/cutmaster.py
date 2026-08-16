@@ -117,7 +117,11 @@ class CutMasterApplication:
     def runs(self) -> RunsService:
         return self._get_service(
             "runs",
-            lambda: RunsService(self._effective_configuration),
+            lambda: RunsService(
+                self._effective_configuration,
+                materials=self.materials,
+                renders=self.renders,
+            ),
         )
 
     @property

@@ -5,6 +5,6 @@ export {
   ProjectOutputs as ProjectOutputsPage,
   ProjectOverview as ProjectOverviewPage,
   ProjectRuns as ProjectRunsPage,
-  ReviewUnavailable as ReviewPage,
   RunDetail as RunDetailPage,
 } from '@/features/projects/ProjectWorkspace'
+export { ReviewWorkspace as ReviewPage } from '@/features/review/ReviewWorkspace'

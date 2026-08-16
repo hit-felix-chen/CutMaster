@@ -19,6 +19,8 @@ from cutmaster.adapters.web.routes import (
     health_router,
     materials_router,
     projects_router,
+    render_media_router,
+    review_router,
     runs_router,
     settings_router,
 )
@@ -65,6 +67,8 @@ def create_app(
         materials_router,
         projects_router,
         runs_router,
+        review_router,
+        render_media_router,
         activity_router,
         settings_router,
     ):

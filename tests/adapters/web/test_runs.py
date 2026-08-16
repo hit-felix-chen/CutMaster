@@ -168,7 +168,16 @@ def test_running_run_projections_include_current_execution_and_progress(
     assert projected["execution"] == listed["execution"]
 
     assert activity.status_code == 200
-    assert activity.json()["items"][0] == listed["execution"]
+    activity_item = activity.json()["items"][0]
+    assert {
+        "attempt": activity_item["attempt"],
+        "job": activity_item["job"],
+    } == listed["execution"]
+    assert activity_item["navigation"] == {
+        "type": "run",
+        "project_id": str(project.project_id),
+        "run_id": str(submission.run.run_id),
+    }
 
 
 def test_project_run_list_does_not_access_materials(

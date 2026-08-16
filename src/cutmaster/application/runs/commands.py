@@ -29,6 +29,19 @@ class CreateRevisionCommand:
 
 
 @dataclass(frozen=True)
+class CandidateReplacement:
+    slot_id: str
+    candidate_id: str
+
+
+@dataclass(frozen=True)
+class SaveGuidedRevisionCommand:
+    command_id: str
+    source_edit_id: FrozenEditId
+    replacements: tuple[CandidateReplacement, ...]
+
+
+@dataclass(frozen=True)
 class RecoverRunCommand:
     command_id: str
     run_id: RunId
@@ -42,9 +55,10 @@ class DeleteRunCommand:
 
 __all__ = [
     "CompleteRunCommand",
+    "CandidateReplacement",
     "CreateRevisionCommand",
     "CreateRunCommand",
     "DeleteRunCommand",
     "RecoverRunCommand",
+    "SaveGuidedRevisionCommand",
 ]
-

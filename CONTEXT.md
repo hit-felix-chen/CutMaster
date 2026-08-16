@@ -28,9 +28,11 @@ managed Web slice are implemented over the same Application Layer. Projects,
 the combined Project Setup, Materials and Memory, ASTER Run submission and
 detail polling, Activity, Settings, source-media Range streams, and SPA
 packaging are active code. Start editing creates a durable ASTER Run and an
-isolated subprocess executes its real Planners work. **Proposed:** Web-managed
-Material Analysis, Renderer and Review workers, SSE, and guarded **Data Root
-Migration**.
+isolated subprocess executes its real Planners work, then commits its RenderPlan
+and Candidate Bundle. Frozen Edit Review, historical read-only Review, and
+atomic Guided Revision are implemented. **Proposed:** Web-managed Material
+Analysis and Renderer workers, automatic Preview/Variant creation, SSE, a
+general supervisor, and guarded **Data Root Migration**.
 
 ## Language
 
@@ -358,6 +360,12 @@ The validated set of source-timeline alternatives from which the final visual
 choice for each unanchored Slot may be made.
 _Avoid_: Search results, retrieved clips
 
+**Candidate Bundle** *(Implemented for newly completed managed ASTER Runs)*:
+The immutable, integrity-checked managed artifact set that preserves an ASTER
+Run's Candidate Space and deterministic Review inputs. A historical Frozen Edit
+without this bundle remains reviewable but cannot start a Guided Revision.
+_Avoid_: RenderPlan, Revision Draft, inferred candidates
+
 **RenderPlan**:
 The portable, immutable, frame-exact Renderer contract compiled from accepted
 editorial decisions. It identifies the expected Materials and exact source and
@@ -372,15 +380,15 @@ Revision** versions and may have many **Render Variants** without duplicating
 the timeline.
 _Avoid_: RenderPlan, final video, mutable timeline, render cache
 
-**Guided Revision** *(Frozen Edit lineage persistence implemented; candidate
-validation and Web flow proposed)*:
+**Guided Revision** *(Implemented)*:
 A user-directed replacement of a non-anchor Slot's selected passage with
-another member of its existing **Candidate Space**. It starts from any Frozen
-Edit in the same ASTER Run, preserves Slot timing, arrangement constraints, and
-Story Anchors, and produces a new child Frozen Edit without changing its source.
+another member of its existing **Candidate Space**. It starts from any
+Candidate-Bundle-backed Frozen Edit in the same ASTER Run, preserves Slot timing,
+arrangement constraints, and Story Anchors, and produces a new child Frozen Edit
+without changing its source.
 _Avoid_: Freeform timeline editing, rerunning ASTER coordination, Revision Editor
 
-**Revision Draft** *(Proposed Web UI state)*:
+**Revision Draft** *(Implemented page-local Web UI state)*:
 The uncommitted candidate replacements currently staged for one **Guided
 Revision**. Saving them creates one new **Frozen Edit**, while explicitly
 discarding them creates no history; before either action they are not
@@ -425,8 +433,8 @@ _Avoid_: Frozen Edit, BGM-only variant, source-audio mix
 **Music Profile**:
 A Planners-invocation-specific projection of **Music Memory** onto its requested
 output duration, used by the **Arrangement Architect** to shape pacing.
-Associating that artifact with a managed **ASTER Run** belongs to the proposed
-managed-worker wiring.
+New managed ASTER Runs retain it inside their Candidate Bundle as a deterministic
+Review input.
 _Avoid_: Music Memory, source music analysis, reusable material
 
 ## Flagged ambiguities
@@ -464,15 +472,16 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 
 > **Developer:** Can a person drag any source clip onto the output timeline?
 >
-> **Domain expert:** Not through the current CLI. The proposed Web UI Guided Revision
-> will replace a Slot only with an existing member of its Candidate Space,
-> producing a new Frozen Edit.
+> **Domain expert:** No. Web Guided Revision replaces a non-anchor Slot only
+> with an existing member of its persisted Candidate Space and atomically
+> produces a new Frozen Edit. A historical edit without that Candidate Bundle
+> remains read-only.
 
 > **Developer:** Can two projects using the same song share their Music Profile?
 >
 > **Domain expert:** They share one Music Memory. Each Planners invocation
 > derives its own Music Profile because its requested output duration may
-> differ; the future project layer will associate it with an ASTER Run.
+> differ; a new managed ASTER Run retains that profile in its Candidate Bundle.
 
 > **Developer:** What happens when I upload the same file twice with the same
 > candidate name?

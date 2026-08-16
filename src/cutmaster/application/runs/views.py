@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from cutmaster.application.jobs.views import AttemptView, JobView, attempt_view, job_view
+from cutmaster.application.renders.views import RenderVariantView
 from cutmaster.domain.artifacts import ManagedArtifactReference
 from cutmaster.domain.edits import FrozenEditOrigin
 from cutmaster.domain.ids import FrozenEditId, MaterialId, ProjectId, RunId
@@ -60,6 +61,26 @@ class CompletedRunView:
 class DeletedRunView:
     run_id: RunId
     deleted: bool
+
+
+@dataclass(frozen=True)
+class FrozenEditReviewView:
+    """Transport-neutral projection of one immutable Frozen Edit."""
+
+    edit: FrozenEditView
+    run: RunView
+    versions: tuple[FrozenEditView, ...]
+    plan: Mapping[str, Any]
+    video_material_id: MaterialId
+    music_material_id: MaterialId
+    candidate_space_available: bool
+    candidate_space_unavailable_reason: str | None
+    slots: tuple[Mapping[str, Any], ...]
+    candidates: Mapping[str, tuple[Mapping[str, Any], ...]]
+    dialogue_cues: tuple[Mapping[str, Any], ...]
+    music_beats_sec: tuple[float, ...]
+    music_beats_available: bool
+    variants: tuple[RenderVariantView, ...]
 
 
 def run_view(value: Mapping[str, Any]) -> RunView:
@@ -127,10 +148,10 @@ __all__ = [
     "CompletedRunView",
     "DeletedRunView",
     "FrozenEditView",
+    "FrozenEditReviewView",
     "RunSubmissionView",
     "RunView",
     "frozen_edit_view",
     "run_submission_view",
     "run_view",
 ]
-

@@ -16,6 +16,13 @@ overwriting an earlier one, preserving reproducibility and comparison at the
 cost of retaining additional project history. Direct Workflow usage artifacts
 are implemented; Run-level usage projection remains proposed.
 
+New managed completions also publish a versioned Candidate Bundle as immutable
+Review support data. Its absence on a historical Frozen Edit does not invalidate
+the Frozen Edit or RenderPlan: Review remains available in read-only form, while
+Guided Revision is enabled only when the real bundle passes integrity checks.
+Saving a valid Guided Revision atomically creates a child Frozen Edit and never
+overwrites its source; automatic Renderer preview creation remains proposed.
+
 Direct execution writes one set of Planners artifacts to its Direct Bundle or
 external output directory and does not create project history. The implemented
 Web command assigns each ASTER Run its independent
