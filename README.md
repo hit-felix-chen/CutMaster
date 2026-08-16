@@ -151,6 +151,24 @@ Edit Composer 同时考虑：
 
 Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeline Scout 临时生成未经验证的片段。Planners 随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划生成纯 BGM 或带原声版本。
 
+## Case Study：《教父》的权力交接
+
+下面的案例展示了 CutMaster 如何响应“剪出《教父》中权力交接的关键事件，包括家族会面、刺杀危机、反击计划与权力巩固”的提示词。Material Memory 提供完整影片的可检索故事与视觉上下文，背景音乐则定义 60 秒成片的节奏骨架。
+
+<p align="center">
+  <a href="assets/case-study-the-godfather.png">
+    <img src="assets/case-study-the-godfather.png" alt="CutMaster The Godfather power-transfer montage case study" width="100%">
+  </a>
+</p>
+
+<p align="center"><em>从提示词和 Material Memory 出发，ASTER 团队将《教父》的权力交接叙事编排、锚定、检索、组接并修订为一条 60 秒时间线。点击图片可查看完整尺寸。</em></p>
+
+- **Arrangement Architect** 将音乐结构映射为“权威建立—刺杀危机—迈克尔反击—失去与继承—权力巩固”五幕，并为每个 Slot 固定内容、素材范围、主体和时长约束。
+- **Story Editor** 用具有叙事转折价值的原声台词固定关键情节，并允许长台词通过 L-cut 跨越相邻画面 Slot。
+- **Timeline Scout** 为普通 Slot 验证多组候选；当人物身份、视觉相关性或主体可见性不合格时，拒绝候选并重新检索。
+- **Edit Composer** 联合单镜头得分和相邻镜头兼容度，在候选图上搜索全局最优的时序路径。
+- **Revision Editor** 在已验证候选池内复核弱镜头并执行替换，最终交付保持原片时间顺序、叙事完整且与音乐节奏对齐的成片。
+
 ## 快速开始
 
 ### 环境要求

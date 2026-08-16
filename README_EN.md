@@ -155,6 +155,24 @@ Sequence selection uses Beam Search. VLM transition scores are computed lazily o
 
 The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. The Planners stage then compiles a frame-exact `RenderPlan`; Renderer can reuse that plan for BGM-only and dialogue variants.
 
+## Case Study: Power Transfer in *The Godfather*
+
+This example follows the prompt “Create a montage of the key events in *The Godfather*’s transfer of power, including the family meeting, assassination attempt, retaliation plan, and consolidation of power.” Material Memory supplies searchable story and visual context for the full film, while the background music defines the rhythmic backbone of the 60-second edit.
+
+<p align="center">
+  <a href="assets/case-study-the-godfather.png">
+    <img src="assets/case-study-the-godfather.png" alt="CutMaster The Godfather power-transfer montage case study" width="100%">
+  </a>
+</p>
+
+<p align="center"><em>Starting from the prompt and Material Memory, the ASTER team arranges, anchors, retrieves, composes, and revises a 60-second timeline of the Corleone power transfer. Click the image for the full-size view.</em></p>
+
+- **Arrangement Architect** maps the music into five acts—Established Authority, Assassination Crisis, Michael’s Retaliation, Loss & Succession, and Power Consolidation—and fixes each Slot’s content, source scope, visible subjects, and duration constraints.
+- **Story Editor** anchors decisive plot turns with source dialogue and lets longer lines continue across adjacent visual Slots through L-cuts.
+- **Timeline Scout** validates several candidates for ordinary Slots, rejecting and retrieving again when identity, visual relevance, or protagonist visibility is insufficient.
+- **Edit Composer** combines unary shot scores with pairwise compatibility and searches the candidate graph for a globally coherent chronological path.
+- **Revision Editor** reviews weak shots and replaces them within the validated candidate pool, producing a final montage that preserves source chronology, narrative coverage, and musical pacing.
+
 ## Quick start
 
 ### Requirements
