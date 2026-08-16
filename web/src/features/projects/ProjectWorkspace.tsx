@@ -830,10 +830,14 @@ export function RunDetail() {
       {detail.data.frozen_edits.length > 0 ? (
         <div className="history-list">
           {detail.data.frozen_edits.map((edit) => (
-            <article key={edit.edit_id}>
+            <Link
+              className="history-list__link"
+              key={edit.edit_id}
+              to={appRoutes.review(run.project_id, run.run_id, edit.edit_id)}
+            >
               <span>{t('projects.editSequence', { sequence: edit.sequence })}</span>
               <StatusBadge status="complete" />
-            </article>
+            </Link>
           ))}
         </div>
       ) : null}
