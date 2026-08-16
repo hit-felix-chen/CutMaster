@@ -24,12 +24,12 @@ The complete CutMaster workflow is organized as a **MASTER** team:
 
 | Letter | Agent | Code entry | Editorial responsibility |
 |---|---|---|---|
-| **M** | **Material Analyst** | `analyser/material_analyst.py` | Builds reusable memory for video Shots, Segments, dialogue, and story summaries, as well as complete music tracks |
-| **A** | **Arrangement Architect** | `planners/arrangement_architect.py` | Projects Music Memory onto the target duration and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
-| **S** | **Story Editor** | `planners/story_editor.py` | Uses key source dialogue to anchor plot, character arcs, and prompt intent |
-| **T** | **Timeline Scout** | `planners/timeline_scout.py` | Searches the source timeline and validates candidates for every Slot |
-| **E** | **Edit Composer** | `planners/edit_composer.py` | Combines unary visual quality and pairwise transitions with Beam Search |
-| **R** | **Revision Editor** | `planners/revision_editor.py` | Reviews the cut and replaces weak shots within the validated candidate pool |
+| **M** | **Material Analyst** | `workflow/analyser/material_analyst.py` | Builds reusable memory for video Shots, Segments, dialogue, and story summaries, as well as complete music tracks |
+| **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | Projects Music Memory onto the target duration and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
+| **S** | **Story Editor** | `workflow/planners/story_editor.py` | Uses key source dialogue to anchor plot, character arcs, and prompt intent |
+| **T** | **Timeline Scout** | `workflow/planners/timeline_scout.py` | Searches the source timeline and validates candidates for every Slot |
+| **E** | **Edit Composer** | `workflow/planners/edit_composer.py` | Combines unary visual quality and pairwise transitions with Beam Search |
+| **R** | **Revision Editor** | `workflow/planners/revision_editor.py` | Reviews the cut and replaces weak shots within the validated candidate pool |
 
 In short:
 
@@ -39,9 +39,19 @@ ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-`Orchestrator` is the complete-workflow entry point, while `Analyser`, `Planners`, and `Renderer` are independently callable. `ASTERTeam` remains the sole coordinator for the five editorial agents.
+`CutMasterApplication.direct` is the complete-workflow entry point, while `Analyser`, `Planners`, and `Renderer` are independently callable through the Application Layer. `ASTERTeam` remains the sole coordinator for the five editorial agents.
 
 ## Architecture
+
+> The backend now implements `CutMasterApplication`, Direct and Material
+> services, SQLite-managed state, handle-only v2 Workflow contracts, and the
+> Artifact Manifest. CLI and Mashup-Benchmark both call `app.direct` directly.
+> The FastAPI + React/Vite local Web workspace is now implemented alongside
+> the backend foundations. CLI, Web, and Mashup-Benchmark all enter through the
+> Application Layer. Web `Start editing` now runs real ASTER planning in an
+> isolated subprocess and persists its RenderPlan and initial Frozen Edit.
+> Web-managed Material Analysis, Renderer, Review, SSE, and Data Root Migration
+> remain Proposed.
 
 ```mermaid
 flowchart LR
@@ -72,7 +82,7 @@ The executable call structure is:
 
 ```text
 CLI
-└── Orchestrator
+└── CutMasterApplication.direct
     ├── Analyser
     │   └── MaterialAnalystAgent
     ├── Planners
@@ -91,24 +101,24 @@ CLI
 ### Agent–tool boundary
 
 - **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, compose the sequence, and review the script.
-- **Tools provide capabilities**: ASR, the Material Library, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and ASTER coordination feedback live under `analyser/tools/` and `planners/tools/`.
+- **Tools provide capabilities**: ASR, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and ASTER coordination feedback live under `workflow/analyser/tools/` and `workflow/planners/tools/`; Material lifecycle belongs to `app.materials`.
 - **The Planners stage finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
 - **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating ASTER artifacts.
-- **Shared infrastructure remains neutral**: configuration, contracts, prompt registration, and runtime capabilities live under `configuration/`, `contracts/`, `prompting/`, and `runtime/`.
+- **Layer boundaries stay explicit**: configuration, public contracts, Workflow prompting, and concrete infrastructure live under `configuration/`, `contracts/`, `workflow/prompting/`, and `infrastructure/`.
 
 ## Core mechanisms
 
 ### 1. Material Library and reusable Material Memory
 
-The Material Library stores read-only managed copies of video and music sources and uses a unique **Material Name** as each asset's public identity. When no name is supplied, the CLI uses the source filename stem as the candidate name. Within one Material type, adding the same SHA-256 bytes under the same candidate-name family reuses the existing Material and its completed analysis. Adding different bytes under the same family allocates `Name (2)`, `Name (3)`, and so on. Equal bytes explicitly submitted under different candidate names remain two independently selectable Materials.
+The Material Library stores read-only managed copies of video and music sources. Every Material owns an opaque internal **Material ID**, while users and CLI callers select it by `(Material Type, exact Material Name)`. The CLI defaults the name to the source filename stem. Names are unique within a Material Type: `app.materials.add()` reports every occupied name, and CutMaster never appends `(2)`, overwrites, or replaces a Material automatically. The `app.materials.ensure()` operation used by `analyse` and `run --video/--audio` gives CLI and automation idempotence only when type, name, and fingerprint all match, returning the same Material ID; the same name with different bytes is still a collision. Equal bytes under different available names remain independently selectable Materials.
 
-SHA-256 is only an internal consistency check. It is not embedded in the Material Name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, edit decision, and rendering. The low-level Material Library supports adding and deleting sources, but deletion is not exposed through the CLI or frontend yet. In-place replacement is unsupported.
+SHA-256 is stored on the Material manifest record solely as an internal consistency check. It does not participate in the Material ID or directory name and is not a CLI selector. If a managed source no longer matches its recorded fingerprint, the Material is blocked from analysis, edit decision, and rendering. The low-level Material Library supports adding and deleting sources, but deletion is not exposed through the CLI or frontend yet. In-place replacement is unsupported.
 
 Completed Material Memory is reused directly. An interrupted video analysis can
 resume only when its subtitle and analysis specification are unchanged, so
 checkpoints from incompatible inputs are never mixed.
 
-For video, the Material Analyst detects the complete PySceneDetect Shot partition and binds ASR dialogue to Shots. It applies the Scene-VLM context-focus pass, creates semantic Segments, produces ordered per-Shot annotations, and aggregates story summaries. For complete music tracks, it extracts tempo, beats, accents, energy, and musical sections. These outputs form Video Material Memory and Music Memory under `.cutmaster/materials/`, independently of any single editing request.
+For video, the Material Analyst detects the complete PySceneDetect Shot partition and binds ASR dialogue to Shots. It applies the Scene-VLM context-focus pass, creates semantic Segments, produces ordered per-Shot annotations, and aggregates story summaries. For complete music tracks, it extracts tempo, beats, accents, energy, and musical sections. These outputs form Video Material Memory and Music Memory under `.cutmaster/media/<type>/mat_<uuid>/analysis/`, independently of any single editing request.
 
 ### 2. Music-aware Slot arrangement
 
@@ -195,6 +205,26 @@ The CLI automatically loads `.env` next to `config.toml` without overriding vari
 
 ## Usage
 
+### Local Web workspace
+
+Build the client and start the local application:
+
+```bash
+npm --prefix web ci
+npm --prefix web run build
+uv run cutmaster serve --config config.toml
+```
+
+CutMaster opens at `http://127.0.0.1:8000` by default. The implemented Web
+slice uses real backend data for Projects, the Material Library, Video/Music
+Memory Explorer, Activity, and Settings. A Project has three tabs: **Project
+Setup**, **Runs**, and **Outputs**. Project Setup combines video/music selection,
+Editing Intent, and Target Duration on one explicitly saved page. **Start
+editing** then creates an immutable ASTER Run; an isolated local subprocess
+executes the real Planners call, and Run details show its state and resulting
+Frozen Edit. Web Import & Analyse, Renderer, Review, and SSE remain Proposed;
+the complete CLI and Benchmark generation paths remain available.
+
 ### CLI
 
 ```bash
@@ -210,11 +240,12 @@ uv run cutmaster run \
   --overwrite
 ```
 
-The existing `run --video/--audio` form remains supported. Raw paths are first
-added to the Material Library; their candidate Material Names default to the
-filename stems and can be overridden with `--video-material-name` and
-`--music-material-name`. The `analyse` commands report the final
-`material_name`; a full run reports `video_material_name` and
+The existing `run --video/--audio` form remains supported. For raw paths,
+CutMaster first ensures that the corresponding Materials exist. Names default
+to the filename stems and can be overridden with `--video-material-name` and
+`--music-material-name`; they are never changed automatically, and an occupied
+name bound to different bytes raises a collision. The `analyse` commands report
+the validated `material_name`; a full run reports `video_material_name` and
 `music_material_name`. Later calls can reuse completed analysis by selecting
 those exact public names:
 
@@ -288,26 +319,27 @@ Memory before the Planners stage starts.
 ```python
 from pathlib import Path
 
-from cutmaster import Orchestrator
-from cutmaster.configuration.loader import load_config
-from cutmaster.contracts.workflow import WorkflowRequest
+from cutmaster import CutMasterApplication
+from cutmaster.contracts import ExecuteWorkflowCommand
 
-config = load_config(Path("config.toml"))
-request = WorkflowRequest(
+app = CutMasterApplication.open(Path("config.toml"))
+request = ExecuteWorkflowCommand(
+    prompt="Create an energetic cut centered on the protagonist's growth",
     video_path=Path("/path/to/source.mp4"),
     audio_path=Path("/path/to/bgm.mp3"),
-    prompt="Create an energetic cut centered on the protagonist's growth",
     output_dir=Path("/path/to/output"),
     target_output_length_sec=60,
     target_shot_length_sec=4,
     overwrite=True,
 )
 
-result = Orchestrator(config).run(request)
+result = app.direct.execute_workflow(request)
 print(result.output_video)
 ```
 
-External integrations should use `Orchestrator` for a full run or the public `Analyser`, `Planners`, and `Renderer` stage services.
+External integrations use `CutMasterApplication.open(...).direct` for complete
+or component-level execution. The Application Layer resolves Materials and
+issues stage handles; integrations do not reach into agents or tools.
 
 ## Configuration
 
@@ -315,8 +347,8 @@ The default configuration lives in [`config.toml`](config.toml) and follows the 
 
 | Section | Owner | Main controls |
 |---|---|---|
-| `[llm]`, `[vlm]` | Runtime | Models, endpoints, timeouts, retries, concurrency, and input/cached-input/output prices |
-| `[analyser.*]` | Analyser | Material Library, ASR, shot/scene annotation, complete-track music analysis, and material caching |
+| `[llm]`, `[vlm]` | Infrastructure / Workflow | Models, endpoints, timeouts, retries, concurrency, and input/cached-input/output prices |
+| `[analyser.*]` | Analyser | ASR, shot/scene annotation, complete-track music analysis, and Material Memory reuse |
 | `[planners.*]` | Planners | Arrangement, anchor, retrieval, Beam, review, and source-window controls |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
@@ -346,7 +378,20 @@ Each run keeps auditable intermediate artifacts under `output_dir`:
 | `renderer/render_request.json`, `render_result.json` | Render request and result |
 | `cutmaster.log` | Structured runtime log |
 
-The Material Library manifest and managed source copies live under the configured `.cutmaster/materials/` root. Each video Material's analysis directory stores `video_description.json`, `video_summary.json`, and `analysis_history.json`; each music Material's analysis directory stores `music_memory.json`. CLI callers resolve these caches by Material Name and do not need to retain their internal paths.
+The Application Layer always derives `.cutmaster/media/` from the active Application Data Root; the Material Library no longer has an independent storage root:
+
+```text
+.cutmaster/media/
+├── manifest.json
+├── video/mat_<uuid>/
+│   ├── source.<ext>
+│   └── analysis/
+└── music/mat_<uuid>/
+    ├── source.<ext>
+    └── analysis/
+```
+
+Each manifest record binds Material ID, Type, Name, SHA-256, and source/analysis relative paths; Name and SHA-256 never participate in path construction. A video Material's `analysis/` directory stores `video_description.json`, `video_summary.json`, and `analysis_history.json`; a music Material's `analysis/` directory stores `music_memory.json`. CLI callers resolve the manifest by Material Name, after which the internal Material ID locates storage; callers retain neither paths nor IDs. The existing `.cutmaster/materials-backup/` is a historical backup that CutMaster never scans, imports, migrates, or modifies.
 
 Each Video Material analysis directory also stores `model_usage.json`. `current_run` contains only requests issued by the current process and is zero for a complete cache reuse; `cumulative` preserves token and cost totals across runs in that task directory. These statistics remain local CutMaster artifacts and do not need to be reported by a Benchmark Adapter.
 
@@ -354,31 +399,19 @@ Each Video Material analysis directory also stores `model_usage.json`. `current_
 
 ```text
 src/cutmaster/
-├── orchestrator.py                  # complete three-stage entry point
-├── analyser/
-│   ├── analyser.py                  # public Analyser service
-│   ├── material_analyst.py          # M
-│   └── tools/                       # Material Library, ASR, dialogue reconstruction, video cache, complete-track music analysis
-│       ├── scene_segmenter.py        # Scene-VLM semantic segmentation
-│       └── ...
-├── planners/
-│   ├── planners.py                  # public Planners service
-│   ├── aster_team.py                # ASTER team orchestrator
-│   ├── arrangement_architect.py     # A
-│   ├── story_editor.py              # S
-│   ├── timeline_scout.py            # T
-│   ├── edit_composer.py             # E
-│   ├── revision_editor.py           # R
-│   └── tools/                       # Music Profile projection, retrieval, validation, scoring, feedback
-│       ├── plan_compiler.py         # frame timeline and RenderPlan compiler
-│       ├── source_window_optimizer.py # source-window optimization
-│       └── ...
-├── renderer/                        # independent audio and frame-exact rendering
-├── prompting/                       # prompts and response-contract registry
-├── configuration/                   # configuration models and loading
-├── contracts/                       # cross-stage data contracts
-├── runtime/                         # model access, context, logging, media infrastructure
-└── timecode.py                      # shared timecode types
+├── application/                     # CutMasterApplication and seven use-case groups
+├── domain/                          # pure domain values and state
+├── workflow/
+│   ├── analyser/                       # M + tools
+│   ├── planners/                       # ASTER Team + tools
+│   ├── renderer/                       # frame-exact rendering
+│   ├── contracts/                      # handle-only v2
+│   ├── prompting/
+│   └── shared/
+├── adapters/cli/                    # CLI inbound adapter
+├── infrastructure/                  # SQLite, Material Catalog, models, media, logging
+├── configuration/                   # Effective Configuration
+└── contracts/                       # stable Direct API
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for dependency rules and public APIs, and [`docs/adr/`](docs/adr/) for architecture decisions.
@@ -389,6 +422,10 @@ See [`docs/architecture.md`](docs/architecture.md) for dependency rules and publ
 uv run pytest
 uv run cutmaster --help
 uv run cutmaster run --help
+npm --prefix web run typecheck
+npm --prefix web run lint
+npm --prefix web test
+npm --prefix web run build
 ```
 
 ## Current scope

@@ -3,16 +3,19 @@ import json
 import pytest
 
 from cutmaster.configuration.schema import LLMConfig
-from cutmaster.prompting import (
+from cutmaster.workflow.prompting import (
     PromptModality,
     PromptPackage,
     PromptStage,
     PromptTask,
     ResponseContract,
 )
-from cutmaster.prompting.registry import PromptRegistry
-from cutmaster.runtime.model_gateway import ModelResponse, ModelUsage
-from cutmaster.runtime.workflow_context import WorkflowContext
+from cutmaster.infrastructure.models.openai_compatible import (
+    ModelResponse,
+    ModelUsage,
+)
+from cutmaster.workflow.prompting.registry import PromptRegistry
+from cutmaster.workflow.shared.execution_context import WorkflowContext
 
 
 def model_response(content: str = '{"ok":true}') -> ModelResponse:
@@ -44,7 +47,7 @@ def test_context_persists_artifacts_without_model_call_history(
     context = WorkflowContext(path)
     context.set_artifact("music_profile", {"tempo_bpm": 120})
     monkeypatch.setattr(
-        "cutmaster.runtime.workflow_context.generate_text",
+        "cutmaster.workflow.shared.execution_context.generate_text",
         lambda prompt, *_args, **_kwargs: model_response(
             '{"items":[{"slot_id":"slot_01"}]}'
         ),
@@ -163,11 +166,11 @@ def test_context_feeds_all_previous_failures_into_retry_prompts(
         return parsed
 
     monkeypatch.setattr(
-        "cutmaster.runtime.workflow_context.generate_text",
+        "cutmaster.workflow.shared.execution_context.generate_text",
         generate,
     )
     monkeypatch.setattr(
-        "cutmaster.runtime.model_gateway.time.sleep",
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
         lambda _delay: None,
     )
 
@@ -342,11 +345,11 @@ def test_request_failure_logging_does_not_duplicate_operation(
         )
 
     monkeypatch.setattr(
-        "cutmaster.runtime.workflow_context.generate_text",
+        "cutmaster.workflow.shared.execution_context.generate_text",
         fail_request,
     )
     monkeypatch.setattr(
-        "cutmaster.runtime.workflow_context.log_event",
+        "cutmaster.workflow.shared.execution_context.log_event",
         capture_event,
     )
 

@@ -1,0 +1,28 @@
+"""Lightweight managed-execution projections shared by Web routes."""
+
+from __future__ import annotations
+
+from cutmaster.adapters.web.presenters import execution_view
+from cutmaster.application import CutMasterApplication
+from cutmaster.domain.ids import RunId
+
+
+def latest_run_execution(
+    application: CutMasterApplication,
+    run_id: RunId,
+) -> dict[str, object] | None:
+    """Return the latest Run Attempt and its Job without touching Materials."""
+
+    attempts = application.jobs.activity(
+        owner_type="run",
+        owner_id=str(run_id),
+        limit=500,
+    )
+    if not attempts:
+        return None
+    attempt = max(attempts, key=lambda item: item.sequence)
+    job = application.jobs.get_job_for_attempt(attempt.attempt_id)
+    return execution_view(attempt, job)
+
+
+__all__ = ["latest_run_execution"]

@@ -5,9 +5,23 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 outputs/
+dist/
+build/
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+web/playwright-report/
+web/test-results/
 
 # ignore cache dictionary
 .cutmaster/
 
 # ignore env file
 .env
+.env.*
+!.env.example
+
+# local Application bootstrap and non-secret settings
+.cutmaster-location
+*.local.toml

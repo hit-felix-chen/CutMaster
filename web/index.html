@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN" data-color-mode="dark" data-color-mode-preference="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#101318" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>CutMaster</title>
+    <script>
+      ;(() => {
+        const key = 'cutmaster.color-mode'
+        const root = document.documentElement
+        let preference = 'dark'
+        try {
+          const saved = window.localStorage.getItem(key)
+          if (saved === 'dark' || saved === 'light' || saved === 'system') {
+            preference = saved
+          }
+        } catch {}
+        const resolved =
+          preference === 'system'
+            ? window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : preference
+        root.dataset.colorModePreference = preference
+        root.dataset.colorMode = resolved
+        root.style.colorScheme = resolved
+        root
+          .querySelector('meta[name="theme-color"]')
+          ?.setAttribute('content', resolved === 'dark' ? '#101318' : '#f4f6f8')
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

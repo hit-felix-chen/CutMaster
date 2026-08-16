@@ -1,0 +1,17 @@
+:root,
+[data-color-mode='dark'] {
+  --surface-canvas: #101318;
+  --surface-rail: #151920;
+  --surface-panel: #191e26;
+  --surface-raised: #202630;
+  --surface-overlay: #282f3a;
+  --surface-sunken: #0c0f13;
+  --text-primary: #f2f5f7;
+  --text-secondary: #b0bac5;
+  --text-tertiary: #788390;
+  --text-inverse: #101318;
+  --border-subtle: #2b333e;
+  --border-strong: #46515f;
+  --accent-narrative-strong: #a391ff;
+  --overlay-scrim: rgb(3 5 8 / 72%);
+}

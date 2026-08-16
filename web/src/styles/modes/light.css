@@ -1,0 +1,16 @@
+[data-color-mode='light'] {
+  --surface-canvas: #f4f6f8;
+  --surface-rail: #ffffff;
+  --surface-panel: #ffffff;
+  --surface-raised: #f8fafb;
+  --surface-overlay: #ffffff;
+  --surface-sunken: #e9edf1;
+  --text-primary: #171b20;
+  --text-secondary: #4d5865;
+  --text-tertiary: #71808f;
+  --text-inverse: #ffffff;
+  --border-subtle: #dce2e8;
+  --border-strong: #b9c3ce;
+  --accent-narrative-strong: #6f56db;
+  --overlay-scrim: rgb(21 27 34 / 45%);
+}

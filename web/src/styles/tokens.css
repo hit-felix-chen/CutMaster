@@ -1,0 +1,34 @@
+:root {
+  --font-sans:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.375rem;
+  --radius-round: 999px;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 12%);
+  --shadow-md: 0 12px 36px rgb(0 0 0 / 18%);
+  --transition-fast: 120ms ease;
+  --transition-base: 180ms ease;
+
+  --accent-narrative: #8b72f6;
+  --accent-emotion: #f29145;
+  --accent-visual: #23a8a2;
+  --status-danger: #e26169;
+  --status-warning: #e8a447;
+  --status-success: #45b985;
+  --status-info: #5b9bea;
+}

@@ -1,0 +1,27 @@
+html {
+  background: var(--surface-canvas);
+}
+
+body {
+  min-width: 1280px;
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  transition:
+    background-color var(--transition-base),
+    color var(--transition-base);
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent-narrative) 35%, transparent);
+}

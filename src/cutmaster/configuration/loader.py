@@ -44,7 +44,7 @@ MODEL_CONFIG_KEYS = {
 }
 
 ANALYSER_SCHEMA: dict[str, set[str]] = {
-    "material_analysis": {"material_cache_dir"},
+    "material_analysis": {"material_library_dir"},
     "shot_detection": {
         "adaptive_threshold",
         "adaptive_min_content_val",
@@ -220,14 +220,18 @@ def _boolean(
     return value
 
 
-def _llm_config(section: dict[str, Any]) -> LLMConfig:
+def _llm_config(
+    section: dict[str, Any],
+    *,
+    resolve_secrets: bool = True,
+) -> LLMConfig:
     model = str(section.get("model") or "").strip()
     if not model:
         raise ValueError("Missing [llm].model")
     return LLMConfig(
         model=model,
         base_url=str(section.get("base_url") or "").strip(),
-        api_key=_secret(section, "llm"),
+        api_key=_secret(section, "llm") if resolve_secrets else "",
         enable_thinking=_boolean(section, "llm", "enable_thinking", True),
         temperature=float(section.get("temperature", 0.1)),
         max_tokens=int(section.get("max_tokens", 4000)),
@@ -246,14 +250,18 @@ def _llm_config(section: dict[str, Any]) -> LLMConfig:
     )
 
 
-def _vlm_config(section: dict[str, Any]) -> VLMConfig:
+def _vlm_config(
+    section: dict[str, Any],
+    *,
+    resolve_secrets: bool = True,
+) -> VLMConfig:
     model = str(section.get("model") or "").strip()
     if not model:
         raise ValueError("Missing [vlm].model")
     return VLMConfig(
         model=model,
         base_url=str(section.get("base_url") or "").strip(),
-        api_key=_secret(section, "vlm"),
+        api_key=_secret(section, "vlm") if resolve_secrets else "",
         enable_thinking=_boolean(section, "vlm", "enable_thinking", True),
         temperature=float(section.get("temperature", 0.1)),
         max_tokens=int(section.get("max_tokens", 4000)),
@@ -464,8 +472,12 @@ def load_renderer_config(path: Path) -> RendererConfig:
     return renderer
 
 
-def load_config(path: Path) -> AppConfig:
-    data = _read_data(path)
+def _build_config(
+    data: dict[str, Any],
+    path: Path,
+    *,
+    resolve_secrets: bool,
+) -> AppConfig:
     analyser = _section(data, "analyser")
     planners = _section(data, "planners")
     material = _section(data, "analyser", "material_analysis")
@@ -486,13 +498,22 @@ def load_config(path: Path) -> AppConfig:
             "must be an integer from 1 to 5"
         )
     config = AppConfig(
-        llm=_llm_config(_section(data, "llm")),
-        vlm=_vlm_config(_section(data, "vlm")),
+        llm=_llm_config(
+            _section(data, "llm"),
+            resolve_secrets=resolve_secrets,
+        ),
+        vlm=_vlm_config(
+            _section(data, "vlm"),
+            resolve_secrets=resolve_secrets,
+        ),
         analyser=AnalyserConfig(
             material_analysis=MaterialAnalysisConfig(
-                material_cache_dir=(
+                material_library_dir=(
                     path.parent
-                    / str(material.get("material_cache_dir") or ".cutmaster/materials")
+                    / str(
+                        material.get("material_library_dir")
+                        or ".cutmaster/media"
+                    )
                 ).resolve(),
             ),
             shot_detection=ShotDetectionConfig(
@@ -509,9 +530,11 @@ def load_config(path: Path) -> AppConfig:
             ),
             asr=ASRConfig(
                 backend=str(asr.get("backend") or "bailian").strip().lower(),
-                api_key=_secret(asr, "analyser.asr"),
+                api_key=(
+                    _secret(asr, "analyser.asr") if resolve_secrets else ""
+                ),
                 reuse=_boolean(asr, "analyser.asr", "reuse", True),
-                timeout_sec=float(asr.get("timeout_sec", 1800.0)),
+                timeout_sec=float(asr.get("timeout_sec", 600.0)),
                 poll_interval_sec=float(asr.get("poll_interval_sec", 2.0)),
                 max_chars=int(asr.get("max_chars", 20)),
                 max_subtitle_duration_sec=float(
@@ -577,6 +600,18 @@ def load_config(path: Path) -> AppConfig:
     )
     _validate_values(config)
     return config
+
+
+def _decode_effective_config(data: dict[str, Any], path: Path) -> AppConfig:
+    """Decode merged configuration without resolving credentials."""
+
+    _validate_schema(data)
+    return _build_config(data, path, resolve_secrets=False)
+
+
+def load_config(path: Path) -> AppConfig:
+    data = _read_data(path)
+    return _build_config(data, path, resolve_secrets=True)
 
 
 __all__ = ["load_config", "load_renderer_config"]

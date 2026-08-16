@@ -1,6 +1,6 @@
 # CutMaster Prompt 中间层
 
-CutMaster 的所有 LLM/VLM 任务通过 `cutmaster.prompting` 构造。业务模块不得直接维护 system prompt、user prompt、响应示例或字段范围，也不得调用旧式的通用 JSON Prompt 接口。
+CutMaster 的所有 LLM/VLM 任务通过 `cutmaster.workflow.prompting` 构造。业务模块不得直接维护 system prompt、user prompt、响应示例或字段范围，也不得调用旧式的通用 JSON Prompt 接口。
 
 ## 统一入口
 
@@ -84,8 +84,8 @@ result = workflow_context.call_prompt(
 定义分别位于：
 
 ```text
-src/cutmaster/prompting/analyser/tasks.py
-src/cutmaster/prompting/planners/tasks.py
+src/cutmaster/workflow/prompting/analyser/tasks.py
+src/cutmaster/workflow/prompting/planners/tasks.py
 ```
 
 注册表会拒绝重复的 stage/task，并在构造结果与请求键不一致时立即失败。

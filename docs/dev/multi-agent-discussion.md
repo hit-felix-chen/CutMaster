@@ -1,5 +1,10 @@
 # MASTER 多智能体剪辑机制
 
+> **Historical design note.** 本文保留 MASTER/ASTER 角色设计的讨论过程；
+> 当前可执行入口、包路径和实现状态以
+> [`docs/architecture.md`](../architecture.md) 和 [`CONTEXT.md`](../../CONTEXT.md)
+> 为准。
+
 CutMaster 将长视频剪辑组织为 **MASTER Editing Team**：
 
 ```text
@@ -12,9 +17,9 @@ ASTER = Arrangement Architect
 ```
 
 M 负责建立与具体剪辑任务无关的 Material Memory；ASTER 是共享同一规划状态的
-五智能体剪辑团队。完整工作流由 `Orchestrator` 启动，素材分析、规划和渲染也可
-分别通过 `Analyser`、`Planners`、`Renderer` 独立执行。ASTER 内部协作由
-`ASTERTeam` 编排。
+五智能体剪辑团队。当前完整工作流由 `CutMasterApplication.direct`
+启动，Application Layer 也为 `Analyser`、`Planners`、`Renderer` 提供
+独立执行入口。ASTER 内部协作由 `ASTERTeam` 编排。
 
 ## 设计目标
 

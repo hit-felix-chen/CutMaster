@@ -1,7 +1,7 @@
 # Stage 0a: text-only LLM service
 # model: OpenAI-compatible 文本模型名称。
 # base_url: 模型服务的 OpenAI-compatible API 地址。
-# api_key_env: 保存 API Key 的环境变量名；也可在实际配置中改用 api_key。
+# api_key_env: 保存 API Key 的环境变量名；Application 配置不接受内联 api_key。
 # enable_thinking: 是否为该服务的模型调用开启 thinking。
 # temperature: 生成采样温度，越低结果越稳定。
 # max_tokens: 单次响应允许生成的最大 token 数。
@@ -55,9 +55,9 @@ max_retries = 3
 max_concurrency = 10
 
 # Stage 1: reusable video and music Material analysis
-# material_cache_dir: Material Library 根目录；保存清单、只读托管源文件和可复用分析结果。
+# material_library_dir: Material Library 根目录；保存清单、只读托管源文件和可复用分析结果。
 [analyser.material_analysis]
-material_cache_dir = ".cutmaster/materials"
+material_library_dir = ".cutmaster/media"
 
 # adaptive_threshold: PySceneDetect AdaptiveDetector 的自适应切镜阈值。
 # adaptive_min_content_val: 判定切镜所需的最低内容变化值。
@@ -71,7 +71,7 @@ adaptive_min_scene_len_sec = 0.25
 duplicate_frame_threshold = 1.0
 
 # backend: ASR 服务后端，当前支持 bailian。
-# api_key_env: 保存 ASR API Key 的环境变量名；也可在实际配置中改用 api_key。
+# api_key_env: 保存 ASR API Key 的环境变量名；Application 配置不接受内联 api_key。
 # reuse: 是否复用已有的非空 source.srt 和 ASR 音频。
 # timeout_sec: 一个异步 ASR 任务允许等待的总时长（秒）。
 # poll_interval_sec: 查询异步 ASR 任务状态的间隔（秒）。
@@ -81,7 +81,7 @@ duplicate_frame_threshold = 1.0
 backend = "bailian"
 api_key_env = "DASHSCOPE_API_KEY"
 reuse = true
-timeout_sec = 1800.0
+timeout_sec = 600.0
 poll_interval_sec = 2.0
 max_chars = 20
 max_subtitle_duration_sec = 3.5

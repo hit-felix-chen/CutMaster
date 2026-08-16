@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from cutmaster.runtime.model_gateway import generate_text, request_json_with_retries
+from cutmaster.infrastructure.models.openai_compatible import (
+    generate_text,
+    request_json_with_retries,
+)
 from cutmaster.configuration.schema import LLMConfig, VLMConfig
 
 
@@ -70,7 +73,9 @@ def test_model_thinking_config_reaches_api_request(
                 ]
             )
 
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.OpenAI", FakeOpenAI
+    )
 
     response = generate_text("test", config, "Return JSON")
     assert response.content == '{"ok":true}'
@@ -105,7 +110,9 @@ def test_multimodal_labels_are_interleaved_with_images(monkeypatch) -> None:
                 choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
             )
 
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.OpenAI", FakeOpenAI
+    )
     generate_text(
         "prompt",
         VLMConfig(model="vision", base_url="", api_key="test"),
@@ -128,7 +135,10 @@ def test_multimodal_labels_are_interleaved_with_images(monkeypatch) -> None:
 
 def test_json_request_retries_validation_failure(monkeypatch) -> None:
     responses = iter(['{"items": []}', '{"items": [1]}'])
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
 
     def validate(parsed):
         if not parsed["items"]:
@@ -146,7 +156,10 @@ def test_json_request_retries_validation_failure(monkeypatch) -> None:
 
 
 def test_json_request_reports_final_failure(monkeypatch) -> None:
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
 
     with pytest.raises(RuntimeError, match="failed after 2 attempts"):
         request_json_with_retries(
@@ -159,7 +172,10 @@ def test_json_request_reports_final_failure(monkeypatch) -> None:
 def test_json_request_does_not_repeat_provider_image_inspection_rejection(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
     attempts = 0
 
     def rejected_request():
@@ -180,7 +196,10 @@ def test_json_request_does_not_repeat_provider_image_inspection_rejection(
 def test_json_request_does_not_repeat_provider_data_uri_limit_rejection(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("cutmaster.runtime.model_gateway.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
     attempts = 0
 
     def rejected_request():

@@ -1,26 +1,6 @@
-import os
+import pytest
 
-from cutmaster.cli import _command_component, _load_runtime_environment, build_parser
-
-
-def test_runtime_environment_loads_dotenv_next_to_config(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.touch()
-    (tmp_path / ".env").write_text(
-        "DASHSCOPE_API_KEY=from-dotenv\n"
-        "PRESERVED_VALUE=from-dotenv\n",
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-    monkeypatch.setenv("PRESERVED_VALUE", "from-process")
-
-    _load_runtime_environment(config_path)
-
-    assert os.environ["DASHSCOPE_API_KEY"] == "from-dotenv"
-    assert os.environ["PRESERVED_VALUE"] == "from-process"
+from cutmaster.adapters.cli.main import _command_component, build_parser
 
 
 def test_cli_commands_map_to_stable_log_components() -> None:
@@ -28,7 +8,8 @@ def test_cli_commands_map_to_stable_log_components() -> None:
     assert _command_component("analyse-music") == "analyser"
     assert _command_component("plan") == "planners"
     assert _command_component("render") == "renderer"
-    assert _command_component("run") == "orchestrator"
+    assert _command_component("run") == "cutmaster"
+    assert _command_component("serve") == "web"
 
 
 def test_run_cli_preserves_raw_path_inputs_and_accepts_candidate_names() -> None:
@@ -87,3 +68,22 @@ def test_plan_and_run_cli_can_select_materials_by_exact_name() -> None:
 
     assert plan.video_material == run.video_material == "Feature Film (2)"
     assert plan.music_material == run.music_material == "Main Score"
+
+
+def test_serve_cli_uses_local_only_defaults() -> None:
+    args = build_parser().parse_args(["serve", "--no-open"])
+
+    assert args.host == "127.0.0.1"
+    assert args.port == 8000
+    assert args.no_open is True
+
+
+def test_serve_cli_help_is_available(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        build_parser().parse_args(["serve", "--help"])
+
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    assert "--host" in output
+    assert "--port" in output
+    assert "--no-open" in output

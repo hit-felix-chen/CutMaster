@@ -1,19 +1,28 @@
-# Identify immutable Materials by unique names
+# Identify immutable Materials by type-scoped unique names
 
-The Material Library identifies each source video or music asset by a stable,
-user-visible Material Name rather than a content hash or source path. The
-candidate name defaults to the source filename stem and may be supplied
-explicitly.
+**Status: Implemented in the backend; Web collision UI proposed.**
 
-When another file is added under the same candidate-name family, equal SHA-256
-bytes reuse the existing Material and its completed analysis. Different bytes
-allocate the next public name, such as `Film (2)` or `Film (3)`, without
-replacing existing content. Equal bytes proposed under different candidate
-names remain distinct Materials because their public identities are different.
+The Material Library has separate video and music namespaces. Within each
+Material Type, the stable user-visible Material Name is unique. Before file
+transfer, a proposed name collision must be surfaced to the user and resolved
+by selecting the existing Material, entering another name, or cancelling.
+CutMaster never appends a numeric suffix or overwrites the existing Material
+automatically. CLI and core lookup callers select a Material by the pair
+`(Material Type, exact Material Name)` rather than by fingerprint or managed
+path. Frontend API commands and canonical relations use Material ID while the UI
+shows the Material Name.
 
-Each Material records SHA-256 only as an internal Material Fingerprint. It is
-not embedded in the Material Name, exposed as a selector, or treated as a
-global deduplication key. CLI and service callers select completed Materials by
-exact Material Name. A fingerprint mismatch marks the Material as inconsistent
-and blocks analysis, edit decision, and rendering; recovery requires deleting and
-adding it again because source replacement is unsupported.
+The low-level `add` operation enforces this strict import rule atomically. The
+Application Material service and direct use case expose an idempotent `ensure`
+boundary for repeatable CLI and automation: it may return an existing Material
+only when type, exact name, and the already-bound fingerprint all match. It
+never allocates a new name. An occupied name with different bytes remains a
+collision. Analyser receives the resolved Material and only builds or reuses
+compatible Material Memory.
+
+After an addition is accepted, the Material record stores its SHA-256
+fingerprint as an internal consistency guard. It is not used to compare
+different Material records or prevent equal bytes from being added under
+different names; avoiding such duplicates is the user's responsibility. A
+fingerprint mismatch marks the managed Material as inconsistent and still
+requires deleting and adding it again because source replacement is unsupported.

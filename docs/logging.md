@@ -42,7 +42,7 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 
 ```text
 cutmaster
-orchestrator
+application.direct
 analyser
 dialogue
 dialogue_audio
@@ -129,7 +129,8 @@ prompt_chars
 
 - `cutmaster.log`：使用本规范的结构化运行日志，文件级别为 `DEBUG`。
 - 终端：使用同一格式，默认从 `INFO` 开始。
-- `tqdm` 进度条：只输出到终端/stdout-stderr；不写入 `cutmaster.log`。
+- `infrastructure/observability/progress.py` 的 `tqdm` 进度条：只输出到
+  终端/stdout；不写入 `cutmaster.log`。
 - benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，因此可以包含日志与进度条。
 - `analysis_history.json`、`planners_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
 - `planners_calls.json`：按任务和调用组织 Planners 阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
@@ -140,7 +141,7 @@ prompt_chars
 业务模块统一调用：
 
 ```python
-from cutmaster.runtime.observability import log_event
+from cutmaster.infrastructure.observability.logging import log_event
 
 log_event(
     "INFO",

@@ -35,7 +35,7 @@ class ASRConfig:
     backend: str
     api_key: str
     reuse: bool = True
-    timeout_sec: float = 1800.0
+    timeout_sec: float = 600.0
     poll_interval_sec: float = 2.0
     max_chars: int = 20
     max_subtitle_duration_sec: float = 3.5
@@ -43,7 +43,7 @@ class ASRConfig:
 
 @dataclass(frozen=True)
 class MaterialAnalysisConfig:
-    material_cache_dir: Path = Path(".cutmaster/materials")
+    material_library_dir: Path = Path(".cutmaster/media")
 
 
 @dataclass(frozen=True)

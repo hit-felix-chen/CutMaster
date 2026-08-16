@@ -1,0 +1,31 @@
+.route-placeholder,
+.fatal-error {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.route-placeholder h1,
+.fatal-error h1 {
+  color: var(--text-primary);
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+}
+
+.brand-mark {
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-panel);
+  color: var(--accent-narrative-strong);
+  font-size: 1.5rem;
+  font-weight: 650;
+  box-shadow: var(--shadow-md);
+}

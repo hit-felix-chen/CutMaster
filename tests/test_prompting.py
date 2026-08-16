@@ -4,19 +4,19 @@ import json
 
 import pytest
 
-from cutmaster.prompting import PromptStage, PromptTask, prompt_registry
-from cutmaster.prompting.analyser import (
+from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.workflow.prompting.analyser import (
     SegmentSummaryDetails,
     SegmentShotAnnotationDetails,
     VideoSummaryDetails,
 )
-from cutmaster.prompting.core import response_template_from_schema
-from cutmaster.prompting.failure_catalog import (
+from cutmaster.workflow.prompting.core import response_template_from_schema
+from cutmaster.workflow.prompting.failure_catalog import (
     PROMPT_FAILURE_CATALOG,
     PromptFailureCode,
     build_prompt_failure,
 )
-from cutmaster.prompting.planners import (
+from cutmaster.workflow.prompting.planners import (
     DialogueAnchorSelectionDetails,
     SlotArrangementDetails,
 )

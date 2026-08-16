@@ -31,7 +31,7 @@ cached_input_price_yuan_per_million_tokens = 0.5
 output_price_yuan_per_million_tokens = 10.0
 
 [analyser.material_analysis]
-material_cache_dir = "materials"
+material_library_dir = "media"
 
 [analyser.shot_detection]
 adaptive_threshold = 2.5
@@ -109,7 +109,7 @@ threads = 2
     assert config.vlm.input_price_yuan_per_million_tokens == 2.5
     assert config.vlm.cached_input_price_yuan_per_million_tokens == 0.5
     assert config.vlm.output_price_yuan_per_million_tokens == 10.0
-    assert config.analyser.material_analysis.material_cache_dir == tmp_path / "materials"
+    assert config.analyser.material_analysis.material_library_dir == tmp_path / "media"
     assert config.analyser.shot_detection.adaptive_threshold == 2.5
     assert config.analyser.scene_segmentation.context_shots == 20
     assert config.analyser.scene_segmentation.focus_shots == 10
@@ -138,6 +138,58 @@ threads = 2
     assert config.planners.script_review.review_rounds == 1
     assert config.planners.source_window_optimization.max_workers == 3
     assert config.renderer.fps == 24
+
+
+def test_material_library_defaults_to_media_beside_config(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.asr]
+api_key = "secret"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.analyser.material_analysis.material_library_dir == (
+        tmp_path / ".cutmaster" / "media"
+    )
+
+
+def test_legacy_material_cache_config_key_is_rejected(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.material_analysis]
+material_cache_dir = ".cutmaster/materials-backup"
+
+[analyser.asr]
+api_key = "secret"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Unknown keys.*material_cache_dir"):
+        load_config(path)
 
 
 def test_legacy_model_section_is_not_accepted(tmp_path) -> None:

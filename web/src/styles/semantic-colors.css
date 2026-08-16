@@ -1,0 +1,8 @@
+:root {
+  --background: var(--surface-canvas);
+  --foreground: var(--text-primary);
+  --border: var(--border-subtle);
+  --focus-ring: var(--accent-narrative);
+  --interactive: var(--accent-narrative);
+  --interactive-hover: var(--accent-narrative-strong);
+}
