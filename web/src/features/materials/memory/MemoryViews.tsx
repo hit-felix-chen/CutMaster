@@ -12,7 +12,7 @@ import {
   Music2,
   Users,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { formatDuration, formatFrameRate, formatNumber } from '@/i18n/formatters'
@@ -98,6 +98,50 @@ function clock(value: number) {
   return hours
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
     : `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+function timelineClock(value: number) {
+  return value === 0 ? '00:00' : clock(value)
+}
+
+function timelineTicks(duration: number) {
+  const ticks = [0]
+  for (let value = 600; value < duration; value += 600) ticks.push(value)
+  const endGap = duration - ticks.at(-1)!
+  const visibleDuration = Math.min(duration, 3600)
+  if (ticks.length > 1 && endGap / visibleDuration < 1 / 12) ticks.pop()
+  if (duration > 0) ticks.push(duration)
+  return ticks
+}
+
+function positionedTimelineSegments(segments: DataRecord[], duration: number) {
+  return segments
+    .map((segment, sourceIndex) => {
+      const range = record(segment.time_range)
+      const rawStart = numberValue(range.start_sec)
+      const start = Math.min(duration, Math.max(0, rawStart ?? 0))
+      const rawEnd = numberValue(range.end_sec)
+      return {
+        segment,
+        sourceIndex,
+        hasValidStart: rawStart !== null,
+        start,
+        end: Math.min(duration, Math.max(start, rawEnd ?? start)),
+      }
+    })
+    .filter((item) => item.hasValidStart)
+    .sort(
+      (left, right) => left.start - right.start || left.sourceIndex - right.sourceIndex,
+    )
+    .map((item, index, positioned) => {
+      const nextStart = positioned[index + 1]?.start ?? duration
+      const end = Math.max(item.start, Math.min(item.end, nextStart))
+      return {
+        segment: item.segment,
+        left: (item.start / duration) * 100,
+        width: ((end - item.start) / duration) * 100,
+      }
+    })
 }
 
 function values(...items: unknown[]) {
@@ -190,18 +234,36 @@ export function TimelineMemoryView({
   onSelectionChange?: (segmentId: string, shotId?: string) => void
 }) {
   const { t } = useTranslation('common')
-  const segments = useMemo(() => recordsPage(payload.segments), [payload.segments])
+  const segments = useMemo(
+    () =>
+      recordsPage(payload.segments).sort((left, right) => {
+        const leftStart = numberValue(record(left.time_range).start_sec)
+        const rightStart = numberValue(record(right.time_range).start_sec)
+        if (leftStart === null) return rightStart === null ? 0 : 1
+        if (rightStart === null) return -1
+        return leftStart - rightStart
+      }),
+    [payload.segments],
+  )
   const [localSelectedId, setLocalSelectedId] = useState(() =>
     segments.some((item) => text(item.segment_id) === requestedSegmentId)
       ? requestedSegmentId
       : text(segments[0]?.segment_id),
   )
   const [localSelectedShotId, setLocalSelectedShotId] = useState(requestedShotId)
+  const shotHeadingId = useId()
   const player = useRef<HTMLVideoElement>(null)
+  const pendingSeek = useRef<number | null>(null)
   const source = record(payload.source)
+  const declaredDuration = numberValue(source.duration_sec)
+  const inferredDuration = Math.max(
+    1,
+    ...segments.map((item) => timeRange(item.time_range).end),
+  )
   const sourceDuration =
-    numberValue(source.duration_sec) ??
-    Math.max(1, ...segments.map((item) => timeRange(item.time_range).end))
+    declaredDuration !== null && declaredDuration > 0
+      ? declaredDuration
+      : inferredDuration
   const requestedSegment = segments.find(
     (item) => text(item.segment_id) === requestedSegmentId,
   )
@@ -225,251 +287,291 @@ export function TimelineMemoryView({
         (item): item is number => typeof item === 'number' && Number.isFinite(item),
       )
     : []
+  const trackWidthPercent = Math.max(100, (sourceDuration / 3600) * 100)
+  const trackSegments = positionedTimelineSegments(segments, sourceDuration)
+  const trackTicks = timelineTicks(sourceDuration)
+  const selectedStart = selectedShot
+    ? timeRange(selectedShot.time_range).start
+    : timeRange(selected?.time_range).start
+
+  const seekPlayer = useCallback((start: number) => {
+    pendingSeek.current = start
+    if (player.current) player.current.currentTime = start
+  }, [])
+
+  const restorePendingSeek = useCallback(() => {
+    if (player.current && pendingSeek.current !== null) {
+      player.current.currentTime = pendingSeek.current
+    }
+  }, [])
 
   useEffect(() => {
-    if (
-      !requestedSegmentId ||
-      !segments.some((item) => text(item.segment_id) === requestedSegmentId)
-    ) {
-      return
-    }
-    const segment = segments.find(
-      (item) => text(item.segment_id) === requestedSegmentId,
-    )
-    const requestedShot = records(segment?.shots).find(
-      (shot) => text(shot.shot_id) === requestedShotId,
-    )
-    const start = requestedShot
-      ? timeRange(requestedShot.time_range).start
-      : timeRange(segment?.time_range).start
-    if (player.current) player.current.currentTime = start
-  }, [requestedSegmentId, requestedShotId, segments])
+    seekPlayer(selectedStart)
+    const restore = window.setTimeout(restorePendingSeek)
+    return () => window.clearTimeout(restore)
+  }, [restorePendingSeek, seekPlayer, selectedId, selectedShotId, selectedStart])
 
   const selectSegment = (segment: DataRecord) => {
     const segmentId = text(segment.segment_id)
     setLocalSelectedId(segmentId)
     setLocalSelectedShotId('')
     const start = timeRange(segment.time_range).start
-    if (player.current) player.current.currentTime = start
+    seekPlayer(start)
     onSelectionChange?.(segmentId)
   }
   const selectShot = (shot: DataRecord) => {
     const shotId = text(shot.shot_id)
     setLocalSelectedShotId(shotId)
     const start = timeRange(shot.time_range).start
-    if (player.current) player.current.currentTime = start
+    seekPlayer(start)
     if (selected) onSelectionChange?.(text(selected.segment_id), shotId)
   }
   const returnToSegment = () => {
     if (selected) selectSegment(selected)
   }
 
-  return (
-    <div className="timeline-explorer">
-      <aside className="timeline-explorer__inspector">
-        <header className="memory-pane-heading">
-          <Film size={16} />
-          <h3>{t('materials.segments')}</h3>
-          <span>{segments.length}</span>
-        </header>
-        <div className="segment-list">
-          {segments.map((segment) => {
-            const range = timeRange(segment.time_range)
-            return (
-              <button
-                key={text(segment.segment_id)}
-                type="button"
-                className={
-                  text(segment.segment_id) === text(selected?.segment_id)
-                    ? 'segment-item segment-item--active'
-                    : 'segment-item'
-                }
-                onClick={() => selectSegment(segment)}
-              >
-                <strong>{text(segment.segment_id)}</strong>
-                <span>
-                  {clock(range.start)} — {clock(range.end)}
-                </span>
-                <small>
-                  {text(segment.segment_summary) || text(segment.narrative_function)}
-                </small>
-              </button>
-            )
-          })}
-        </div>
-      </aside>
-      <section className="timeline-explorer__player">
-        <div className="timeline-explorer__media">
-          <video
-            ref={player}
-            controls
-            muted
-            preload="metadata"
-            src={`/api/materials/${encodeURIComponent(materialId)}/source`}
-          />
-        </div>
-        {selected ? (
-          <div
+  const segmentPanel = (
+    <aside
+      className="timeline-explorer__inspector"
+      aria-label={t('materials.segments')}
+    >
+      <header className="memory-pane-heading">
+        <Film size={16} aria-hidden="true" />
+        <h3>{t('materials.segments')}</h3>
+        <span>{segments.length}</span>
+      </header>
+      <div className="segment-list">
+        {segments.map((segment) => {
+          const range = timeRange(segment.time_range)
+          return (
+            <button
+              key={text(segment.segment_id)}
+              type="button"
+              className={
+                text(segment.segment_id) === text(selected?.segment_id)
+                  ? 'segment-item segment-item--active'
+                  : 'segment-item'
+              }
+              aria-pressed={text(segment.segment_id) === text(selected?.segment_id)}
+              onClick={() => selectSegment(segment)}
+            >
+              <strong>{text(segment.segment_id)}</strong>
+              <span>
+                {clock(range.start)} — {clock(range.end)}
+              </span>
+              <small>
+                {text(segment.segment_summary) || text(segment.narrative_function)}
+              </small>
+            </button>
+          )
+        })}
+      </div>
+    </aside>
+  )
+
+  const shotPanel = shots.length ? (
+    <aside className="shot-strip" aria-labelledby={shotHeadingId}>
+      <header className="memory-pane-heading">
+        <Camera size={16} aria-hidden="true" />
+        <h3 id={shotHeadingId}>{t('materials.shots')}</h3>
+        <span>{shots.length}</span>
+      </header>
+      <div className="shot-strip__list" role="group" aria-labelledby={shotHeadingId}>
+        {shots.map((shot) => (
+          <button
+            type="button"
+            key={text(shot.shot_id)}
             className={
-              shots.length
-                ? 'selection-inspector'
-                : 'selection-inspector selection-inspector--no-shots'
+              text(shot.shot_id) === selectedShotId
+                ? 'shot-chip shot-chip--active'
+                : 'shot-chip'
             }
+            aria-pressed={text(shot.shot_id) === selectedShotId}
+            onClick={() => selectShot(shot)}
           >
-            <div className="selection-inspector__header">
-              <div>
-                <span className="eyebrow">
-                  {selectedShot ? t('materials.shots') : t('materials.segments')}
-                </span>
-                <h3>{text(selectedShot?.shot_id) || text(selected.segment_id)}</h3>
-              </div>
-              {selectedShot ? (
-                <button
-                  type="button"
-                  className="selection-inspector__back"
-                  onClick={returnToSegment}
-                >
-                  <ChevronLeft size={15} aria-hidden="true" />
-                  {t('materials.backToSegment')}
-                </button>
-              ) : null}
-            </div>
-            {shots.length ? (
-              <div
-                className="shot-strip"
-                role="group"
-                aria-label={t('materials.shots')}
-              >
-                {shots.map((shot) => (
+            <strong>{text(shot.shot_id)}</strong>
+            <small>{clock(timeRange(shot.time_range).start)}</small>
+          </button>
+        ))}
+      </div>
+    </aside>
+  ) : null
+
+  return (
+    <div
+      className={
+        shots.length
+          ? 'timeline-explorer'
+          : 'timeline-explorer timeline-explorer--no-shots'
+      }
+    >
+      {segmentPanel}
+      <section
+        className={
+          shots.length
+            ? 'timeline-explorer__detail'
+            : 'timeline-explorer__detail timeline-explorer__detail--no-shots'
+        }
+      >
+        {shotPanel}
+        <section className="timeline-explorer__player">
+          <div className="timeline-explorer__media">
+            <video
+              ref={player}
+              controls
+              muted
+              preload="metadata"
+              src={`/api/materials/${encodeURIComponent(materialId)}/source`}
+              onLoadedMetadata={restorePendingSeek}
+            />
+          </div>
+          {selected ? (
+            <div className="selection-inspector">
+              <div className="selection-inspector__header">
+                <div>
+                  <span className="eyebrow">
+                    {selectedShot ? t('materials.shots') : t('materials.segments')}
+                  </span>
+                  <h3>{text(selectedShot?.shot_id) || text(selected.segment_id)}</h3>
+                </div>
+                {selectedShot ? (
                   <button
                     type="button"
-                    key={text(shot.shot_id)}
-                    className={
-                      text(shot.shot_id) === selectedShotId
-                        ? 'shot-chip shot-chip--active'
-                        : 'shot-chip'
-                    }
-                    onClick={() => selectShot(shot)}
+                    className="selection-inspector__back"
+                    onClick={returnToSegment}
                   >
-                    <strong>{text(shot.shot_id)}</strong>
-                    <small>{clock(timeRange(shot.time_range).start)}</small>
+                    <ChevronLeft size={15} aria-hidden="true" />
+                    {t('materials.backToSegment')}
                   </button>
-                ))}
+                ) : null}
               </div>
-            ) : null}
-            <div className="selection-inspector__details">
-              <p>
-                {text(selectedShot?.visual_description) ||
-                  text(selected.segment_summary) ||
-                  text(selected.narrative_function)}
-              </p>
-              <DetailChips
-                items={values(
-                  text(selectedShot?.content_type) || text(selected.content_type),
-                  text(selectedShot?.narrative_function) ||
-                    text(selected.narrative_function),
-                  text(selectedShot?.emotional_tone) || text(selected.emotional_tone),
-                  numberValue(
-                    selectedShot?.emotional_intensity ?? selected.emotional_intensity,
-                  ) === null
-                    ? null
-                    : t('materials.emotionalIntensityValue', {
-                        value: numberValue(
-                          selectedShot?.emotional_intensity ??
-                            selected.emotional_intensity,
+              <div className="selection-inspector__details" aria-live="polite">
+                <p>
+                  {text(selectedShot?.visual_description) ||
+                    text(selected.segment_summary) ||
+                    text(selected.narrative_function)}
+                </p>
+                <DetailChips
+                  items={values(
+                    text(selectedShot?.content_type) || text(selected.content_type),
+                    text(selectedShot?.narrative_function) ||
+                      text(selected.narrative_function),
+                    text(selectedShot?.emotional_tone) || text(selected.emotional_tone),
+                    numberValue(
+                      selectedShot?.emotional_intensity ?? selected.emotional_intensity,
+                    ) === null
+                      ? null
+                      : t('materials.emotionalIntensityValue', {
+                          value: numberValue(
+                            selectedShot?.emotional_intensity ??
+                              selected.emotional_intensity,
+                          ),
+                        }),
+                    text(selectedShot?.dominant_action),
+                    selectedShot
+                      ? null
+                      : values(
+                          text(selected.speech_mode),
+                          text(selected.timeline_role),
                         ),
-                      }),
-                  text(selectedShot?.dominant_action),
-                  selectedShot
-                    ? null
-                    : values(text(selected.speech_mode), text(selected.timeline_role)),
-                )}
-              />
-              {!selectedShot && segmentCharacters.length ? (
-                <section className="memory-detail-section">
-                  <h4>
-                    <Users size={14} aria-hidden="true" />
-                    {t('materials.characters')}
-                  </h4>
-                  <DetailChips items={segmentCharacters} />
-                </section>
-              ) : null}
-              {selectedShot ? <CharacterCards items={shotCharacters} /> : null}
-              <DialogueCards items={dialogue} />
-              {selectedShot ? (
-                <>
+                  )}
+                />
+                {!selectedShot && segmentCharacters.length ? (
                   <section className="memory-detail-section">
                     <h4>
-                      <Camera size={14} aria-hidden="true" />
-                      {t('materials.camera')}
+                      <Users size={14} aria-hidden="true" />
+                      {t('materials.characters')}
                     </h4>
-                    <DetailChips
-                      items={values(
-                        text(selectedShot.shot_scale),
-                        text(selectedShot.camera_angle),
-                        text(selectedShot.camera_movement),
-                      )}
-                    />
-                    {text(selectedShot.composition) ? (
-                      <p>{text(selectedShot.composition)}</p>
-                    ) : null}
+                    <DetailChips items={segmentCharacters} />
                   </section>
-                  {Object.keys(scene).length ? (
+                ) : null}
+                {selectedShot ? <CharacterCards items={shotCharacters} /> : null}
+                <DialogueCards items={dialogue} />
+                {selectedShot ? (
+                  <>
                     <section className="memory-detail-section">
                       <h4>
-                        <MapPin size={14} aria-hidden="true" />
-                        {t('materials.scene')}
+                        <Camera size={14} aria-hidden="true" />
+                        {t('materials.camera')}
                       </h4>
                       <DetailChips
                         items={values(
-                          text(scene.interior_exterior),
-                          text(scene.location),
-                          text(scene.time_of_day),
-                          text(scene.weather),
-                          text(scene.atmosphere),
-                          scene.environment_lighting,
-                          scene.color_palette,
-                          text(scene.color_tone),
-                          scene.set_details,
+                          text(selectedShot.shot_scale),
+                          text(selectedShot.camera_angle),
+                          text(selectedShot.camera_movement),
                         )}
                       />
-                    </section>
-                  ) : null}
-                  {text(selectedShot.visual_evidence) || sampledFrames.length ? (
-                    <section className="memory-detail-section">
-                      <h4>
-                        <Eye size={14} aria-hidden="true" />
-                        {t('materials.visualEvidence')}
-                      </h4>
-                      {text(selectedShot.visual_evidence) ? (
-                        <p>{text(selectedShot.visual_evidence)}</p>
-                      ) : null}
-                      {sampledFrames.length ? (
-                        <div>
-                          <small>{t('materials.sampledFrames')}</small>
-                          <DetailChips items={sampledFrames.map(clock)} />
-                        </div>
+                      {text(selectedShot.composition) ? (
+                        <p>{text(selectedShot.composition)}</p>
                       ) : null}
                     </section>
-                  ) : null}
-                  {text(selectedShot.visual_annotation_status) ===
-                  'provider_rejected' ? (
-                    <p className="field-error">
-                      {text(selectedShot.visual_annotation_failure) ||
-                        t('materials.providerRejected')}
-                    </p>
-                  ) : null}
-                </>
-              ) : null}
+                    {Object.keys(scene).length ? (
+                      <section className="memory-detail-section">
+                        <h4>
+                          <MapPin size={14} aria-hidden="true" />
+                          {t('materials.scene')}
+                        </h4>
+                        <DetailChips
+                          items={values(
+                            text(scene.interior_exterior),
+                            text(scene.location),
+                            text(scene.time_of_day),
+                            text(scene.weather),
+                            text(scene.atmosphere),
+                            scene.environment_lighting,
+                            scene.color_palette,
+                            text(scene.color_tone),
+                            scene.set_details,
+                          )}
+                        />
+                      </section>
+                    ) : null}
+                    {text(selectedShot.visual_evidence) || sampledFrames.length ? (
+                      <section className="memory-detail-section">
+                        <h4>
+                          <Eye size={14} aria-hidden="true" />
+                          {t('materials.visualEvidence')}
+                        </h4>
+                        {text(selectedShot.visual_evidence) ? (
+                          <p>{text(selectedShot.visual_evidence)}</p>
+                        ) : null}
+                        {sampledFrames.length ? (
+                          <div>
+                            <small>{t('materials.sampledFrames')}</small>
+                            <DetailChips items={sampledFrames.map(clock)} />
+                          </div>
+                        ) : null}
+                      </section>
+                    ) : null}
+                    {text(selectedShot.visual_annotation_status) ===
+                    'provider_rejected' ? (
+                      <p className="field-error">
+                        {text(selectedShot.visual_annotation_failure) ||
+                          t('materials.providerRejected')}
+                      </p>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        </section>
       </section>
-      <div className="timeline-explorer__track" aria-label={t('materials.timeline')}>
-        <div className="source-track">
-          {segments.map((segment) => {
-            const range = timeRange(segment.time_range)
-            return (
+      <div
+        className="timeline-explorer__track"
+        role="region"
+        aria-label={t('materials.timeline')}
+      >
+        <div
+          className={
+            sourceDuration > 3600
+              ? 'source-track__canvas source-track__canvas--scrollable'
+              : 'source-track__canvas'
+          }
+          style={{ width: `${trackWidthPercent}%` }}
+        >
+          <div className="source-track">
+            {trackSegments.map(({ segment, left, width }) => (
               <button
                 key={text(segment.segment_id)}
                 type="button"
@@ -479,19 +581,33 @@ export function TimelineMemoryView({
                     : 'source-track__segment'
                 }
                 style={{
-                  left: `${(range.start / sourceDuration) * 100}%`,
-                  width: `${Math.max(0.2, ((range.end - range.start) / sourceDuration) * 100)}%`,
+                  left: `${left}%`,
+                  width: `${width}%`,
                 }}
+                aria-pressed={text(segment.segment_id) === text(selected?.segment_id)}
+                tabIndex={-1}
                 onClick={() => selectSegment(segment)}
                 aria-label={text(segment.segment_id)}
               />
-            )
-          })}
-        </div>
-        <div className="source-track__legend">
-          <span>00:00</span>
-          <span>{text(source.title)}</span>
-          <span>{clock(sourceDuration)}</span>
+            ))}
+          </div>
+          <div className="source-track__legend">
+            {trackTicks.map((tick, index) => (
+              <time
+                key={tick}
+                className={
+                  index === 0
+                    ? 'source-track__tick source-track__tick--start'
+                    : index === trackTicks.length - 1
+                      ? 'source-track__tick source-track__tick--end'
+                      : 'source-track__tick'
+                }
+                style={{ left: `${(tick / sourceDuration) * 100}%` }}
+              >
+                {timelineClock(tick)}
+              </time>
+            ))}
+          </div>
         </div>
       </div>
     </div>

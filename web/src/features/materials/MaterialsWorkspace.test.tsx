@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -235,6 +235,79 @@ describe('Material Memory deep links', () => {
     )
   })
 
+  it('adds the real Material name to the Memory header without a duplicate detail request', async () => {
+    const requests: string[] = []
+    let resolveDetail: ((response: Response) => void) | undefined
+    const detailResponse = new Promise<Response>((resolve) => {
+      resolveDetail = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input)
+        requests.push(url)
+        if (url.includes('/memory/story')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: material.material_id,
+              material_type: 'video',
+              tab: 'story',
+              payload: {
+                title: 'Do not use this analysis title',
+                chronological_story_beats: [],
+                character_arcs: [],
+                themes: [],
+              },
+            }),
+          )
+        }
+        if (url === '/api/materials/mat_video') return detailResponse
+        if (url.startsWith('/api/materials?')) {
+          return Promise.resolve(jsonResponse({ items: [material], total: 1 }))
+        }
+        return Promise.resolve(new Response(null, { status: 404 }))
+      }),
+    )
+
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/materials/:type/:materialId/memory/:tab',
+          element: <MaterialsWorkspace />,
+        },
+      ],
+      { initialEntries: ['/materials/video/mat_video/memory/story'] },
+    )
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Material Memory Explorer',
+    })
+    expect(
+      within(dialog).getByRole('heading', { name: 'Material Memory Explorer' }),
+    ).toBeVisible()
+    expect(within(dialog).queryByText(/\.\.\.|…/)).not.toBeInTheDocument()
+
+    resolveDetail?.(jsonResponse(material))
+
+    const fullTitle = await within(dialog).findByRole('heading', {
+      name: 'Material Memory Explorer · La La Land',
+    })
+    expect(fullTitle).toBeVisible()
+    expect(dialog).toHaveAccessibleName('Material Memory Explorer · La La Land')
+    expect(fullTitle.querySelector('.memory-modal__title-name')).toHaveTextContent(
+      'La La Land',
+    )
+    expect(requests.filter((url) => url === '/api/materials/mat_video')).toHaveLength(1)
+  })
+
   it('closes Memory before its Drawer without reopening either on Back', async () => {
     vi.stubGlobal(
       'fetch',
@@ -364,6 +437,101 @@ describe('Material Memory deep links', () => {
       expect(router.state.location.pathname).toBe(
         '/materials/video/mat_video/memory/timeline',
       ),
+    )
+  })
+
+  it('preserves list filters while Shot selection and Segment return update the URL and player', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/memory/timeline')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: material.material_id,
+              material_type: 'video',
+              tab: 'timeline',
+              payload: {
+                source: { duration_sec: 120, title: 'Source' },
+                segments: {
+                  items: [
+                    {
+                      segment_id: 'segment_0010',
+                      time_range: { start_sec: 10, end_sec: 20 },
+                      segment_summary: 'The selected Segment.',
+                      shots: [
+                        {
+                          shot_id: 'shot_00002',
+                          time_range: { start_sec: 15.5, end_sec: 18 },
+                          visual_description: 'The selected Shot.',
+                        },
+                      ],
+                    },
+                  ],
+                  total: 1,
+                },
+              },
+            }),
+          )
+        }
+        if (url === '/api/materials/mat_video') {
+          return Promise.resolve(jsonResponse(material))
+        }
+        if (url.startsWith('/api/materials?')) {
+          return Promise.resolve(jsonResponse({ items: [material], total: 1 }))
+        }
+        return Promise.resolve(new Response(null, { status: 404 }))
+      }),
+    )
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/materials/:type/:materialId/memory/:tab',
+          element: <MaterialsWorkspace />,
+        },
+      ],
+      {
+        initialEntries: [
+          '/materials/video/mat_video/memory/timeline?search=La&sort=name_desc&segment=segment_0010',
+        ],
+      },
+    )
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+    const shotButton = await screen.findByRole('button', { name: /shot_00002/ })
+
+    fireEvent.click(shotButton)
+    await waitFor(() =>
+      expect(router.state.location).toMatchObject({
+        pathname: '/materials/video/mat_video/memory/timeline',
+        search: '?search=La&sort=name_desc&segment=segment_0010&shot=shot_00002',
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        container.querySelector<HTMLVideoElement>('.timeline-explorer__media video')
+          ?.currentTime,
+      ).toBe(15.5),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Segment' }))
+    await waitFor(() =>
+      expect(router.state.location).toMatchObject({
+        pathname: '/materials/video/mat_video/memory/timeline',
+        search: '?search=La&sort=name_desc&segment=segment_0010',
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        container.querySelector<HTMLVideoElement>('.timeline-explorer__media video')
+          ?.currentTime,
+      ).toBe(10),
     )
   })
 

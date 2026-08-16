@@ -780,6 +780,11 @@ function MemoryExplorer({
   const modalRef = useRef<HTMLElement>(null)
   const tabs = type === 'video' ? videoTabs : musicTabs
   const activeTab = tabs.includes(tab as never) ? tab : tabs[0]
+  const detail = useQuery({
+    queryKey: ['material', materialId],
+    queryFn: () => api.materials.detail(materialId),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
   const memory = useInfiniteQuery({
     queryKey: ['material-memory', materialId, activeTab, MEMORY_PAGE_SIZE],
     initialPageParam: 0,
@@ -802,6 +807,11 @@ function MemoryExplorer({
   const selection = new URLSearchParams(location.search)
   const selectedSegmentId = selection.get('segment') ?? ''
   const selectedShotId = selection.get('shot') ?? ''
+  const memoryTitle = t('materials.memoryExplorer')
+  const materialName = detail.data?.name
+  const fullMemoryTitle = materialName
+    ? `${memoryTitle} · ${materialName}`
+    : memoryTitle
   const parent = `${appRoutes.material(type, materialId)}${baseSearch}`
   const close = useCallback(() => {
     const state = location.state as { overlayParent?: string } | null
@@ -899,13 +909,27 @@ function MemoryExplorer({
         className="memory-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={t('materials.memoryExplorer')}
+        aria-labelledby="memory-modal-title"
         tabIndex={-1}
       >
         <header className="memory-modal__header">
           <div>
             <span className="eyebrow">MASTER · M</span>
-            <h2>{t('materials.memoryExplorer')}</h2>
+            <h2
+              id="memory-modal-title"
+              className="memory-modal__title"
+              aria-label={fullMemoryTitle}
+            >
+              <span>{memoryTitle}</span>
+              {materialName ? (
+                <>
+                  <span className="memory-modal__title-separator" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="memory-modal__title-name">{materialName}</span>
+                </>
+              ) : null}
+            </h2>
           </div>
           <button
             className="icon-button"

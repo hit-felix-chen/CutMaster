@@ -251,18 +251,32 @@ near-full-screen modal over the Material Library rather than navigating to a
 separate page. Closing the modal restores the same selected card, scroll
 position, and open summary drawer. Browser Back closes the modal before closing
 the drawer. Its four tab names are nested URL segments, so refresh restores the
-same tab without relying on temporary browser state.
+same tab without relying on temporary browser state. The modal header is always
+**Material Memory Explorer · `Material.name`**: the name comes from the
+canonical Material detail projection, not an analyser-authored source title,
+and the Timeline does not repeat a filename or analysis title.
 
 The read-only modal has four tabs:
 
-1. **Timeline** (default) — a Segment/Shot Inspector on the left, source video
-   player on the right, and a full-source timeline along the bottom. Segment
-   selection seeks the player and exposes its summary, narrative function,
-   emotion, appearing characters, dialogue, and child Shots. Shot selection
-   exposes visual description, action, scene, character appearances, camera
-   grammar, composition, visual evidence, and stored or on-demand sampled
-   frames. A provider-rejected visual annotation is shown as unavailable for
-   that Shot; it does not mark the whole Material as Failed.
+1. **Timeline** (default) — an outer two-component browser with all Segments in
+   a vertically scrolling left panel and one compound detail component on the
+   right. Inside that detail component, the selected Segment's Shots occupy a
+   vertically scrolling left column, while the source video and current
+   Segment/Shot description share the larger right column. Segment selection
+   seeks the Segment start and exposes its summary, narrative function,
+   emotion, appearing characters, and dialogue. Shot selection seeks that
+   Shot's own start and exposes its visual description, action, scene,
+   character appearances, camera grammar, composition, visual evidence, and
+   stored or on-demand sampled frames; a
+   visible **Back to Segment** action restores the Segment-level detail and
+   start position. Long detail text scrolls independently and cannot resize or
+   crop the player. A full-source timeline spans the bottom: sources up to one
+   hour fill the available width, while longer sources use one hour per viewport
+   width and scroll horizontally. It shows source start, source end, and
+   ten-minute ticks, keeps Segment intervals non-overlapping, and contains no
+   filename or analyser-authored title. A provider-rejected visual annotation
+   is shown as unavailable for that Shot; it does not mark the whole Material
+   as Failed.
 2. **Story** — title, logline, synopsis, chronological Story Beats, Character
    Arcs, themes, and ending. Beat and arc evidence links select the cited
    Segments in Timeline.
