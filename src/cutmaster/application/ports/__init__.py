@@ -1,7 +1,8 @@
-"""Internal inward protocols implemented by infrastructure adapters.
+"""Inward Application protocols implemented by outer adapters."""
 
-Import a protocol from its leaf module. The port set is intentionally not a
-public aggregate while concrete use cases are still being extracted.
-"""
+from cutmaster.application.ports.job_dispatcher import (
+    JobDispatcher,
+    LifecycleJobSupervisor,
+)
 
-__all__: list[str] = []
+__all__ = ["JobDispatcher", "LifecycleJobSupervisor"]

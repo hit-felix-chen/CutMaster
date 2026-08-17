@@ -77,7 +77,6 @@ class StorageCategoryView:
 class StorageReportView:
     data_root: Path
     categories: tuple[StorageCategoryView, ...]
-    direct_bundle_count: int
     total_size_bytes: int
     reveal_supported: bool
 

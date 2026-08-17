@@ -112,6 +112,8 @@
     "frozenEdits": "Frozen Edits",
     "asterWorking": "ASTER is planning the edit",
     "asterWorkingBody": "This page refreshes automatically and shows the initial Frozen Edit when planning completes.",
+    "runningDuration": "Elapsed time",
+    "runDuration": "Run time",
     "retryRun": "Retry",
     "resumeRun": "Resume",
     "runAgain": "Run again",
@@ -309,6 +311,7 @@
     "fullAnalysis": "View full analysis",
     "sourceMetadata": "Source metadata",
     "analysisAttempts": "Analysis attempts",
+    "apiCost": "API cost",
     "analysisStates": {
       "preparing": "Preparing the analysis workspace",
       "analysing": "Material Analyst is analysing the source",
@@ -534,7 +537,6 @@
     "dataRoot": "Application Data Root",
     "openInFinder": "Open in Finder",
     "openedInFinder": "Application Data Root opened in Finder.",
-    "directBundles": "Direct Workflow Bundles",
     "restart": "Restart CutMaster after saving to apply new settings.",
     "readOnly": "The effective configuration is shown here.",
     "localApplication": "Local application",
@@ -626,7 +628,6 @@
       "database": "Database",
       "materials": "Materials",
       "projects": "Projects",
-      "direct": "Direct bundles",
       "logs": "Logs"
     }
   },

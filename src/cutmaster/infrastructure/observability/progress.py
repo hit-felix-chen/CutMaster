@@ -17,12 +17,15 @@ def progress_bar(
     description: str,
     unit: str,
 ) -> tqdm[T]:
+    output = sys.stdout
+    interactive = bool(getattr(output, "isatty", lambda: False)())
     return tqdm(
         iterable,
         total=total,
         desc=description,
         unit=unit,
-        file=sys.stdout,
+        file=output,
+        disable=not interactive,
         mininterval=1.0,
         maxinterval=5.0,
         dynamic_ncols=True,

@@ -39,7 +39,5 @@ def client(application: CutMasterApplication) -> TestClient:
     # Route tests inject or exercise command dispatch explicitly.  The real
     # lifecycle supervisor has focused integration coverage of its own and
     # must not race these deterministic fixture transitions.
-    with TestClient(
-        create_app(application=application, enable_job_supervisor=False)
-    ) as value:
+    with TestClient(create_app(application=application)) as value:
         yield value

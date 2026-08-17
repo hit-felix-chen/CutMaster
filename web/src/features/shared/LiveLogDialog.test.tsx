@@ -131,4 +131,27 @@ describe('Attempt live logs', () => {
     expect(source.closed).toBe(true)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
+
+  it('closes from the empty backdrop and disconnects the live stream', async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <ExecutionLogAccess execution={execution} />
+      </QueryClientProvider>,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'View live logs' }))
+    await screen.findByRole('dialog')
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const source = FakeEventSource.instances[0]
+    const layer = screen.getByRole('dialog').parentElement
+    expect(layer).not.toBeNull()
+
+    await userEvent.click(layer!)
+
+    expect(source.closed).toBe(true)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
 })

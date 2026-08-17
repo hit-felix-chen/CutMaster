@@ -1,18 +1,48 @@
 # CutMaster architecture
 
 The current backend has three independently callable, handle-only Workflow
-stages behind a framework-independent Application Layer. CLI and
-Mashup-Benchmark create Web-visible managed history and synchronously drive the
-same durable local Job executors used by Web. `CutMasterApplication.direct`
-remains a synchronous stage collaborator, not the authoritative storage path
-for complete CLI or Benchmark executions.
+stages behind a framework-independent Application Layer. CLI, the FastAPI Web
+adapter, the Worker process adapter, and Mashup-Benchmark are peer inbound
+adapters. They call `CutMasterApplication.workflows` or another grouped
+Application service; no adapter calls another adapter. Complete synchronous
+execution is coordinated by `ManagedWorkflowCoordinator`, while durable work is
+performed by Application-owned Material, Run, Render, and Job executors.
+
+```mermaid
+flowchart TB
+    CLI["CLI Adapter"] --> APP["CutMasterApplication"]
+    WEB["FastAPI Web Adapter"] --> APP
+    BENCH["Mashup-Benchmark Adapter"] --> APP
+    WORKER["Worker Process Adapter"] --> APP
+
+    APP --> COORD["ManagedWorkflowCoordinator"]
+    APP --> SERVICES["Materials / Projects / Runs / Renders / Jobs / Settings"]
+    COORD --> JOBS["ManagedJobExecutor"]
+    JOBS --> MATERIAL["ManagedMaterialAnalysisExecutor"]
+    JOBS --> RUN["RunPlanningExecutor"]
+    JOBS --> RENDER["ManagedRenderExecutor"]
+
+    MATERIAL --> M["M - Material Analyst"]
+    RUN --> ASTER["ASTER Team"]
+    RENDER --> RR["Renderer"]
+
+    SERVICES --> DOMAIN["Domain Core"]
+    MATERIAL --> PORTS["Application / Workflow Ports"]
+    RUN --> PORTS
+    RENDER --> PORTS
+    PORTS --> INFRA["SQLite / Local Storage / Models / Media / Observability"]
+```
+
+The adapters translate protocols only. The Application owns lifecycle and
+orchestration, Workflow owns editing intelligence, Domain owns product state,
+and Infrastructure implements inward-facing ports.
 
 ## Implemented backend layout
 
 ```text
 cutmaster/
 ├── application/                    # composition and real use cases
-│   ├── direct/
+│   ├── workflow/                       # managed contracts and coordinator
 │   ├── materials/
 │   ├── projects/
 │   ├── runs/
@@ -29,31 +59,38 @@ cutmaster/
 │   ├── ports/
 │   ├── prompting/
 │   └── shared/
+├── bootstrap/                         # outermost peer-adapter composition
+│   ├── __init__.py
+│   └── local_web.py                   # wires FastAPI + local Worker supervisor
+│
 ├── adapters/
-│   └── cli/
+│   ├── cli/
+│   ├── web/
+│   └── worker/                         # one durable Job per process
 ├── infrastructure/
 │   ├── persistence/sqlite/            # managed state and events
 │   ├── storage/local/                 # Material Catalog
 │   ├── media/
 │   ├── models/
 │   └── observability/
-├── configuration/                  # Effective Configuration
-└── contracts/                      # stable direct API
+└── configuration/                  # Effective Configuration
 ```
 
 The root package still re-exports `Analyser`, `Planners`, and `Renderer`, but
 their implementations live only under `workflow/`. `__main__.py` and the
-installed `cutmaster` script both delegate to `adapters.cli.main`. The earlier
-root workflow facade, root CLI module, raw-path stage contracts, and generic
-`runtime/` package are absent.
+installed `cutmaster` script both delegate to `adapters.cli.main`. Managed
+commands and receipts live in `application.workflow`; the earlier root workflow
+facade, root CLI module, raw-path stage contracts, caller-owned output API, and
+generic `runtime/` package are absent.
 
 ## Repository layout and Web expansion
 
-**Status:** the Python backend, FastAPI adapter, React/Vite client, SPA packaging,
-Project Setup, managed local Job Supervisor, durable SSE, guarded Data Root
-Migration, Frozen Edit Review, and atomic Guided Revision are implemented. Some
-leaf files in the fuller map below remain a design map; consolidated modules
-need not be split merely to match every proposed filename.
+**Status:** the Python backend, peer CLI/Web/Worker adapters, React/Vite client,
+SPA packaging, Application-owned managed execution, local Job Supervisor,
+durable SSE, guarded Data Root Migration, Frozen Edit Review, and atomic Guided
+Revision are implemented. Some leaf files in the fuller map below remain a
+design map; consolidated modules need not be split merely to match every
+proposed filename.
 
 CutMaster remains a standard Python `src`-layout repository. The backend is not
 wrapped in another `backend/` directory, and the React client lives in the
@@ -147,17 +184,19 @@ src/cutmaster/
 │   ├── __init__.py
 │   ├── cutmaster.py                    # CutMasterApplication composition root
 │   ├── errors.py
-│   ├── direct/
+│   ├── workflow/
 │   │   ├── __init__.py
-│   │   ├── commands.py
-│   │   ├── results.py
-│   │   ├── artifacts.py
-│   │   ├── output_targets.py
-│   │   └── service.py
+│   │   ├── contracts.py              # public managed commands and receipts
+│   │   ├── coordinator.py            # complete managed lifecycle
+│   │   ├── job_execution.py          # unified durable Job executor facade
+│   │   ├── material_job.py           # Material Analysis Job state machine
+│   │   ├── run_job.py                # ASTER Run Job state machine
+│   │   └── render_job.py             # Renderer Job state machine
 │   ├── materials/
 │   │   ├── __init__.py
 │   │   ├── commands.py
 │   │   ├── queries.py
+│   │   ├── execution.py             # Material Analysis executor
 │   │   ├── views.py
 │   │   └── service.py
 │   ├── projects/
@@ -289,13 +328,17 @@ src/cutmaster/
 │   │   ├── __init__.py
 │   │   ├── main.py
 │   │   ├── parser.py
-│   │   ├── direct_commands.py
+│   │   ├── commands.py
 │   │   ├── serve_command.py
 │   │   └── presenter.py
+│   ├── worker/                          # peer process adapter
+│   │   ├── __init__.py
+│   │   ├── main.py                 # executes exactly one durable Job
+│   │   ├── supervisor.py
+│   │   └── lease.py
 │   └── web/                             # FastAPI adapter
 │       ├── __init__.py
 │       ├── app.py
-│       ├── server.py
 │       ├── dependencies.py
 │       ├── problem_details.py
 │       ├── sse.py
@@ -386,30 +429,25 @@ src/cutmaster/
 │       ├── progress.py
 │       └── workflow_events.py
 │
-├── configuration/
-│   ├── __init__.py
-│   ├── schema.py
-│   ├── loader.py
-│   ├── environment.py
-│   ├── data_root.py
-│   └── snapshots.py
-│
-└── contracts/                          # stable managed and Direct contracts
+└── configuration/
     ├── __init__.py
-    ├── managed_workflow.py
-    └── workflow.py
+    ├── schema.py
+    ├── loader.py
+    ├── environment.py
+    ├── data_root.py
+    └── snapshots.py
 ```
 
 Agent classes remain directly visible in their owning stage package; only
 deterministic helpers belong in that stage's `tools/` directory. Root-level
 public re-exports keep `from cutmaster import Analyser, Planners, Renderer`
-available even though their implementation lives under `workflow/`. CLI and
-Mashup-Benchmark now use shared local managed orchestration, so the former root
-`cli.py`, complete-workflow facade, `WorkflowRequest`, and raw-path stage DTOs
-remain removed. `contracts/managed_workflow.py` owns their receipt contract;
-`contracts/workflow.py` retains the explicit Direct API. The three root stage-class exports remain supported,
-while their v2 request contracts are handle-only and intentionally do not
-preserve the former raw-path DTO signatures.
+available even though their implementation lives under `workflow/`. CLI,
+Worker, and Mashup-Benchmark call the managed contract in
+`cutmaster.application.workflow`; the former root `cli.py`, complete-workflow
+facade, caller-owned output contract, and raw-path stage DTOs are removed. The
+three root stage-class exports remain supported, while their v2 request
+contracts are handle-only and intentionally do not preserve the former raw-path
+DTO signatures.
 
 ### React client
 
@@ -612,7 +650,7 @@ from a Git checkout runs the pinned npm build first.
 
 Because `cutmaster serve` is part of the official first-release CLI, FastAPI and
 Uvicorn are normal runtime dependencies rather than an optional extra. Their
-imports remain inside the Web adapter so direct component commands do not
+imports remain inside the Web adapter so non-Web Application commands do not
 initialize the server stack.
 
 ### Complete test layout
@@ -621,7 +659,7 @@ initialize the server stack.
 tests/
 ├── domain/
 ├── application/
-│   ├── direct/
+│   ├── workflow/
 │   ├── materials/
 │   ├── projects/
 │   ├── runs/
@@ -634,15 +672,14 @@ tests/
 │   └── renderer/
 ├── adapters/
 │   ├── cli/
-│   └── web/
+│   ├── web/
+│   └── worker/
 ├── infrastructure/
 │   ├── persistence/
 │   ├── storage/
 │   └── jobs/
 ├── contracts/
-│   ├── test_direct_api.py
-│   ├── test_cli_compatibility.py
-│   ├── test_benchmark_compatibility.py
+│   ├── test_managed_workflow_api.py
 │   ├── test_artifact_manifest.py
 │   ├── test_artifact_manifest_paths.py
 │   ├── test_v1_plan_boundary.py
@@ -655,9 +692,9 @@ tests/
     └── test_local_application.py
 ```
 
-Python tests mirror ownership rather than introducing a second `unit/` hierarchy.
-Benchmark's own adapter integration tests remain in Mashup-Benchmark; CutMaster
-tests only its public direct API and compatibility contracts.
+Python tests mirror ownership rather than introducing a second `unit/`
+hierarchy. Benchmark's adapter integration tests remain in Mashup-Benchmark;
+CutMaster tests the public managed Application contract and its stage contracts.
 
 ### Local and generated paths
 
@@ -684,27 +721,26 @@ scanned, imported, deleted, or copied by the new application.
 
 ### Implementation sequence
 
-The backend migration completed these boundaries on 2026-08-12:
+The backend migration established these boundaries:
 
 1. `domain/`, Application and Workflow contracts, secret-free Effective
-   Configuration, and the lazy seven-service `CutMasterApplication`.
+   Configuration, and the grouped `CutMasterApplication`.
 2. Material ownership in `app.materials` backed by the local ID-owned Material
    Catalog, including fingerprints, consistency checks, deletion guards, and
    leases.
-3. Real synchronous component and complete-workflow operations in `app.direct`,
-   including managed Direct Workflow Bundles and atomic Artifact Manifest
-   publication.
-4. Peer CLI and Mashup-Benchmark adapters initially calling `app.direct`; the installed
-   console entry point is `cutmaster.adapters.cli.main:main`, and
-   `cutmaster.__main__` delegates to it.
+3. Application-owned Material, Run, and Render executors plus the durable Job
+   executor used by every execution mode.
+4. Peer CLI, Web, Worker, and Mashup-Benchmark adapters calling grouped
+   Application services. The installed console entry point is
+   `cutmaster.adapters.cli.main:main`, and `cutmaster.__main__` delegates to it.
 5. Analyser, Planners, Renderer, prompting, contracts, and shared helpers under
    `workflow/`, with handle-only v2 stage requests and a portable RenderPlan v2.
 6. SQLite-backed Projects, Material References, Runs, Frozen Edits, Render
    Variants, Attempts, jobs, durable events, command receipts, and settings.
 
-On 2026-08-16, CLI and Mashup-Benchmark complete execution moved onto those
-managed records and Job executors. Custom CLI output directories were removed;
-Benchmark now exports validated copies after the managed Render completes.
+`ManagedWorkflowCoordinator` owns complete synchronous execution through those
+managed records and Job executors. Custom CLI output directories are absent;
+Benchmark exports validated copies only after the managed Render completes.
 
 The managed local execution slice now extends the original ASTER subprocess
 path to Material Analysis and Renderer. It includes shared FIFO/capacity
@@ -723,7 +759,7 @@ The generic `runtime/` package was split according to dependency ownership:
 
 | Previous module | Implemented location |
 |---|---|
-| `runtime/artifact_layout.py` | `application/direct/artifacts.py` |
+| `runtime/artifact_layout.py` | removed; managed entities own artifact references |
 | `runtime/model_gateway.py`, `runtime/json_codec.py` | `infrastructure/models/` |
 | `runtime/observability.py` | `infrastructure/observability/` |
 | `runtime/progress.py` | `infrastructure/observability/progress.py` |
@@ -750,12 +786,13 @@ leases through the `MaterialCatalog` port; and
 `infrastructure/storage/local/material_catalog.py` implements the manifest,
 managed copies, fingerprints, directories, and cross-process locks.
 
-The existing `analyser/tools/material_library.py` moves to that local
-infrastructure implementation. `workflow/analyser` retains Material Analyst
-intelligence and Material Memory construction/reuse, but no longer allocates
-names, resolves catalog entries, copies source files, or deletes Materials.
-Direct CLI use cases first resolve or ensure a Material through
-`app.materials`, then invoke `app.direct.analyse` with that exact identity.
+The former `analyser/tools/material_library.py` responsibility belongs to that
+local infrastructure implementation. `workflow/analyser` retains Material
+Analyst intelligence and Material Memory construction/reuse, but does not
+allocate names, resolve catalog entries, copy source files, or delete Materials.
+`ManagedMaterialAnalysisExecutor` resolves or ensures a Material through
+`app.materials`, then constructs the Analyser request from its exact identity
+and leased runtime handle.
 
 At the Workflow boundary, Analyser accepts a `MaterialRuntimeHandle` defined in
 `workflow/contracts/material.py`. It contains the immutable Material ID, type,
@@ -783,11 +820,11 @@ selector. The Application holds shared consumption leases for both Materials
 for the whole planning operation and translates CLI or managed inputs into this
 contract.
 
-`PlannersBrief` carries Editing Intent and Target Duration. CLI/Benchmark-only
-compatibility controls such as target shot length, prompt type, and maximum clip
-duration remain in `PlannersOptions`; they are not added to the frontend
-Creative Brief. Planners revalidates that every Memory belongs to the supplied
-Material ID and fingerprint before ASTER begins.
+`PlannersBrief` carries Editing Intent and Target Duration. Advanced controls
+such as target shot length, prompt type, and maximum clip duration remain in
+`PlannersOptions`; they are not added to the frontend Creative Brief. Planners
+revalidates that every Memory belongs to the supplied Material ID and
+fingerprint before ASTER begins.
 
 ## Stage contracts
 
@@ -819,12 +856,10 @@ supplies a separate `RenderRuntimeBindings` object containing the two
 
 Renderer receives the immutable RenderPlan, runtime bindings, a structured
 output target, and RenderOptions. It validates plan/binding IDs, fingerprints,
-FPS, and the complete frame timeline before touching media. The CLI retains the
-`render --plan` command and option spelling; the Application loads a supported
-plan, resolves its Materials, and constructs the Renderer request. The portable
-schema is v2. Refactored rendering supports v2 plans only and reports an
-unsupported-plan-version error for v1 input; existing v1 plans and output
-directories are left byte-for-byte unchanged and are never migrated.
+FPS, and the complete frame timeline before touching media. The CLI `render`
+command accepts a managed Frozen Edit ID; `ManagedRenderExecutor` loads its supported
+plan, resolves the Materials, and constructs the Renderer request. The portable
+schema is v2, and no earlier plan schema is accepted.
 
 ASTER agents produce editorial decisions; they do not create product records.
 The deterministic Plan Compiler at the end of Planners turns those accepted
@@ -854,8 +889,9 @@ deterministically compiles one child RenderPlan, and atomically commits one
 derived Frozen Edit linked to its source. Any failure leaves the source and
 history unchanged. Renderer Variant creation remains a separate managed
 lifecycle after that commit; the Web flow automatically requests the default
-Dialogue Preview and also permits explicit BGM-only Variants. Direct CLI and
-Benchmark workflows use RenderPlan without creating Frozen Edit product history.
+Dialogue Preview and also permits explicit BGM-only Variants. CLI and Benchmark
+use the same managed Run and Render lifecycle and therefore create Frozen Edit
+product history before rendering.
 
 ## Implemented ownership
 
@@ -867,8 +903,13 @@ Benchmark workflows use RenderPlan without creating Frozen Edit product history.
   Material Catalog; narrower ports remain available where adapter substitution
   is already required.
 - `application/cutmaster.py` is the public composition root. It lazily groups
-  `direct`, `materials`, `projects`, `runs`, `renders`, `jobs`, and `settings`
-  services without implementing those use cases itself.
+  `workflows`, `materials`, `projects`, `runs`, `renders`, `jobs`, and
+  `settings` without implementing those use cases itself.
+- `application/workflow/` owns the public managed command/result contract,
+  complete-workflow coordination, and durable Job execution dispatch.
+- `application/materials/execution.py`, `application/runs/execution.py`, and
+  `application/renders/execution.py` translate managed identities and immutable
+  snapshots into handle-only stage requests.
 - `workflow/analyser/` builds or reuses Video Material Memory and complete-track
   Music Memory from an already resolved Material handle. It does not allocate
   Material identities, copy library sources, or mutate the Material Catalog.
@@ -890,19 +931,20 @@ Benchmark workflows use RenderPlan without creating Frozen Edit product history.
   current model execution context; concrete model, media, logging, and progress
   helpers remain in `infrastructure/` pending broader port injection.
 - `infrastructure/` implements SQLite persistence, local Material storage,
-  model access, FFprobe helpers, and observability. The Web adapter owns the
-  implemented local supervisor and isolated Analyser, Planners, Renderer, and
-  Data Root Migration workers.
+  model access, FFprobe helpers, subprocess primitives, and observability.
 - `adapters/cli/` translates transport input and output and calls only the
   Application Layer. `adapters/web/` is the implemented FastAPI peer adapter
-  and owns the managed local-job and durable SSE transports.
+  and owns HTTP and durable SSE transport. `adapters/worker/` is the peer
+  process adapter; it owns local supervision, adopts one durable Job lease per
+  child process, and delegates execution to the Application's
+  `ManagedJobExecutor`.
 - `configuration/` loads and validates the selected TOML file, environment,
   Data Root resolution, and non-secret snapshot configuration for the
   composition root. The Application and local storage adapters implement the
   guarded Data Root Migration control plane.
-- `contracts/workflow.py` and root stage-class re-exports remain public. The mixed-purpose
-  `runtime/` package has no target equivalent and must not be recreated under
-  another generic name.
+- `application/workflow` and root stage-class re-exports remain public. The
+  mixed-purpose `runtime/` package has no target equivalent and must not be
+  recreated under another generic name.
 
 ## Material identity and reuse
 
@@ -912,9 +954,9 @@ stem. Names are unique within each Material type.
 
 - A strict import rejects an occupied name; it never appends a numeric suffix,
   overwrites, or replaces the existing Material.
-- The Application Material service and direct use case expose an idempotent
-  ensure operation: they reuse the existing Material only when type, exact name,
-  and bound SHA-256 all match. The same name with different bytes is a collision.
+- The Application Material service exposes an idempotent ensure operation: it
+  reuses the existing Material only when type, exact name, and bound SHA-256 all
+  match. The same name with different bytes is a collision.
 - Adding the same bytes under a different explicit candidate name creates a
   distinct Material with its own public identity.
 - SHA-256 is an internal consistency check. It is not part of the Material
@@ -949,21 +991,34 @@ supported and idempotently ensures the corresponding Materials.
 ## Dependency direction
 
 The implemented product architecture uses a framework-independent Application
-Layer. CLI, Mashup-Benchmark, and FastAPI Web are peer inbound adapters. None
-calls another adapter. The Application Layer owns product workflows and input
-resolution, while the stage services remain
-independently callable public core APIs for callers that already hold valid
-Application-created runtime handles. Raw files and Material Names enter through
-`app.direct` or `app.materials`, not through those stage contracts.
+Layer. CLI, Mashup-Benchmark, FastAPI Web, and the Worker process are peer
+inbound adapters. None calls another adapter. The Application Layer owns
+product workflows, input resolution, managed artifact ownership, and execution
+translation. Stage services remain independently callable core APIs only for
+callers that already hold valid Application-created runtime handles. Raw files
+and Material Names enter through `app.workflows` or `app.materials`, not through
+stage contracts.
+
+```text
+CLI Adapter -----------> CutMasterApplication.workflows
+Benchmark Adapter -----> CutMasterApplication.workflows
+FastAPI Web Adapter ---> CutMasterApplication grouped use cases
+Worker Adapter --------> ManagedJobExecutor
+                                   |
+                                   +--> ManagedWorkflowCoordinator
+                                   +--> ManagedMaterialAnalysisExecutor
+                                   +--> RunPlanningExecutor
+                                   +--> ManagedRenderExecutor
+```
 
 `CutMasterApplication` is the single composition entry point used by CLI,
-Benchmark, and FastAPI Web. It wires
-configuration, persistence, storage, and use-case services, but contains no
-use-case implementation of its own. Its public surface is grouped rather than
-accumulated into one giant facade:
+Benchmark, FastAPI Web, and Worker. It wires configuration, persistence,
+storage, and use-case services, but contains no use-case implementation of its
+own. Its public surface is grouped rather than accumulated into one giant
+facade:
 
 ```python
-app.direct       # analyse, analyse_music, plan, render, execute_workflow
+app.workflows    # complete managed workflow coordination
 app.materials    # managed Material use cases
 app.projects     # Edit Project and Creative Brief use cases
 app.runs         # ASTER Run and Guided Revision use cases
@@ -974,10 +1029,9 @@ app.settings     # model connections, execution settings, storage, and Data Root
 
 `app.settings` owns Effective Configuration reads, canonical provider profiles,
 validated `config.toml` and sibling `.env` writes, bounded connection tests,
-storage reporting, and the supported host file-manager reveal action. Direct
-Bundle bulk cleanup is **Proposed**; guarded Data Root Migration is implemented.
-Browser-only Locale and Colour Mode preferences will not pass through this
-service or be persisted as Application state.
+storage reporting, and the supported host file-manager reveal action. Guarded
+Data Root Migration is implemented. Browser-only Locale and Colour Mode
+preferences do not pass through this service or persist as Application state.
 
 ### Guarded Data Root Migration
 
@@ -988,12 +1042,11 @@ rejects active Attempts, invalid/overlapping roots, ownership conflicts, and
 insufficient destination capacity before the user confirms the operation.
 
 The managed migration worker creates an online SQLite backup, copies only the
-canonical owned namespaces (including Direct Workflow Bundles), and verifies
-the manifest with size and SHA-256 checks plus SQLite integrity, foreign keys,
-schema, and queued-job count. While it runs, every business API read and write
-returns a typed maintenance 503; only health, migration status/control, and SPA
-resources remain available. Cancellation is accepted only before the atomic
-pointer switch.
+canonical owned namespaces, and verifies the manifest with size and SHA-256
+checks plus SQLite integrity, foreign keys, schema, and queued-job count. While
+it runs, every business API read and write returns a typed maintenance 503; only
+health, migration status/control, and SPA resources remain available.
+Cancellation is accepted only before the atomic pointer switch.
 
 After successful verification, the worker atomically updates the external
 root-location pointer and enters `restart_required`. The next backend start
@@ -1031,25 +1084,25 @@ this merge.
 
 Saving Settings atomically writes the selected TOML file and reports that an
 Application restart is required. A newly opened `CutMasterApplication` sees the
-new Effective Configuration; an existing instance and any synchronous Direct
-Workflow keep the immutable configuration loaded at process start. Managed
-ASTER Runs persist their non-secret configuration snapshot, while Render
-Variants persist their normalized Render Specification.
+new Effective Configuration; an existing instance keeps the immutable
+configuration loaded at process start. Managed ASTER Runs persist their
+non-secret configuration snapshot, while Render Variants persist their
+normalized Render Specification.
 
-Secrets are deliberately excluded from snapshots. Direct execution resolves
-the required environment references when constructing a runtime configuration.
-Each managed Analyser, Planners, or Renderer subprocess resolves secrets at its
-Execution Attempt start, allowing credential repair without changing the owning
-operation's non-secret snapshot.
+Secrets are deliberately excluded from snapshots. Each managed Analyser,
+Planners, or Renderer subprocess resolves the required environment references
+at its Execution Attempt start, allowing credential repair without changing the
+owning operation's non-secret snapshot.
 
-Inbound adapters translate only their transport-specific input and output.
-The implemented CLI and Benchmark adapters obtain services from
+Inbound adapters translate only their transport-specific input and output. CLI
+handles arguments, terminal presentation, and exit codes; FastAPI handles HTTP
+and SSE; Worker handles one durable Job process; Benchmark translates an
+evaluation task and exports required copies. All obtain services from
 `CutMasterApplication`; they do not construct Analyser, Planners, Renderer, or
-repositories themselves. Every adapter opens the same Application context with
+repositories. Every adapter opens the same Application context with
 `CutMasterApplication.open(config_path)`, which resolves one Application Data
-Root and one Material Catalog. Service groups are lazy: using `app.direct`
-does not initialize SQLite, the durable queue, or unrelated model providers,
-while managed groups open those resources only when accessed.
+Root and one Material Catalog. Service groups are lazy and open resources only
+when accessed.
 
 ### Web adapter protocol and managed execution
 
@@ -1060,9 +1113,10 @@ Review, Render Variants, and Outputs. Its semantic commands cover Material
 preflight/import/analysis/recovery/deletion, Project Setup, ASTER Run
 Start/Retry/Resume/Run again/deletion, Stop Attempt, atomic Save revision,
 Render Variant lifecycle, provider tests/settings, and Data Root Migration.
-Managed Analyser, Planners, and Renderer commands return durable submissions
-and dispatch real work to isolated subprocesses through the shared supervisor.
-The adapter has no generic
+Managed Analyser, Planners, and Renderer commands return durable submissions.
+The peer Worker adapter and its supervisor dispatch those submissions to
+isolated subprocesses; no Web module contains stage execution logic. The Web
+adapter has no generic
 `/commands` endpoint and does not expose database-shaped CRUD.
 Each route maps a transport DTO to one Application use case and maps its result
 or domain error back to HTTP; authorization-free local transport concerns never
@@ -1175,13 +1229,16 @@ Variant and Slot selection may be query state because they do not change the
 page hierarchy. No URL ever serializes an unsaved Revision Draft.
 
 ```text
-CLI adapter ------------------\
-Benchmark adapter -------------+-> CutMasterApplication
-FastAPI Web adapter -----------/
+CLI adapter -------------------\
+Benchmark adapter --------------+-> CutMasterApplication
+FastAPI Web adapter -------------+
+Worker process adapter ---------/
 
 app.materials -> MaterialCatalog port <- local storage implementation
-app.direct / app.runs / app.renders -> resolved runtime handles
-                                     -> Analyser / Planners / Renderer
+app.workflows -> ManagedWorkflowCoordinator -> durable managed lifecycle
+app.materials / app.runs / app.renders -> Application executors
+                                         -> resolved runtime handles
+                                         -> Analyser / Planners / Renderer
 
 Analyser -> Video Material Memory / Music Memory
 Planners -> ASTERTeam -> ASTER agents -> deterministic Planners tools
@@ -1249,163 +1306,70 @@ enter the durable job queue and Activity stream. Notification persistence,
 acknowledgement, episode deduplication, and automatic resolution are not yet
 implemented; they belong to the Web/managed-worker milestone.
 
-### Benchmark compatibility boundary
+### Managed adapter boundary
 
-Benchmark execution does not require an HTTP server, but it now intentionally
-uses SQLite product history and the durable local Job model. The following
-interfaces are contracts:
+CLI, Web, Worker, and Mashup-Benchmark are peer adapters with distinct transport
+responsibilities and one shared Application contract:
 
-- the synchronous `cutmaster analyse`, `analyse-music`, `plan`, `render`, and
-  `run` command names and JSON receipts;
-- `ExecuteManagedWorkflowCommand` and `ManagedWorkflowResult`, used by the
-  Mashup-Benchmark worker inside its per-task subprocess; and
-- the managed Project/Run/Render ownership layout plus versioned relative
-  artifact manifest.
+- CLI translates arguments, terminal progress, JSON presentation, and exit
+  codes;
+- FastAPI translates HTTP commands and queries and projects durable events over
+  SSE;
+- Worker adopts one supervised durable Job lease and calls
+  `ManagedJobExecutor`; and
+- Mashup-Benchmark translates one evaluation task, waits for the managed result,
+  and copies only the files required by the benchmark.
 
-CLI and Benchmark create Project, ASTER Run, Frozen Edit, Attempt, Job, and
-Render Variant records. The older Direct API remains available to explicit
-Python callers but is not their storage authority.
+CLI and Benchmark complete executions call `CutMasterApplication.workflows`;
+Web submits the same durable lifecycle through grouped Application services,
+and Worker executes each claimed Job through `ManagedJobExecutor`. No adapter
+invokes the CLI, imports another adapter's worker code, parses another adapter's
+output, or constructs Workflow stages itself.
 
 ### Complete-generation CLI contract
 
-`cutmaster run` remains the one-command interface for automated and manual
-evaluation. It synchronously drives the durable managed Analyser, Planners, and
-Renderer Jobs and returns only after the Render Variant master and managed
-receipt have been committed. It does not require FastAPI or an open browser.
+`cutmaster run` is the one-command interface for automated and manual execution.
+It calls `app.workflows.execute_and_wait(...)`, synchronously drives durable
+managed Analyser, Planners, and Renderer Jobs, and returns only after the Render
+Variant master and managed receipt have been committed. It does not require
+FastAPI or an open browser.
 
 The command accepts either raw video/music paths or exact existing Material
-Names, plus Project Name, editing intent, target duration, and advanced
-planning options. It does not accept an output directory or overwrite existing
-history. A successful command exits with code zero and prints a machine-readable
-`ManagedWorkflowResult`; failure exits non-zero.
-The separate `analyse`, `analyse-music`, `plan`, and `render` commands remain
-available for component-level evaluation and debugging.
+Names, plus Project Name, editing intent, target duration, and advanced planning
+options. It does not accept an output directory or overwrite existing history.
+A successful command exits with code zero and prints a machine-readable
+`ManagedWorkflowResult`; failure exits non-zero. The separate `analyse`,
+`analyse-music`, `plan`, and `render` commands remain available through grouped
+Application use cases for component-level operation and debugging.
 
-The implemented CLI surface contains those five synchronous commands plus
-`cutmaster serve`. The Web slice exposes Project, Material, Activity,
-Settings/Setup, the managed Material Analysis and ASTER Run lifecycles, Frozen
-Edit Review, atomic Guided Revision, Render Variants/Outputs, durable SSE, and
-Data Root Migration through the same Application boundary.
+### Managed artifact ownership
 
-The official Mashup-Benchmark adapter calls the same managed local API as a peer
-adapter instead of spawning the CLI. Both routes produce the same managed
-history and receipt contract.
+Every execution creates or reuses managed Material, Project, ASTER Run, Frozen
+Edit, Attempt, Job, and Render Variant records. Application use cases allocate
+every output location from its owning entity and publish Data-Root-relative
+Managed Artifact References. Callers cannot select an output directory or write
+outside this lifecycle.
 
-### Direct API output ownership
-
-**Implemented:** Direct Bundle allocation, explicit external-output validation,
-Material leases, storage reporting, and guarded Data Root Migration.
-**Proposed:** bulk Direct Bundle cleanup.
-
-Output ownership is explicit and is never inferred from the resolved path.
-The explicit Direct Python API retains two compatibility output targets:
-
-- omitting the Direct command output path allocates a unique Direct Workflow Bundle at
-  `direct/bundle_<uuid>/` beneath the Application Data Root;
-- an explicit Direct command output path is external and must resolve outside
-  the Application Data Root; and
-
-Managed product use cases instead supply an owning entity ID plus a
-root-relative Managed Artifact Reference. CLI and Benchmark cannot construct a
-target by passing a path.
-
-Direct Workflow Bundles count toward Application Data Root storage usage but do
-not create Project, ASTER Run, Activity, or Render Variant records. External
-outputs are not managed by CutMaster. Paths inside `media/`, `projects/`,
-`direct/`, or any other Data Root namespace are rejected when supplied as
-explicit CLI output directories. Data Root Migration moves managed Direct
-Bundles together with the rest of the root.
-
-Direct Workflow Bundles have no automatic retention deadline. Settings reports
-their count and total size. An explicit bulk-delete operation with two-click
-confirmation is **Proposed**; it will skip active or locked bundles and report
-both skipped and deleted counts.
-
-A direct workflow holds Material and shared root leases for its lifetime, so
-Material deletion or Data Root Migration cannot race CLI or Benchmark use. The
-migration worker obtains the stable external exclusive root lease before
-copying or switching managed state.
+The managed result publishes a versioned logical `artifacts` mapping using
+normalized POSIX paths relative to the Application Data Root. Consumers reject
+unsupported major versions, ignore unknown keys from a compatible minor
+version, and reject a successful result that lacks a required artifact.
 
 ### Implemented Benchmark adapter
 
 Mashup-Benchmark is a peer inbound adapter, not a client of the CLI or FastAPI
-Web adapters. Its worker keeps the existing per-task subprocess boundary but
-calls `LocalManagedWorkflow` with an `ExecuteManagedWorkflowCommand`. CLI and
-Benchmark therefore create the same managed history as Web; the former
-complete-workflow facade and `WorkflowRequest` contract remain removed.
-
-The managed result publishes a versioned logical `artifacts` mapping using
-normalized POSIX paths relative to the Application Data Root. Benchmark
-consumes those references instead of reconstructing internal paths. Manifest
-version `1.0` uses stable dotted logical keys.
-Benchmark rejects an unsupported major version, ignores unknown keys from a
-compatible minor version, and treats a missing required key as an invalid
-successful result. It then copies evaluation files into its own Run directory;
-those copies are not canonical CutMaster artifacts.
+Web adapter. Its per-task subprocess imports
+`ExecuteManagedWorkflowCommand` from `cutmaster.application.workflow`, opens
+`CutMasterApplication`, and calls `app.workflows.execute_and_wait(command)`.
+It consumes managed artifact references instead of reconstructing internal
+paths, then copies evaluation files into its own Run directory. Those copies are
+submission artifacts; CutMaster's managed Project and Render Variant remain the
+authoritative records.
 
 Benchmark media records may provide an explicit stable `material_name`. When
-that field is absent, the adapter uses the existing local-path filename stem,
-preserving current Material identities. The adapter passes the resolved video
-and music names in `ExecuteManagedWorkflowCommand`, which makes reuse independent of
-the per-task output directory and turns changed bytes under a known name into
-an explicit consistency error.
-
-## Direct compatibility artifact layout
-
-The layout below remains only for explicit Direct Python callers. CLI and
-Benchmark no longer use it as their authoritative output.
-
-```text
-output_dir/
-├── analyser/
-│   ├── analysis_result.json
-│   ├── source.srt
-│   ├── dialogue_merged.srt
-│   ├── dialogues.json
-│   └── music/
-│       ├── music_analysis_result.json
-│       └── music_memory.json
-├── planners/
-│   ├── planners_result.json
-│   ├── render_plan.json
-│   ├── music_profile.json
-│   └── diagnostics/
-├── renderer/
-│   ├── output.mp4
-│   └── render_result.json
-├── result.json
-├── model_usage.json
-└── cutmaster.log
-```
-
-The run-local Analyser results identify the selected Materials; their reusable
-memory lives in the active Material Catalog beneath the selected Application
-Data Root. The root files summarize the whole workflow. Every other artifact is
-owned by exactly one stage.
-
-On successful complete execution, `result.json` preserves its existing top-level
-compatibility fields and adds:
-
-```json
-{
-  "artifact_manifest_version": "1.0",
-  "artifacts": {
-    "analyser.video_result": "analyser/analysis_result.json",
-    "planners.render_plan": "planners/render_plan.json",
-    "renderer.output_video": "renderer/output.mp4"
-  }
-}
-```
-
-The mapping contains file paths only. Paths are normalized POSIX paths relative
-to the bundle root and cannot be absolute, contain backslashes or `.`/`..`
-segments, or resolve through a symlink outside that root. Optional artifacts are
-omitted rather than represented by `null`; stale files from an overwritten run
-are never published. `application/direct/artifacts.py` owns the logical-key
-registry and validation, and atomically publishes `result.json` only after every
-required non-self artifact exists. The full v1 key registry and compatibility
-rules are fixed by
-[ADR 0020](adr/0020-publish-a-versioned-direct-artifact-manifest.md).
+that field is absent, the adapter uses the local-path filename stem. The command
+therefore makes reuse independent of the per-task export directory and turns
+changed bytes under a known name into an explicit consistency error.
 
 ## Public APIs
 
@@ -1418,7 +1382,7 @@ from cutmaster import CutMasterApplication
 
 app = CutMasterApplication.open(Path("config.toml"))
 
-app.direct       # synchronous component and complete-workflow execution
+app.workflows    # complete managed workflow coordination
 app.materials    # Material lifecycle and memory queries
 app.projects     # Edit Project and Creative Brief
 app.runs         # ASTER Runs and Guided Revision
@@ -1427,26 +1391,26 @@ app.jobs         # Attempts, Activity, Stop, Retry, Resume, durable events
 app.settings     # models, execution settings, storage, and Data Root
 ```
 
-`CutMasterApplication.open(...)`, all seven lazy service groups, Direct and
-Material operations, SQLite-backed managed use cases, and Settings reads,
-writes, tests, and storage/migration controls are implemented. CLI and
-Mashup-Benchmark use shared local managed orchestration; FastAPI maps its routes
-to the same Application and dispatches the same managed Analyser, Planners, and
-Renderer executors through the shared supervisor. Frozen Edit Review, atomic Guided Revision,
-automatic Dialogue Preview, Render Variants/Outputs, durable SSE, provider
-Setup, and Data Root Migration are implemented. Persistent application
-notifications, the Activity log drawer, Direct Bundle bulk cleanup/retention,
+`CutMasterApplication.open(...)`, all seven lazy service groups,
+SQLite-backed managed use cases, and Settings reads, writes, tests, and
+storage/migration controls are implemented. CLI, FastAPI, Worker, and
+Mashup-Benchmark are peer adapters over the same Application services. Frozen
+Edit Review, atomic Guided Revision, automatic Dialogue Preview, Render
+Variants/Outputs, durable SSE, provider Setup, and Data Root Migration are
+implemented. Persistent application notifications, the Activity log drawer,
 generated OpenAPI transport drift CI, multi-user/cloud execution, and broader
 provider/media port injection remain **Proposed**.
 
-The CLI and Benchmark complete workflow uses the stable managed contract:
+CLI and Benchmark use the stable managed Application contract:
 
 ```python
-from cutmaster.adapters.local_workflow import LocalManagedWorkflow
-from cutmaster.contracts import ExecuteManagedWorkflowCommand, ManagedWorkflowResult
+from cutmaster.application.workflow import (
+    ExecuteManagedWorkflowCommand,
+    ManagedWorkflowResult,
+)
 
 def execute(command: ExecuteManagedWorkflowCommand) -> ManagedWorkflowResult:
-    return LocalManagedWorkflow(app).execute_workflow(command)
+    return app.workflows.execute_and_wait(command)
 ```
 
 Command construction is omitted only to keep this architecture example
@@ -1459,18 +1423,17 @@ treating the values as process-relative or absolute paths.
 | Surface | Stability |
 |---|---|
 | `CutMasterApplication.open(...)` and its seven grouped services | Permanent public composition API |
-| `ExecuteManagedWorkflowCommand` and versioned `ManagedWorkflowResult` | Public managed CLI/Benchmark contract |
-| `ExecuteWorkflowCommand` and versioned `WorkflowResult` | Direct Python compatibility contract |
+| `cutmaster.application.workflow.ExecuteManagedWorkflowCommand` and versioned `ManagedWorkflowResult` | Public managed adapter contract |
 | Root `Analyser`, `Planners`, and `Renderer` class names/imports | Permanent public stage surface |
 | Stage request DTO signatures | v2 handle-only contracts; former raw-path constructors are not retained |
-| Removed complete-workflow facade, `WorkflowRequest`, and `Analyser.resolve_*` | Use managed orchestration or grouped Application services |
+| Removed raw-path workflow facades and caller-owned output contracts | Use `app.workflows` or grouped Application services |
 | MASTER agents, tools, cache paths, fingerprints, repositories, and absolute managed paths | Internal, never public |
 
 The v2 stage boundary is deliberately not dual-mode. Analyser receives resolved
 Material handles; Planners receives analysed video/music handles plus planning
 brief and options; Renderer receives a portable RenderPlan, explicit
 `RenderRuntimeBindings`, RenderOptions, and a structured output target. Callers
-cannot fabricate supported handles from arbitrary paths. CLI and Benchmark
-compatibility is provided by the managed local adapter, which resolves inputs,
-creates product history, and drives v2 stage requests. See
+cannot fabricate supported handles from arbitrary paths. The Application
+coordinator resolves adapter inputs, creates product history, and drives v2
+stage requests. See
 [ADR 0019](adr/0019-use-handle-only-v2-stage-contracts.md).

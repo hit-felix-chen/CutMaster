@@ -138,7 +138,9 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
     )
     assert "distribute source_segment_ids as evenly as practical" in package.user_prompt
     assert "reserve sufficient chronological Segment space" in package.user_prompt
-    assert package.prompt_version == "3.3"
+    assert "source Segment must be longer" in package.user_prompt
+    assert "alternative candidates may overlap" in package.user_prompt
+    assert package.prompt_version == "3.4"
     assert package.context_keys == (
         "request",
         "music_profile",
@@ -178,10 +180,9 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
                     candidate_rejections=[],
                 ),
                 build_prompt_failure(
-                    PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+                    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
                     slot_id="slot_04",
-                    available_capacity=1,
-                    candidates_needed=3,
+                    longest_segment_duration_sec=3.0,
                     planned_duration_sec=4.0,
                 ),
             ],
@@ -214,7 +215,7 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     )
     assert "distribute source_segment_ids as\nevenly as practical" in package.user_prompt
     assert "do not push a replacement toward an\ninterval boundary" in package.user_prompt
-    assert package.prompt_version == "3.3"
+    assert package.prompt_version == "3.4"
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
 

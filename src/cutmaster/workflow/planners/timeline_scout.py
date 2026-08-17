@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -15,6 +14,13 @@ from cutmaster.configuration.schema import (
     VLMConfig,
 )
 from cutmaster.infrastructure.observability.logging import error_summary, log_event
+from cutmaster.infrastructure.observability.progress import (
+    progress_bar,
+    progress_iter,
+)
+from cutmaster.workflow.planners.edit_composer import score_unary_candidate
+from cutmaster.workflow.planners.tools.segment_media import SegmentMediaReader
+from cutmaster.workflow.planners.tools.visual_scoring import _contact_sheet_data_url
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.workflow.prompting.failure_catalog import (
     PromptFailureCode,
@@ -25,16 +31,11 @@ from cutmaster.workflow.prompting.planners import (
     CandidateVisualScoringDetails,
 )
 from cutmaster.workflow.shared.execution_context import WorkflowContext
-from cutmaster.workflow.planners.tools.visual_scoring import _contact_sheet_data_url
-from cutmaster.workflow.planners.tools.segment_media import SegmentMediaReader
-from cutmaster.infrastructure.observability.progress import (
-    progress_bar,
-    progress_iter,
-)
 from cutmaster.workflow.shared.timecode import format_range, parse_range
 
 
 _TIMESTAMP_TOLERANCE_SEC = 0.0011
+_ADJACENT_CANDIDATE_MULTIPLIER = 3
 
 
 def _ranges_overlap(
@@ -47,64 +48,36 @@ def _ranges_overlap(
     )
 
 
-def _merge_ranges(
-    ranges: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    merged: list[list[float]] = []
-    for start, end in sorted(ranges):
-        if end <= start:
-            continue
-        if (
-            not merged
-            or start > merged[-1][1] + _TIMESTAMP_TOLERANCE_SEC
-        ):
-            merged.append([start, end])
-        else:
-            merged[-1][1] = max(merged[-1][1], end)
-    return [(start, end) for start, end in merged]
-
-
 def _segment_ranges(segments: list[dict[str, Any]]) -> list[tuple[float, float]]:
-    return _merge_ranges(
-        [
-            (
-                float(segment["time_range"]["start_sec"]),
-                float(segment["time_range"]["end_sec"]),
-            )
-            for segment in segments
-        ]
-    )
+    return [
+        (
+            float(segment["time_range"]["start_sec"]),
+            float(segment["time_range"]["end_sec"]),
+        )
+        for segment in segments
+    ]
 
 
-def _window_capacity(
+def _usable_segment_count(
     segments: list[dict[str, Any]],
     duration_sec: float,
-    excluded_ranges: list[str],
 ) -> int:
-    exclusions = _merge_ranges(
-        [parse_range(timestamp) for timestamp in excluded_ranges]
+    return sum(
+        float(segment["time_range"]["end_sec"])
+        - float(segment["time_range"]["start_sec"])
+        > duration_sec + _TIMESTAMP_TOLERANCE_SEC
+        for segment in segments
     )
-    capacity = 0
-    for allowed_start, allowed_end in _segment_ranges(segments):
-        cursor = allowed_start
-        for excluded_start, excluded_end in exclusions:
-            if excluded_end <= cursor + _TIMESTAMP_TOLERANCE_SEC:
-                continue
-            if excluded_start >= allowed_end - _TIMESTAMP_TOLERANCE_SEC:
-                break
-            free_end = min(excluded_start, allowed_end)
-            capacity += math.floor(
-                max(0.0, free_end - cursor + _TIMESTAMP_TOLERANCE_SEC)
-                / duration_sec
-            )
-            cursor = max(cursor, excluded_end)
-            if cursor >= allowed_end - _TIMESTAMP_TOLERANCE_SEC:
-                break
-        capacity += math.floor(
-            max(0.0, allowed_end - cursor + _TIMESTAMP_TOLERANCE_SEC)
-            / duration_sec
-        )
-    return capacity
+
+
+def _same_range(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> bool:
+    return (
+        abs(first[0] - second[0]) <= _TIMESTAMP_TOLERANCE_SEC
+        and abs(first[1] - second[1]) <= _TIMESTAMP_TOLERANCE_SEC
+    )
 
 
 def _validate_candidates(
@@ -166,11 +139,11 @@ def _validate_candidates(
                     f"Candidate for {slot_id} is outside the supplied Segment timeline"
                 )
             if any(
-                _ranges_overlap(candidate_range, existing)
+                _same_range(candidate_range, existing)
                 for existing in [*accepted_ranges, *excluded_ranges]
             ):
                 raise ValueError(
-                    f"Candidate time ranges overlap for {slot_id}"
+                    f"Candidate time range is duplicated for {slot_id}"
                 )
             accepted_ranges.append(candidate_range)
             normalized_range = format_range(start, end)
@@ -585,11 +558,10 @@ def retrieve_candidates(
         raise RuntimeError("Video description must be available before candidate retrieval")
     rejected: list[dict[str, Any]] = []
     primary_rounds = retrieval_config.retrieval_max_rounds + 1
-    adjacent_rounds = retrieval_config.retrieval_max_rounds
+    adjacent_rounds = 1
     total_rounds = primary_rounds + adjacent_rounds
     primary_scope_exhausted: set[str] = set()
     adjacent_scope_exhausted: set[str] = set()
-    freshly_replanned: set[str] = set()
     for round_index in range(1, total_rounds + 1):
         include_adjacent = round_index > primary_rounds
         scope = "adjacent_segments" if include_adjacent else "planned_segments"
@@ -626,14 +598,9 @@ def retrieve_candidates(
                 _retrieval_segment_context(
                     video_description,
                     [slot],
-                    include_adjacent=(
-                        include_adjacent and slot_id not in freshly_replanned
-                    ),
+                    include_adjacent=include_adjacent,
                 )
             )
-        freshly_replanned.difference_update(
-            str(slot["slot_id"]) for slot in pending
-        )
         excluded = {
             slot["slot_id"]: [
                 item["timestamp"] for item in pool[slot["slot_id"]]
@@ -658,26 +625,32 @@ def retrieve_candidates(
             candidates_needed = (
                 retrieval_config.candidates_per_slot - len(pool[slot_id])
             )
-            available_capacity = _window_capacity(
+            candidates_requested = (
+                candidates_needed * _ADJACENT_CANDIDATE_MULTIPLIER
+                if include_adjacent
+                else candidates_needed
+            )
+            usable_segment_count = _usable_segment_count(
                 slot_segments[slot_id],
                 float(slot["planned_duration_sec"]),
-                excluded[slot_id],
             )
-            if available_capacity < candidates_needed:
-                capacity_failure = build_prompt_failure(
-                    PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+            if usable_segment_count == 0:
+                longest_segment_duration_sec = max(
+                    (
+                        float(segment["time_range"]["end_sec"])
+                        - float(segment["time_range"]["start_sec"])
+                        for segment in slot_segments[slot_id]
+                    ),
+                    default=0.0,
+                )
+                duration_failure = build_prompt_failure(
+                    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
                     slot_id=slot_id,
                     round=round_index,
                     scope=scope,
                     scope_round=scope_round,
-                    available_capacity=available_capacity,
-                    candidates_needed=candidates_needed,
-                    candidate_deficit=candidates_needed - available_capacity,
                     planned_duration_sec=float(slot["planned_duration_sec"]),
-                    minimum_usable_source_duration_sec=(
-                        candidates_needed * float(slot["planned_duration_sec"])
-                    ),
-                    excluded_ranges=excluded[slot_id],
+                    longest_segment_duration_sec=longest_segment_duration_sec,
                     source_segment_ids=list(slot["source_segment_ids"]),
                 )
                 log_event(
@@ -685,15 +658,15 @@ def retrieve_candidates(
                     "aster.timeline",
                     "fallback.apply",
                     (
-                        "Candidate scope lacks enough non-overlapping fixed-duration "
-                        "windows; queuing targeted Slot redesign"
+                        "Candidate scope has no Segment longer than the planned clip; "
+                        "queuing targeted Slot redesign"
                         if replan_slots is not None
-                        else "Candidate scope lacks enough non-overlapping fixed-duration "
-                        "windows; expanding in the next round"
+                        else "Candidate scope has no Segment longer than the planned "
+                        "clip; expanding in the next round"
                     ),
-                    **capacity_failure,
+                    **duration_failure,
                 )
-                return slot_id, None, capacity_failure
+                return slot_id, None, duration_failure
             confirmed_candidates = {
                 slot_id: [
                     {
@@ -710,7 +683,7 @@ def retrieve_candidates(
                 PromptTask.CANDIDATE_RETRIEVAL,
                 CandidateRetrievalDetails(
                     operation=f"Candidate retrieval round {round_index} slot {slot_id}",
-                    candidates_per_slot=candidates_needed,
+                    candidates_per_slot=candidates_requested,
                     slots=[slot],
                     confirmed_candidates=confirmed_candidates,
                     excluded_ranges={slot_id: excluded[slot_id]},
@@ -725,7 +698,7 @@ def retrieve_candidates(
                         parsed,
                         [slot],
                         slot_segments,
-                        candidates_needed,
+                        candidates_requested,
                         {slot_id: excluded[slot_id]},
                     ),
                 )
@@ -780,17 +753,17 @@ def retrieve_candidates(
 
         exhausted_slots.update(
             slot_id
-            for slot_id, _slot_pool, capacity_failure in slot_results
-            if capacity_failure is not None
+            for slot_id, _slot_pool, duration_failure in slot_results
+            if duration_failure is not None
         )
-        capacity_failures = [
-            capacity_failure
-            for _slot_id, _slot_pool, capacity_failure in slot_results
-            if capacity_failure is not None
+        duration_failures = [
+            duration_failure
+            for _slot_id, _slot_pool, duration_failure in slot_results
+            if duration_failure is not None
         ]
         round_pool = {
             slot_id: slot_pool[slot_id]
-            for slot_id, slot_pool, _capacity_failure in slot_results
+            for slot_id, slot_pool, _duration_failure in slot_results
             if slot_pool is not None
         }
         successful_slots = [
@@ -885,12 +858,13 @@ def retrieve_candidates(
             for slot in visual_slots:
                 slot_id = slot["slot_id"]
                 requires_subject = bool(slot.get("required_visible_subjects"))
+                grounded_candidates: list[dict[str, Any]] = []
                 for candidate in round_pool[slot_id]:
                     visibility_likert = int(
                         candidate["protagonist_visibility_likert"]
                     )
-                    overlap = any(
-                        _ranges_overlap(
+                    duplicate = any(
+                        _same_range(
                             parse_range(candidate["timestamp"]),
                             parse_range(existing["timestamp"]),
                         )
@@ -901,10 +875,10 @@ def retrieve_candidates(
                         or visibility_likert
                         >= retrieval_config.protagonist_visibility_likert_threshold
                     )
-                    if overlap or not visibility_ok:
+                    if duplicate or not visibility_ok:
                         rejection_code = (
-                            PromptFailureCode.OVERLAPPING_RANGE
-                            if overlap
+                            PromptFailureCode.DUPLICATE_CANDIDATE_RANGE
+                            if duplicate
                             else PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED
                         )
                         visual_failure = build_prompt_failure(
@@ -950,9 +924,42 @@ def retrieve_candidates(
                             }
                         )
                         continue
-                    pool[slot_id].append(candidate)
+                    candidate["selection_score"] = round(
+                        score_unary_candidate(slot, candidate),
+                        6,
+                    )
+                    grounded_candidates.append(candidate)
+                candidates_needed = max(
+                    0,
+                    retrieval_config.candidates_per_slot - len(pool[slot_id]),
+                )
+                selected_candidates = sorted(
+                    grounded_candidates,
+                    key=lambda candidate: (
+                        -float(candidate["selection_score"]),
+                        parse_range(candidate["timestamp"])[0],
+                    ),
+                )[:candidates_needed]
+                pool[slot_id].extend(selected_candidates)
+                if len(grounded_candidates) > len(selected_candidates):
+                    log_event(
+                        "INFO",
+                        "aster.timeline",
+                        "stage.complete",
+                        "Ranked surplus grounded candidates and retained the best-scoring set",
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                        slot_id=slot_id,
+                        grounded_candidates=len(grounded_candidates),
+                        selected_candidates=len(selected_candidates),
+                        selected_candidate_ids=[
+                            candidate["candidate_id"]
+                            for candidate in selected_candidates
+                        ],
+                    )
 
-        targeted_failures = list(capacity_failures)
+        targeted_failures = list(duration_failures)
         for slot in successful_slots:
             slot_id = str(slot["slot_id"])
             if pool[slot_id]:
@@ -1025,7 +1032,6 @@ def retrieve_candidates(
                 for item in rejected
                 if item["slot_id"] not in replanned_slot_ids
             ]
-            freshly_replanned.update(replanned_slot_ids)
             log_event(
                 "INFO",
                 "aster.arrangement",
@@ -1109,7 +1115,14 @@ def _candidate_motion(
         previous = gray
     if not values:
         return 0.0
-    raw = sum(values) / len(values)
+    # A single overlay transition, decode glitch, or hard cut must not make an
+    # otherwise frozen clip look dynamic.  At the configured sampling rate a
+    # normal candidate has enough frame pairs to discard the one largest
+    # instantaneous difference while retaining sustained motion.
+    trimmed_values = list(values)
+    if len(trimmed_values) >= 3:
+        trimmed_values.remove(max(trimmed_values))
+    raw = sum(trimmed_values) / len(trimmed_values)
     return max(0.0, min(1.0, raw / 0.18))
 
 

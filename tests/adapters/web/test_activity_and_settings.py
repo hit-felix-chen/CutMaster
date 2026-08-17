@@ -171,9 +171,7 @@ def test_activity_projects_canonical_navigation_context_for_each_owner(
         EnqueueMaterialAnalysisCommand(str(uuid4()), video.material_id)
     )
 
-    with TestClient(
-        create_app(application=application, enable_job_supervisor=False)
-    ) as client:
+    with TestClient(create_app(application=application)) as client:
         response = client.get("/api/activity")
         first_page = client.get("/api/activity?limit=1")
         second_page = client.get("/api/activity?limit=1&offset=1")
@@ -237,7 +235,6 @@ def test_settings_read_save_and_storage_report_are_real(client: TestClient) -> N
         "database",
         "materials",
         "projects",
-        "direct",
         "logs",
     }
     assert saved.status_code == 200

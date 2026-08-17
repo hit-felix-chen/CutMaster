@@ -15,7 +15,12 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { formatDuration, formatFrameRate, formatNumber } from '@/i18n/formatters'
+import {
+  formatCost,
+  formatDuration,
+  formatFrameRate,
+  formatNumber,
+} from '@/i18n/formatters'
 
 type DataRecord = Record<string, unknown>
 
@@ -846,7 +851,13 @@ export function DialogueMemoryView({
   )
 }
 
-export function TechnicalMemoryView({ payload }: { payload: DataRecord }) {
+export function TechnicalMemoryView({
+  payload,
+  analysisCostYuan,
+}: {
+  payload: DataRecord
+  analysisCostYuan?: number | null
+}) {
   const { t, i18n } = useTranslation('common')
   const source = record(payload.source)
   const models = record(payload.models)
@@ -878,6 +889,12 @@ export function TechnicalMemoryView({ payload }: { payload: DataRecord }) {
     [t('materials.accents'), numberValue(payload.accent_count)],
     [t('materials.sections'), numberValue(payload.section_count)],
     [t('materials.schema'), text(payload.schema_version) || null],
+    [
+      t('materials.apiCost'),
+      typeof analysisCostYuan === 'number'
+        ? formatCost(analysisCostYuan, i18n.language)
+        : null,
+    ],
   ]
   return (
     <div className="technical-memory">
@@ -1252,6 +1269,7 @@ export function MemoryTabView({
   tab,
   materialId,
   payload,
+  analysisCostYuan,
   selectedSegmentId,
   selectedShotId,
   onTimelineSelectionChange,
@@ -1261,6 +1279,7 @@ export function MemoryTabView({
   tab: string
   materialId: string
   payload: DataRecord
+  analysisCostYuan?: number | null
   selectedSegmentId?: string
   selectedShotId?: string
   onTimelineSelectionChange?: (segmentId: string, shotId?: string) => void
@@ -1287,5 +1306,5 @@ export function MemoryTabView({
     return <DialogueMemoryView materialId={materialId} payload={payload} />
   if (type === 'music' && tab === 'structure')
     return <MusicStructureView materialId={materialId} payload={payload} />
-  return <TechnicalMemoryView payload={payload} />
+  return <TechnicalMemoryView payload={payload} analysisCostYuan={analysisCostYuan} />
 }

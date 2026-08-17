@@ -1,18 +1,11 @@
-"""Execute one durable managed Renderer Job outside the Web server process."""
+"""Execute one durable managed Renderer Job inside the Application boundary."""
 
 from __future__ import annotations
 
-import argparse
 import os
-from collections.abc import Mapping, Sequence
-from pathlib import Path
+from collections.abc import Mapping
 from threading import Event, Thread
 
-from cutmaster.adapters.web.worker_lease import (
-    add_supervisor_lease_arguments,
-    adopt_supervisor_lease,
-    validate_claimed_submission,
-)
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import (
     ClaimJobCommand,
@@ -20,6 +13,7 @@ from cutmaster.application.jobs import (
     HeartbeatJobCommand,
     JobSubmissionView,
 )
+from cutmaster.application.jobs.lease import validate_claimed_submission
 from cutmaster.application.renders.execution import (
     ExecuteManagedRenderCommand,
     RenderExecutionInterrupted,
@@ -67,7 +61,7 @@ def execute_render_job(
         application.jobs.mark_failed(
             FailAttemptCommand(
                 attempt.attempt_id,
-                "Web Renderer worker received a non-rendering Job",
+                "Managed Renderer executor received a non-rendering Job",
             )
         )
         return AttemptStatus.FAILED
@@ -152,45 +146,4 @@ def _finish_failed_or_interrupted(
         application.jobs.mark_failed(FailAttemptCommand(attempt_id, message))
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Execute one CutMaster Render Job")
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--job-id", required=True)
-    add_supervisor_lease_arguments(parser)
-    args = parser.parse_args(argv)
-    application = CutMasterApplication.open(args.config)
-    job_id = JobId.parse(args.job_id)
-    exact_supervisor_grant = all(
-        value is not None
-        for value in (
-            args.attempt_id,
-            args.lease_worker_id,
-            args.lease_process_id,
-        )
-    )
-    with application.data_root_coordinator.shared(
-        allow_maintenance=exact_supervisor_grant
-    ):
-        claimed = adopt_supervisor_lease(
-            application,
-            job_id=job_id,
-            attempt_id=args.attempt_id,
-            lease_worker_id=args.lease_worker_id,
-            lease_process_id=args.lease_process_id,
-            worker_kind="render",
-        )
-        result = execute_render_job(
-            application,
-            job_id,
-            claimed_submission=claimed,
-        )
-    if result in {None, AttemptStatus.COMPLETE, AttemptStatus.INTERRUPTED}:
-        return 0
-    return 1
-
-
-if __name__ == "__main__":  # pragma: no cover - subprocess entry point
-    raise SystemExit(main())
-
-
-__all__ = ["execute_render_job", "main"]
+__all__ = ["execute_render_job"]

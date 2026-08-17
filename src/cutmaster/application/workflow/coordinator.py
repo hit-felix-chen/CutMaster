@@ -1,4 +1,4 @@
-"""Shared local adapter orchestration for Web-visible managed executions."""
+"""Application-owned coordination for complete managed CutMaster workflows."""
 
 from __future__ import annotations
 
@@ -7,13 +7,9 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from cutmaster.adapters.web.material_worker import execute_material_job
-from cutmaster.adapters.web.render_worker import execute_render_job
-from cutmaster.adapters.web.run_worker import execute_run_job
-from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import EnqueueMaterialAnalysisCommand
 from cutmaster.application.projects import (
     CreateProjectCommand,
@@ -21,22 +17,46 @@ from cutmaster.application.projects import (
 )
 from cutmaster.application.renders import CreateRenderVariantCommand
 from cutmaster.application.runs import CreateRunCommand
-from cutmaster.contracts.managed_workflow import (
+from cutmaster.application.workflow.contracts import (
     ExecuteManagedWorkflowCommand,
     ManagedWorkflowResult,
 )
 from cutmaster.domain.attempts import AttemptStatus, TERMINAL_ATTEMPT_STATUSES
-from cutmaster.domain.ids import FrozenEditId
+from cutmaster.domain.ids import FrozenEditId, JobId
 from cutmaster.domain.materials import MaterialCondition, MaterialType
 
+if TYPE_CHECKING:
+    from cutmaster.application.cutmaster import CutMasterApplication
 
-class LocalManagedWorkflow:
-    """Run the same durable managed lifecycle used by the local Web workspace."""
 
-    def __init__(self, application: CutMasterApplication) -> None:
-        if not isinstance(application, CutMasterApplication):
-            raise TypeError("application must be a CutMasterApplication")
+class ManagedJobExecution(Protocol):
+    """Synchronous execution surface used after durable Job submission."""
+
+    def execute_material_job(self, job_id: JobId, **kwargs: Any) -> None: ...
+
+    def execute_run_job(self, job_id: JobId, **kwargs: Any) -> None: ...
+
+    def execute_render_job(self, job_id: JobId, **kwargs: Any) -> None: ...
+
+
+class ManagedWorkflowCoordinator:
+    """Coordinate the durable lifecycle shared by every inbound adapter.
+
+    This service owns the product-level sequence from reusable Materials through
+    Project, Run, Frozen Edit, and Render Variant.  It intentionally knows
+    nothing about HTTP, terminal arguments, or benchmark task formats.
+    """
+
+    def __init__(
+        self,
+        application: CutMasterApplication,
+        *,
+        job_executor: ManagedJobExecution | None = None,
+    ) -> None:
+        if application is None:
+            raise TypeError("application must not be None")
         self._application = application
+        self._job_executor = job_executor
 
     def analyse_video(
         self,
@@ -45,6 +65,8 @@ class LocalManagedWorkflow:
         material_name: str = "",
         subtitle_path: Path | None = None,
     ) -> dict[str, Any]:
+        """Ensure and synchronously analyse one managed video Material."""
+
         material = self._ensure_ready_material(
             MaterialType.VIDEO,
             source_path=source_path,
@@ -59,6 +81,8 @@ class LocalManagedWorkflow:
         *,
         material_name: str = "",
     ) -> dict[str, Any]:
+        """Ensure and synchronously analyse one managed music Material."""
+
         material = self._ensure_ready_material(
             MaterialType.MUSIC,
             source_path=source_path,
@@ -79,6 +103,8 @@ class LocalManagedWorkflow:
         video_title: str = "",
         max_clip_duration_sec: float | None = None,
     ) -> dict[str, Any]:
+        """Create and synchronously complete one managed ASTER Run."""
+
         video = self._ensure_ready_material(
             MaterialType.VIDEO,
             existing_name=video_material,
@@ -114,6 +140,8 @@ class LocalManagedWorkflow:
         *,
         audio_mode: str = "dialogue",
     ) -> dict[str, Any]:
+        """Create and synchronously complete one managed Render Variant."""
+
         variant = self._render(edit_id, audio_mode=audio_mode)
         if variant.master is None or variant.duration_sec is None:
             raise RuntimeError("Managed Renderer completed without a master")
@@ -127,10 +155,12 @@ class LocalManagedWorkflow:
             "schema_version": "2.0",
         }
 
-    def execute_workflow(
+    def execute_and_wait(
         self,
         command: ExecuteManagedWorkflowCommand,
     ) -> ManagedWorkflowResult:
+        """Execute a complete managed workflow and return its portable receipt."""
+
         if not isinstance(command, ExecuteManagedWorkflowCommand):
             raise TypeError("command must be an ExecuteManagedWorkflowCommand")
         video = self._resolve_material(
@@ -160,6 +190,7 @@ class LocalManagedWorkflow:
         variant = self._render(edit.edit_id, audio_mode=command.audio_mode)
         if variant.master is None or variant.duration_sec is None:
             raise RuntimeError("Managed Renderer completed without a master")
+
         usage = dict(self._application.runs.usage(run.run_id).run_total)
         artifacts = self._artifact_manifest(
             project_id=str(project.project_id),
@@ -193,6 +224,18 @@ class LocalManagedWorkflow:
     @property
     def _data_root(self) -> Path:
         return self._application.settings.effective_configuration.data_root.resolve()
+
+    @property
+    def _jobs(self) -> ManagedJobExecution:
+        executor = self._job_executor
+        if executor is None:
+            # Keep construction cheap and avoid importing execution providers when
+            # an adapter only inspects the Application graph.
+            from cutmaster.application.workflow.job_execution import ManagedJobExecutor
+
+            executor = ManagedJobExecutor(self._application)
+            self._job_executor = executor
+        return executor
 
     def _resolve_material(
         self,
@@ -247,13 +290,13 @@ class LocalManagedWorkflow:
                 )
         if material.condition is MaterialCondition.READY:
             return material
+
         submission = self._application.jobs.enqueue_material_analysis(
             EnqueueMaterialAnalysisCommand(str(uuid4()), material.material_id)
         )
-        execute_material_job(
-            self._application,
+        self._jobs.execute_material_job(
             submission.job.job_id,
-            worker_id=f"local-managed-{os.getpid()}",
+            worker_id=self._worker_id,
         )
         self._require_complete(submission.attempt.attempt_id, "Material Analysis")
         ready = self._application.materials.get(material.material_id)
@@ -297,10 +340,9 @@ class LocalManagedWorkflow:
                 max_clip_duration_sec=max_clip_duration_sec,
             )
         )
-        execute_run_job(
-            self._application,
+        self._jobs.execute_run_job(
             submission.job.job_id,
-            worker_id=f"local-managed-{os.getpid()}",
+            worker_id=self._worker_id,
         )
         self._require_complete(submission.attempt.attempt_id, "ASTER Planners")
         run = self._application.runs.get(submission.run.run_id)
@@ -315,15 +357,18 @@ class LocalManagedWorkflow:
         )
         if submission.job is None or submission.attempt is None:
             raise RuntimeError("Managed Render submission has no Job")
-        execute_render_job(
-            self._application,
+        self._jobs.execute_render_job(
             submission.job.job_id,
-            worker_id=f"local-managed-{os.getpid()}",
+            worker_id=self._worker_id,
         )
         self._require_complete(submission.attempt.attempt_id, "Renderer")
         return self._application.renders.get(
             submission.render_variant.render_variant_id
         )
+
+    @property
+    def _worker_id(self) -> str:
+        return f"local-managed-{os.getpid()}"
 
     def _require_complete(self, attempt_id, operation: str) -> None:
         attempt = self._application.jobs.get_attempt(attempt_id)
@@ -370,34 +415,48 @@ class LocalManagedWorkflow:
                 for logical_key, filename in names.items():
                     candidate = binding.memory_root / filename
                     if candidate.is_file() and not candidate.is_symlink():
-                        artifacts[logical_key] = self._relative(candidate)
+                        artifacts[logical_key] = self._relative_existing(candidate)
+
         plan = self._data_root.joinpath(*plan_relative_path.split("/"))
         review_manifest = plan.parent / "review_bundle.json"
         if review_manifest.is_file() and not review_manifest.is_symlink():
-            artifacts["planners.review_bundle"] = self._relative(review_manifest)
+            artifacts["planners.review_bundle"] = self._relative_existing(
+                review_manifest
+            )
             payload = json.loads(review_manifest.read_text(encoding="utf-8"))
             entries = payload.get("artifacts")
             if isinstance(entries, dict):
                 for name, entry in entries.items():
-                    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    if not isinstance(entry, dict) or not isinstance(
+                        entry.get("path"), str
+                    ):
                         continue
                     candidate = review_manifest.parent / entry["path"]
                     if candidate.is_file() and not candidate.is_symlink():
-                        artifacts[f"planners.{name}"] = self._relative(candidate)
+                        artifacts[f"planners.{name}"] = self._relative_existing(
+                            candidate
+                        )
+
         run_directory = self._data_root / "projects" / project_id / "runs" / run_id
         usage_path = run_directory / "model_usage.json"
         self._write_json_atomic(usage_path, usage)
-        artifacts["workflow.model_usage"] = self._relative(usage_path)
+        artifacts["workflow.model_usage"] = self._relative_existing(usage_path)
         result_path = run_directory / "result.json"
-        artifacts["workflow.result"] = self._relative(result_path)
+        artifacts["workflow.result"] = self._relative_owned(result_path)
         return artifacts
 
     def _write_result(self, result: ManagedWorkflowResult) -> None:
-        path = self._data_root.joinpath(*result.artifacts["workflow.result"].split("/"))
+        path = self._data_root.joinpath(
+            *result.artifacts["workflow.result"].split("/")
+        )
         self._write_json_atomic(path, result.to_dict())
 
-    def _relative(self, path: Path) -> str:
+    def _relative_existing(self, path: Path) -> str:
         resolved = path.resolve(strict=True)
+        return resolved.relative_to(self._data_root).as_posix()
+
+    def _relative_owned(self, path: Path) -> str:
+        resolved = path.resolve(strict=False)
         return resolved.relative_to(self._data_root).as_posix()
 
     @staticmethod
@@ -432,4 +491,4 @@ class LocalManagedWorkflow:
         }
 
 
-__all__ = ["LocalManagedWorkflow"]
+__all__ = ["ManagedJobExecution", "ManagedWorkflowCoordinator"]

@@ -175,9 +175,6 @@ export function SettingsWorkspace() {
                   </article>
                 ))}
               </div>
-              <p>
-                {t('settings.directBundles')}: {storage.data.direct_bundle_count}
-              </p>
             </>
           ) : null}
           <DataRootMigrationPanel

@@ -1,24 +1,24 @@
-"""Database-backed cooperative cancellation for managed Web workers."""
+"""Durable cooperative cancellation for managed workflow Attempts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
 
-from cutmaster.application.jobs import JobView
+from cutmaster.application.jobs.views import JobView
 from cutmaster.domain.ids import JobId
 from cutmaster.workflow.ports import WorkflowCancelledError
 
 
-class _JobReader(Protocol):
+class JobReader(Protocol):
     def get_job(self, job_id: JobId) -> JobView: ...
 
 
 @dataclass(frozen=True, slots=True)
 class DatabaseJobCancellationToken:
-    """Poll the durable Stop flag only at explicit Workflow safe points."""
+    """Poll the durable stop flag only at explicit Workflow safe points."""
 
-    jobs: _JobReader
+    jobs: JobReader
     job_id: JobId
 
     def raise_if_cancelled(self) -> None:
@@ -28,4 +28,4 @@ class DatabaseJobCancellationToken:
             )
 
 
-__all__ = ["DatabaseJobCancellationToken"]
+__all__ = ["DatabaseJobCancellationToken", "JobReader"]

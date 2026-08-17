@@ -3,10 +3,10 @@
 **Status: Implemented.**
 
 CutMaster keeps the public `Analyser`, `Planners`, and `Renderer` class names and
-their root-package import paths, and their v2 request contracts are
-handle-only. The former Python request signatures that accept raw video, music,
-subtitle, plan, or output paths are not retained as overloads, union types, or
-compatibility wrappers at the Workflow boundary.
+their root-package import paths, and their v2 request contracts are handle-only.
+Python request signatures that accept raw video, music, subtitle, plan, or
+output paths are not retained as overloads, union types, or alternate Workflow
+boundaries.
 
 The Application Layer owns every transition from caller-facing input to a
 Workflow request. It resolves a raw path or exact Material Name through the
@@ -33,30 +33,35 @@ model, media, logging, and progress helpers under `infrastructure/`; expanding
 those helpers behind provider/media Workflow ports is a separate Proposed
 refactor and is not part of the completed handle-only request migration.
 
-CLI compatibility is preserved above this breaking boundary. The existing
-`analyse`, `analyse-music`, `plan`, `render`, and `run` commands continue to
-accept their documented managed inputs and synchronously drive the same durable
-local Job executors as Web. Mashup-Benchmark likewise uses
-`LocalManagedWorkflow` with `ExecuteManagedWorkflowCommand`, preserving its
-worker subprocess while exporting copies from Web-visible managed history. Both
-callers have migrated; the transitional complete-workflow facade and
-`WorkflowRequest` are removed.
+CLI, the FastAPI Web adapter, the Worker process adapter, and Mashup-Benchmark
+are peers above this boundary. They call `CutMasterApplication.workflows` or
+another grouped Application service; none calls another adapter. The existing
+`analyse`, `analyse-music`, `plan`, `render`, and `run` commands accept only
+their documented managed inputs. Mashup-Benchmark imports
+`ExecuteManagedWorkflowCommand` from `cutmaster.application.workflow`, calls
+`app.workflows.execute_and_wait(command)`, and copies only the managed artifacts
+required for evaluation.
+
+`ManagedWorkflowCoordinator` owns the complete Material -> Project -> ASTER Run
+-> Frozen Edit -> Render Variant lifecycle. Application-owned Material, Run,
+and Render executors construct the handle-only stage requests, while the durable
+Job executor is the one execution surface used by synchronous coordination and
+the peer Worker process adapter.
 
 The completed migration followed this order:
 
-1. Introduce `CutMasterApplication`, Material resolution, and the synchronous
-   direct component/workflow use cases.
-2. Migrate CLI and Mashup-Benchmark first to the Direct use cases, then to the
-   managed Project/Run/Render lifecycle, and pass their compatibility tests.
+1. Introduce `CutMasterApplication`, Material resolution, and the managed
+   Project/Run/Render lifecycle.
+2. Make CLI, Web, Worker, and Mashup-Benchmark peer adapters over
+   `CutMasterApplication` and the public `application.workflow` contract.
 3. Replace stage request schemas and implementations with handle-only v2
    contracts and remove the raw-path stage DTO definitions, keeping only the
    three stage class names/import paths stable.
-4. Remove the former complete-workflow facade, `WorkflowRequest`, and
-   `Analyser.resolve_*` selectors.
+4. Remove alternate raw-path workflow entry points and selectors.
 
 This avoids two authorities for Material lifecycle, makes leases and
-fingerprint validation unavoidable, and prevents a supposedly portable
-Workflow contract from depending on caller-selected filesystem paths. The cost
-is an intentional breaking change for direct Python callers that instantiate
-the old stage request DTOs; those callers must move to `app.direct` or construct
-v2 requests from Application-issued handles.
+fingerprint validation unavoidable, and prevents a portable Workflow contract
+from depending on caller-selected filesystem paths. Python callers that need a
+complete workflow use `app.workflows`; advanced stage callers must obtain v2
+runtime handles from Application-owned execution services rather than fabricate
+them from paths.

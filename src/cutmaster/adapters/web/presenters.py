@@ -88,6 +88,7 @@ def material_detail_view(
         "references": [json_value(item) for item in references],
         "source": json_value(value.source),
         "memory_summary": json_value(value.memory_summary),
+        "analysis_cost_yuan": value.analysis_cost_yuan,
         "thumbnail_url": f"{preview_base}/thumbnail" if has_video_preview else None,
         "waveform_url": f"{preview_base}/waveform" if has_music_preview else None,
     }
@@ -428,7 +429,6 @@ def storage_report_view(value: StorageReportView) -> dict[str, Any]:
             }
             for item in value.categories
         ],
-        "direct_bundle_count": value.direct_bundle_count,
         "total_size_bytes": value.total_size_bytes,
         "reveal_supported": value.reveal_supported,
     }

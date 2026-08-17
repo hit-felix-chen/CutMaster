@@ -7,7 +7,6 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
-from cutmaster.adapters.web.material_worker import execute_material_job
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import (
     ClaimJobCommand,
@@ -16,6 +15,7 @@ from cutmaster.application.jobs import (
     JobSubmissionView,
     StopAttemptCommand,
 )
+from cutmaster.application.workflow.job_execution import execute_material_job
 from cutmaster.domain.ids import MaterialId
 from cutmaster.domain.materials import MaterialCondition
 from cutmaster.infrastructure.storage.local.material_catalog import (
@@ -42,7 +42,7 @@ def _client(
     return TestClient(
         create_app(
             application=application,
-            material_dispatcher=dispatcher,
+            job_dispatcher=dispatcher,
         )
     )
 
@@ -572,7 +572,7 @@ def test_delete_replay_finishes_cleanup_after_catalog_commit(
     with TestClient(
         create_app(
             application=application,
-            material_dispatcher=dispatcher,
+            job_dispatcher=dispatcher,
         ),
         raise_server_exceptions=False,
     ) as client:

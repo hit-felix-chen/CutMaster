@@ -7,7 +7,7 @@ from fastapi import APIRouter, status
 from cutmaster.adapters.web.dependencies import (
     ApplicationDependency,
     IdempotencyKey,
-    RunDispatcherDependency,
+    JobDispatcherDependency,
 )
 from cutmaster.adapters.web.presenters import (
     attempt_view,
@@ -36,7 +36,7 @@ router = APIRouter(tags=["runs"])
 def start_run(
     project_id: str,
     application: ApplicationDependency,
-    dispatcher: RunDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     """Snapshot a saved Project and dispatch its real ASTER planning Job."""
@@ -54,7 +54,7 @@ def start_run(
 def retry_run(
     run_id: str,
     application: ApplicationDependency,
-    dispatcher: RunDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     """Create and dispatch another Attempt for one failed Run snapshot."""
@@ -72,7 +72,7 @@ def retry_run(
 def resume_run(
     run_id: str,
     application: ApplicationDependency,
-    dispatcher: RunDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     """Create and dispatch another Attempt for one interrupted Run snapshot."""
@@ -90,7 +90,7 @@ def resume_run(
 def run_again(
     run_id: str,
     application: ApplicationDependency,
-    dispatcher: RunDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     """Create a new Run from one completed immutable historical snapshot."""
@@ -115,7 +115,7 @@ def delete_run(
 
 def _dispatch_submission(
     submission: RunSubmissionView,
-    dispatcher: RunDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
 ) -> dict[str, object]:
     dispatcher.dispatch(submission)
     return {

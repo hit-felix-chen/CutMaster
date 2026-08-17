@@ -111,7 +111,13 @@ function LiveLogDialog({
   const path = query.data?.log.path ?? initialPath
   const hasOutput = Boolean(query.data?.log.exists || entries.length > 0)
   return (
-    <div className="dialog-layer execution-log-layer">
+    <div
+      className="dialog-layer execution-log-layer"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose()
+      }}
+    >
       <section
         className="execution-log-dialog"
         role="dialog"

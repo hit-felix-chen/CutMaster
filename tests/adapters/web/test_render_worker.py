@@ -7,8 +7,6 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
-from cutmaster.adapters.web.render_worker import execute_render_job
-from cutmaster.adapters.web.run_worker import execute_run_job
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import (
     ClaimJobCommand,
@@ -28,6 +26,10 @@ from cutmaster.application.renders import (
 )
 from cutmaster.application.renders.service import RendersService
 from cutmaster.application.runs import CompleteRunCommand, CreateRunCommand
+from cutmaster.application.workflow.job_execution import (
+    execute_render_job,
+    execute_run_job,
+)
 from cutmaster.domain.attempts import AttemptStatus
 from cutmaster.domain.renders import RenderVariantStatus
 from cutmaster.workflow.contracts.render_plan import RenderPlan
@@ -434,7 +436,7 @@ def test_render_variant_http_contract_lists_verifies_downloads_and_deletes(
     project, edit, _plan = _ready_edit(application, tmp_path)
     dispatcher = CapturingRenderDispatcher()
     with TestClient(
-        create_app(application=application, render_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         created = client.post(
             f"/api/frozen-edits/{edit.edit_id}/render-variants",
@@ -555,7 +557,7 @@ def test_render_recovery_http_contract_and_integrity_failure_are_durable(
     project, edit, _plan = _ready_edit(application, tmp_path)
     dispatcher = CapturingRenderDispatcher()
     with TestClient(
-        create_app(application=application, render_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         created = client.post(
             f"/api/frozen-edits/{edit.edit_id}/render-variants",

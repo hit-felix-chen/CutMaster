@@ -16,14 +16,12 @@ class PromptFailureCode(StrEnum):
     PLANNERS_STAGE_ATTEMPT_INFEASIBLE = "planners_stage_attempt_infeasible"
     RESPONSE_VALIDATION_FAILED = "response_validation_failed"
     CANDIDATE_RETRIEVAL_FAILED = "candidate_retrieval_failed"
-    INSUFFICIENT_NON_OVERLAPPING_CAPACITY = (
-        "insufficient_non_overlapping_capacity"
-    )
+    SOURCE_SEGMENTS_TOO_SHORT = "source_segments_too_short"
     VISUALLY_STATIC = "visually_static"
     REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED = (
         "required_subject_not_visually_confirmed"
     )
-    OVERLAPPING_RANGE = "overlapping_range"
+    DUPLICATE_CANDIDATE_RANGE = "duplicate_candidate_range"
     NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS = (
         "no_candidate_passed_visual_diagnostics"
     )
@@ -147,24 +145,22 @@ PROMPT_FAILURE_CATALOG: dict[
             "could be accepted: {error_message}"
         ),
         repair_requirement=(
-            "Return the required number of valid, fixed-duration, non-overlapping "
-            "candidate timestamps inside the supplied source Segments and outside all "
-            "excluded ranges."
+            "Return the required number of valid, fixed-duration candidate timestamps "
+            "inside the supplied source Segments. Candidate alternatives may overlap "
+            "but must not duplicate an excluded timestamp exactly."
         ),
     ),
-    PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY: (
+    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT: (
         PromptFailureDefinition(
             diagnosis=(
-                "The current source Segment assignment for {slot_id} can fit only "
-                "{available_capacity} distinct non-overlapping clips of "
-                "{planned_duration_sec} seconds, but {candidates_needed} candidates "
-                "are required."
+                "The longest available source Segment for {slot_id} is "
+                "{longest_segment_duration_sec} seconds, which is not longer than the "
+                "planned clip duration of {planned_duration_sec} seconds."
             ),
             repair_requirement=(
-                "Assign a different, longer, or broader chronological Segment range "
-                "that can fit at least {candidates_needed} distinct non-overlapping "
-                "clips of {planned_duration_sec} seconds. Do not repeat the failed "
-                "source_segment_ids assignment."
+                "Assign a different source Segment whose duration is longer than "
+                "{planned_duration_sec} seconds. Only one complete clip must fit; "
+                "overlapping alternative candidate windows are allowed."
             ),
         )
     ),
@@ -194,14 +190,14 @@ PROMPT_FAILURE_CATALOG: dict[
             ),
         )
     ),
-    PromptFailureCode.OVERLAPPING_RANGE: PromptFailureDefinition(
+    PromptFailureCode.DUPLICATE_CANDIDATE_RANGE: PromptFailureDefinition(
         diagnosis=(
-            "Candidate {candidate_id} at {timestamp} overlaps a previously accepted or "
-            "rejected source range for {slot_id}, so it is not a distinct candidate."
+            "Candidate {candidate_id} exactly duplicates a previously accepted or "
+            "rejected timestamp {timestamp} for {slot_id}."
         ),
         repair_requirement=(
-            "Return a timestamp that is fully outside every excluded range while "
-            "preserving the exact planned clip duration."
+            "Shift the candidate to a different timestamp while preserving the exact "
+            "planned clip duration. Partial overlap with another alternative is allowed."
         ),
     ),
     PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS: (
@@ -225,9 +221,9 @@ PROMPT_FAILURE_CATALOG: dict[
                 "than required. The per-Slot deficits are {shortages}."
             ),
             repair_requirement=(
-                "Redesign every deficient Slot with different source evidence and enough "
-                "non-overlapping capacity, then retrieve and visually validate the "
-                "missing candidates."
+                "Redesign every deficient Slot with different source evidence and at "
+                "least one Segment longer than the planned clip, then retrieve and "
+                "visually validate the missing candidates."
             ),
         )
     ),

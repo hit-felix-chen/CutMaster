@@ -29,9 +29,11 @@ dedicated-root ownership marker before destructive storage operations.
 
 Artifact ownership is explicit rather than inferred from path containment. A
 managed use case creates a Managed Artifact Reference from an owning entity ID;
-an arbitrary CLI path cannot become one. With no explicit CLI output path,
-CutMaster allocates a non-project Direct Workflow Bundle under `direct/`; an
-explicit path must be outside the Data Root and remains external.
+an arbitrary adapter path cannot become one. CLI and Benchmark invoke the same
+managed Application workflow as Web, so their canonical results are owned by
+Material, Project, Run, Frozen Edit, Render Variant, or Attempt identities.
+Benchmark may copy validated receipt artifacts to its caller-owned Run
+directory, but those copies are exports rather than canonical references.
 
 RenderPlan follows the same rule: it persists Material IDs and expected
 fingerprints but no absolute media paths or mtimes. The Application resolves
@@ -39,8 +41,7 @@ runtime bindings under Material leases for each render. This new portable plan
 schema is v2. Refactored rendering rejects v1 absolute-path plans as unsupported
 and does not migrate, rewrite, or delete them.
 
-A Direct Artifact Manifest is a different boundary: it indexes files inside one
-Direct Workflow Bundle by stable logical key and bundle-root-relative path. It
-does not create a Managed Artifact Reference, confer product ownership, or point
-into the Material Catalog or managed Project history. Its schema is defined by
-[ADR 0020](0020-publish-a-versioned-direct-artifact-manifest.md).
+The managed execution receipt exposes stable logical keys and normalized paths
+relative to the Application Data Root. Adapters validate those references
+before copying or presenting artifacts; the receipt never confers ownership on
+an arbitrary external directory.

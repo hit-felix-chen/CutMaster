@@ -1,4 +1,4 @@
-"""Durable FIFO supervisor for every managed local Web job."""
+"""Durable FIFO supervisor for every managed local CutMaster job."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class ManagedProcess(Protocol):
 
 
 class JobSupervisor(Protocol):
-    """Lifecycle-aware durable queue consumer used by the Web adapter."""
+    """Lifecycle-aware durable queue consumer shared by inbound adapters."""
 
     def dispatch(self, submission: object) -> None: ...
 
@@ -49,9 +49,9 @@ ProcessFactory = Callable[..., ManagedProcess]
 Clock = Callable[[], datetime]
 
 _WORKER_MODULES = {
-    "material_analysis": "cutmaster.adapters.web.material_worker",
-    "aster_planning": "cutmaster.adapters.web.run_worker",
-    "rendering": "cutmaster.adapters.web.render_worker",
+    "material_analysis": "cutmaster.adapters.worker.main",
+    "aster_planning": "cutmaster.adapters.worker.main",
+    "rendering": "cutmaster.adapters.worker.main",
 }
 
 
@@ -117,7 +117,7 @@ class LocalJobSupervisor:
         self._orphan_audit_interval_sec = float(orphan_audit_interval_sec)
         self._process_factory = process_factory
         self._clock = clock
-        self._worker_id = f"web-supervisor-{os.getpid()}-{uuid4()}"
+        self._worker_id = f"worker-supervisor-{os.getpid()}-{uuid4()}"
         self._lock = RLock()
         self._wake = Event()
         self._shutdown: Event | None = None

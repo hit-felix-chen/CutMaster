@@ -127,7 +127,9 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
                     "material_reused": False,
                     "analysis_reused": False,
                     "model_usage_summary": {},
-                    "model_usage_cumulative_summary": {},
+                    "model_usage_cumulative_summary": {
+                        "total_cost_yuan": 0.123456,
+                    },
                 }
             ),
             encoding="utf-8",
@@ -210,6 +212,7 @@ def test_material_cards_are_searchable_sorted_and_contain_real_metadata(
     assert detail.json()["duration_sec"] == 120.5
     assert detail.json()["reference_count"] == 0
     assert detail.json()["analysis_available"] is True
+    assert detail.json()["analysis_cost_yuan"] == 0.123456
     assert detail.json()["source"] == {
         "filename": "Feature Film.mp4",
         "size_bytes": 5,

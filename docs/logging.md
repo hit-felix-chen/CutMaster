@@ -42,7 +42,13 @@ TIMESTAMP | LEVEL | COMPONENT | EVENT | key=value ... | message
 
 ```text
 cutmaster
-application.direct
+application.workflow
+application.materials
+application.runs
+application.renders
+application.jobs
+worker
+web
 analyser
 dialogue
 dialogue_audio
@@ -129,9 +135,11 @@ prompt_chars
 
 - `cutmaster.log`：使用本规范的结构化运行日志，文件级别为 `DEBUG`。
 - 终端：使用同一格式，默认从 `INFO` 开始。
-- `infrastructure/observability/progress.py` 的 `tqdm` 进度条：只输出到
-  终端/stdout；不写入 `cutmaster.log`。
-- benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，因此可以包含日志与进度条。
+- `infrastructure/observability/progress.py` 的 `tqdm` 进度条：只在交互式
+  终端输出到 stdout；非 TTY 的 Managed Worker 不输出进度刷新，也不写入
+  Job 日志或 `cutmaster.log`。
+- benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，可以包含结构化日志与
+  第三方原始输出；CutMaster 内置 `tqdm` 在该非 TTY 通道中保持关闭。
 - `analysis_history.json`、`planners_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
 - `planners_calls.json`：按任务和调用组织 Planners 阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
 - `shot_annotations/`：按 Segment 保存可断点复用的有序 Shot 结构化标注数组。
@@ -154,4 +162,9 @@ log_event(
 )
 ```
 
-禁止在业务模块中直接调用或配置 Loguru。日志 sink 只由 CLI 通过 `configure_logging()` 初始化。
+禁止在业务模块中直接调用或配置 Loguru。日志 sink 只在进程边界初始化：
+需要独立文件的入口使用 `configure_logging()`；Managed Worker 使用
+`configure_console_logging()` 输出无 ANSI 的结构化 stderr，由 Supervisor
+单次持久化到对应 Job 日志。Application、Domain 和 Workflow 不感知当前入口
+类型。Benchmark Adapter 作为平级入口，只捕获自己的 Worker 进程输出，不调用
+CLI 来配置日志。

@@ -9,13 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
-from cutmaster.adapters.web.run_worker import (
-    ASTERJobProgressReporter,
-    _plan_run,
-    execute_run_job,
-)
 from cutmaster.application import CutMasterApplication
-from cutmaster.application.direct import DirectService
+from cutmaster.application.runs import (
+    CreateRunCommand,
+    RunPlanningExecutor,
+    RunSubmissionView,
+)
+from cutmaster.application.workflow.job_execution import execute_run_job
+from cutmaster.application.workflow.run_job import ASTERJobProgressReporter, _plan_run
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     FailAttemptCommand,
@@ -28,7 +29,6 @@ from cutmaster.application.projects import (
     SetProjectMaterialsCommand,
 )
 from cutmaster.application.renders import CreateRenderVariantCommand
-from cutmaster.application.runs import CreateRunCommand, RunSubmissionView
 from cutmaster.domain.runs import RunStatus
 from cutmaster.workflow.contracts.render_plan import RenderPlan
 from cutmaster.workflow.contracts.checkpoints import (
@@ -165,7 +165,7 @@ def fake_planner(_application, run, workspace: Path) -> Path:
     return path
 
 
-def test_managed_run_passes_snapshotted_video_title_to_direct_plan(
+def test_managed_run_passes_snapshot_to_application_planning_executor(
     application: CutMasterApplication,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -183,16 +183,19 @@ def test_managed_run_passes_snapshotted_video_title_to_direct_plan(
     class PlannerCalled(Exception):
         pass
 
-    def capture_plan(_service: DirectService, command: object) -> None:
+    def capture_plan(_executor: RunPlanningExecutor, command: object) -> None:
         observed["command"] = command
         raise PlannerCalled
 
-    monkeypatch.setattr(DirectService, "plan", capture_plan)
+    monkeypatch.setattr(RunPlanningExecutor, "execute", capture_plan)
 
     with pytest.raises(PlannerCalled):
         _plan_run(application, submission.run, tmp_path / "managed-plan")
 
-    assert getattr(observed["command"], "video_title") == "La La Land"
+    command = observed["command"]
+    assert getattr(command, "run") is submission.run
+    assert getattr(command, "run").planning_options["video_title"] == "La La Land"
+    assert getattr(command, "workspace") == (tmp_path / "managed-plan").resolve()
 
 
 def usage_summary(
@@ -275,7 +278,7 @@ def test_start_run_dispatches_real_job_and_worker_creates_frozen_edit(
     project = prepared_project(application, tmp_path)
     dispatcher = CapturingDispatcher()
     with TestClient(
-        create_app(application=application, run_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         response = client.post(
             f"/api/projects/{project.project_id}/runs",
@@ -335,7 +338,7 @@ def test_run_worker_persists_current_attempt_usage_and_projects_privately(
     )
 
     with TestClient(
-        create_app(application=application, run_dispatcher=CapturingDispatcher())
+        create_app(application=application, job_dispatcher=CapturingDispatcher())
     ) as client:
         detail = client.get(f"/api/runs/{submission.run.run_id}")
         run_list = client.get(f"/api/projects/{project.project_id}/runs")
@@ -512,7 +515,7 @@ def test_running_run_projections_include_current_execution_and_progress(
     application.jobs.heartbeat(HeartbeatJobCommand(submission.job.job_id, progress))
 
     with TestClient(
-        create_app(application=application, run_dispatcher=CapturingDispatcher())
+        create_app(application=application, job_dispatcher=CapturingDispatcher())
     ) as client:
         run_list = client.get(f"/api/projects/{project.project_id}/runs")
         detail = client.get(f"/api/runs/{submission.run.run_id}")
@@ -561,7 +564,7 @@ def test_project_card_projects_selected_material_names_and_latest_attempt_state(
     assert claimed is not None
 
     with TestClient(
-        create_app(application=application, run_dispatcher=CapturingDispatcher())
+        create_app(application=application, job_dispatcher=CapturingDispatcher())
     ) as client:
         response = client.get("/api/projects")
 
@@ -596,7 +599,7 @@ def test_project_run_list_does_not_access_materials(
         TestClient(
             create_app(
                 application=application,
-                run_dispatcher=CapturingDispatcher(),
+                job_dispatcher=CapturingDispatcher(),
             )
         ) as client,
     ):
@@ -734,7 +737,7 @@ def test_start_run_rejects_unready_material_and_target_longer_than_music(
     dispatcher = CapturingDispatcher()
 
     with TestClient(
-        create_app(application=application, run_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         not_ready = client.post(
             f"/api/projects/{unready.project_id}/runs",
@@ -778,7 +781,7 @@ def test_retry_replays_and_resume_without_checkpoint_is_rejected(
     retry_command = command_id()
 
     with TestClient(
-        create_app(application=application, run_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         retried = client.post(
             f"/api/runs/{failed_run.run.run_id}/retry",
@@ -885,7 +888,7 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
     dispatcher = CapturingDispatcher()
 
     with TestClient(
-        create_app(application=application, run_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         resumed = client.post(
             f"/api/runs/{interrupted.run.run_id}/resume",
@@ -941,7 +944,7 @@ def test_run_again_copies_historical_snapshot_not_current_project_setup(
     request_id = command_id()
 
     with TestClient(
-        create_app(application=application, run_dispatcher=dispatcher)
+        create_app(application=application, job_dispatcher=dispatcher)
     ) as client:
         repeated = client.post(
             f"/api/runs/{source.run.run_id}/run-again",
@@ -1035,7 +1038,7 @@ def test_delete_run_removes_only_owned_artifacts_and_job_logs(
     request_id = command_id()
 
     with TestClient(
-        create_app(application=application, run_dispatcher=CapturingDispatcher())
+        create_app(application=application, job_dispatcher=CapturingDispatcher())
     ) as client:
         deleted = client.delete(
             f"/api/runs/{submission.run.run_id}",
@@ -1091,7 +1094,7 @@ def test_delete_run_unlinks_exact_owner_symlink_without_following_it(
     run_directory.symlink_to(outside, target_is_directory=True)
 
     with TestClient(
-        create_app(application=application, run_dispatcher=CapturingDispatcher())
+        create_app(application=application, job_dispatcher=CapturingDispatcher())
     ) as client:
         response = client.delete(
             f"/api/runs/{submission.run.run_id}",

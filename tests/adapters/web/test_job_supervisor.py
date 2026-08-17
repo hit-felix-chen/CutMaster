@@ -13,8 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
-from cutmaster.adapters.web.job_supervisor import LocalJobSupervisor
-from cutmaster.adapters.web.worker_lease import adopt_supervisor_lease
+from cutmaster.adapters.worker.lease import adopt_supervisor_lease
+from cutmaster.adapters.worker.supervisor import LocalJobSupervisor
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import (
     ClaimJobCommand,
@@ -278,7 +278,7 @@ def test_worker_can_only_adopt_the_exact_supervisor_lease(
         worker_kind="material",
     )
     assert adopted is not None
-    assert adopted.job.worker_id == f"web-material-{os.getpid()}"
+    assert adopted.job.worker_id == f"worker-material-{os.getpid()}"
     assert adopted.job.process_id == os.getpid()
     with pytest.raises(ManagedStateConflict):
         adopt_supervisor_lease(
@@ -478,9 +478,9 @@ def test_one_supervisor_dispatches_all_three_durable_operation_types(
             command[command.index("--job-id") + 1] for command, _ in factory.calls
         ]
         assert modules == [
-            "cutmaster.adapters.web.material_worker",
-            "cutmaster.adapters.web.run_worker",
-            "cutmaster.adapters.web.render_worker",
+            "cutmaster.adapters.worker.main",
+            "cutmaster.adapters.worker.main",
+            "cutmaster.adapters.worker.main",
         ]
         assert job_ids == [str(job_id) for job_id in expected_jobs]
         for _command, kwargs in factory.calls:
@@ -515,9 +515,7 @@ def test_fastapi_lifespan_is_the_only_supervisor_start_boundary(
     supervisor = RecordingSupervisor()
     app = create_app(application=application, job_supervisor=supervisor)
     assert supervisor.started == 0
-    assert app.state.cutmaster_material_dispatcher is supervisor
-    assert app.state.cutmaster_run_dispatcher is supervisor
-    assert app.state.cutmaster_render_dispatcher is supervisor
+    assert app.state.cutmaster_job_dispatcher is supervisor
 
     with TestClient(app) as client:
         assert client.get("/api/health").status_code == 200
@@ -527,7 +525,29 @@ def test_fastapi_lifespan_is_the_only_supervisor_start_boundary(
     assert supervisor.stopped == 1
 
 
-def test_default_app_factory_keeps_managed_state_lazy_until_lifespan(
+def test_app_factory_rejects_two_job_dispatch_boundaries(
+    application: CutMasterApplication,
+) -> None:
+    class Dispatcher:
+        def dispatch(self, _submission: object) -> None:
+            pass
+
+    class Supervisor(Dispatcher):
+        def start(self) -> None:
+            pass
+
+        def stop(self, *, timeout_sec: float = 5.0) -> None:
+            pass
+
+    with pytest.raises(ValueError, match="cannot be mixed"):
+        create_app(
+            application=application,
+            job_dispatcher=Dispatcher(),
+            job_supervisor=Supervisor(),
+        )
+
+
+def test_default_app_factory_uses_a_dormant_dispatcher_without_opening_state(
     application: CutMasterApplication,
 ) -> None:
     database = application.settings.effective_configuration.data_root / "cutmaster.db"
@@ -536,6 +556,5 @@ def test_default_app_factory_keeps_managed_state_lazy_until_lifespan(
     app = create_app(application=application)
 
     assert not database.exists()
-    supervisor = app.state.cutmaster_job_supervisor
-    assert isinstance(supervisor, LocalJobSupervisor)
-    assert not supervisor.is_running
+    app.state.cutmaster_job_dispatcher.dispatch(object())
+    assert not database.exists()

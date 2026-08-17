@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
-from cutmaster.adapters.web import server
+from cutmaster.bootstrap import local_web as server
 from cutmaster.application import CutMasterApplication
 
 
@@ -42,3 +42,45 @@ def test_serve_fails_before_starting_when_web_assets_are_missing(
 
     with pytest.raises(RuntimeError, match="npm --prefix web"):
         server.serve("config.toml", open_browser=False)
+
+
+def test_local_web_bootstrap_wires_peer_adapters_around_one_application(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    application = object()
+    supervisor = object()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        server,
+        "CutMasterApplication",
+        type(
+            "ApplicationFactory",
+            (),
+            {"open": staticmethod(lambda _path: application)},
+        ),
+    )
+
+    def create_supervisor(exact_application):
+        assert exact_application is application
+        return supervisor
+
+    monkeypatch.setattr(server, "LocalJobSupervisor", create_supervisor)
+
+    def create(**kwargs):
+        observed.update(kwargs)
+        return "fastapi-app"
+
+    monkeypatch.setattr(server, "create_app", create)
+    spa = tmp_path / "dist"
+
+    assert (
+        server.create_local_web_app("config.toml", spa_directory=spa)
+        == "fastapi-app"
+    )
+    assert observed == {
+        "application": application,
+        "spa_directory": spa,
+        "job_supervisor": supervisor,
+    }

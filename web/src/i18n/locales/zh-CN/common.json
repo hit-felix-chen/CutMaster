@@ -112,6 +112,8 @@
     "frozenEdits": "Frozen Edits",
     "asterWorking": "ASTER 正在规划剪辑",
     "asterWorkingBody": "页面会自动更新运行状态，完成后将生成初始 Frozen Edit。",
+    "runningDuration": "运行时长",
+    "runDuration": "运行时间",
     "retryRun": "重试",
     "resumeRun": "继续",
     "runAgain": "再次运行",
@@ -308,6 +310,7 @@
     "fullAnalysis": "查看完整分析",
     "sourceMetadata": "源素材信息",
     "analysisAttempts": "分析尝试",
+    "apiCost": "API 花费",
     "analysisStates": {
       "preparing": "正在准备分析工作区",
       "analysing": "Material Analyst 正在分析源素材",
@@ -533,7 +536,6 @@
     "dataRoot": "应用数据根目录",
     "openInFinder": "在 Finder 中打开",
     "openedInFinder": "已在 Finder 中打开应用数据根目录。",
-    "directBundles": "Direct 工作流包",
     "restart": "保存后需要重启应用才能应用新设置。",
     "readOnly": "这里显示当前真实生效配置。",
     "localApplication": "本地应用",
@@ -625,7 +627,6 @@
       "database": "数据库",
       "materials": "素材",
       "projects": "项目",
-      "direct": "Direct 工作流包",
       "logs": "日志"
     }
   },

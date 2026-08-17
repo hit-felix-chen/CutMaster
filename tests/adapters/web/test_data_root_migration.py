@@ -44,7 +44,6 @@ def test_migration_http_contract_is_durable_and_replays_after_copy(
     supervisor = RecordingMigrationSupervisor()
     web = create_app(
         application=application,
-        enable_job_supervisor=False,
         data_root_migration_supervisor=supervisor,
     )
     destination = tmp_path / "http-destination"
@@ -100,7 +99,6 @@ def test_migration_preflight_and_problem_keep_typed_blockers(
     supervisor = RecordingMigrationSupervisor()
     web = create_app(
         application=application,
-        enable_job_supervisor=False,
         data_root_migration_supervisor=supervisor,
     )
     source = application.settings.effective_configuration.data_root
@@ -139,7 +137,6 @@ def test_cancel_endpoint_is_idempotent_and_worker_rolls_back_to_cancelled(
     supervisor = RecordingMigrationSupervisor()
     web = create_app(
         application=application,
-        enable_job_supervisor=False,
         data_root_migration_supervisor=supervisor,
     )
     destination = tmp_path / "cancel-endpoint-destination"
@@ -190,7 +187,6 @@ def test_maintenance_and_restart_block_business_reads_before_handler(
     supervisor = RecordingMigrationSupervisor()
     web = create_app(
         application=application,
-        enable_job_supervisor=False,
         data_root_migration_supervisor=supervisor,
     )
     entered: list[bool] = []
@@ -257,7 +253,6 @@ def test_migration_failure_redacts_internal_error_and_only_projects_stable_code(
 
     web = create_app(
         application=application,
-        enable_job_supervisor=False,
         data_root_migration_supervisor=RecordingMigrationSupervisor(),
     )
     with TestClient(web) as client:

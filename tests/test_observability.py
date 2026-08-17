@@ -8,8 +8,11 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
+from cutmaster.domain.ids import JobId
+from cutmaster.infrastructure.observability.job_logs import JobLogReader
 from cutmaster.infrastructure.observability.logging import (
     VALID_COMPONENTS,
+    configure_console_logging,
     configure_logging,
     error_summary,
     log_event,
@@ -27,6 +30,25 @@ def test_dialogue_anchor_stage_is_part_of_log_taxonomy() -> None:
         "stage.start",
         "Dialogue anchor selection started",
     )
+
+
+@pytest.mark.parametrize(
+    "component",
+    (
+        "application.workflow",
+        "application.materials",
+        "application.runs",
+        "application.renders",
+        "application.jobs",
+        "worker",
+        "web",
+    ),
+)
+def test_adapter_and_application_components_are_part_of_log_taxonomy(
+    component: str,
+) -> None:
+    assert component in VALID_COMPONENTS
+    log_event("INFO", component, "stage.progress", "Boundary event")
 
 
 def test_structured_log_format_and_field_normalization(tmp_path: Path) -> None:
@@ -60,6 +82,48 @@ def test_structured_log_format_and_field_normalization(tmp_path: Path) -> None:
     )
     assert line.endswith("| Shot detection completed")
     assert "\n" not in line
+
+
+def test_console_only_log_is_single_and_parseable_as_a_job_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", console)
+    try:
+        configure_console_logging(console_color=False)
+        log_event(
+            "WARNING",
+            "model",
+            "model.retry",
+            "Model request will retry",
+            attempt=2,
+            operation="slot_retrieval",
+        )
+        lines = console.getvalue().splitlines(keepends=True)
+    finally:
+        logger.remove()
+        logger.configure(patcher=None)
+        logger.add(sys.__stderr__)
+
+    assert len(lines) == 1
+    assert "\x1b[" not in lines[0]
+
+    data_root = tmp_path / "data-root"
+    job_id = JobId.new()
+    path = data_root / "logs" / "jobs" / f"{job_id}.log"
+    path.parent.mkdir(parents=True)
+    path.write_text(lines[0], encoding="utf-8")
+
+    page = JobLogReader(data_root).tail(job_id, limit=1)
+
+    assert len(page.entries) == 1
+    entry = page.entries[0]
+    assert entry.level == "WARNING"
+    assert entry.component == "model"
+    assert entry.event == "model.retry"
+    assert entry.fields == "attempt=2 operation=slot_retrieval"
+    assert entry.message == "Model request will retry"
 
 
 def test_error_summary_redacts_credentials_and_is_bounded() -> None:

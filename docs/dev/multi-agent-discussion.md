@@ -17,9 +17,29 @@ ASTER = Arrangement Architect
 ```
 
 M 负责建立与具体剪辑任务无关的 Material Memory；ASTER 是共享同一规划状态的
-五智能体剪辑团队。当前完整工作流由 `CutMasterApplication.direct`
-启动，Application Layer 也为 `Analyser`、`Planners`、`Renderer` 提供
-独立执行入口。ASTER 内部协作由 `ASTERTeam` 编排。
+五智能体剪辑团队。当前完整工作流由
+`CutMasterApplication.workflows` 启动，公开契约位于
+`cutmaster.application.workflow`；Application Layer 同时拥有
+Material/Run/Render executors 与 durable Job executor。ASTER 内部协作由
+`ASTERTeam` 编排。
+
+CLI、FastAPI Web、Worker 与 Mashup-Benchmark Adapter 是四个平级入站
+Adapter：它们分别转换终端、HTTP/SSE、durable Job 进程和评测任务协议，但都只
+调用 Application Layer，彼此不互相调用，也不直接构造 Agent、Tool、Repository
+或产物目录。
+
+```text
+CLI Adapter -----------> CutMasterApplication.workflows
+Benchmark Adapter -----> CutMasterApplication.workflows
+FastAPI Web Adapter ---> CutMasterApplication grouped use cases
+Worker Adapter --------> ManagedJobExecutor
+                                   │
+                                   └── Application Layer
+                                       ├── ManagedWorkflowCoordinator
+                                       ├── ManagedMaterialAnalysisExecutor
+                                       ├── RunPlanningExecutor
+                                       └── ManagedRenderExecutor
+```
 
 ## 设计目标
 
@@ -118,7 +138,10 @@ Story Editor 产生的固定候选直接进入 Candidate Space。若 Arrangement
 Timeline Scout 负责：
 
 - 沿原片时间线为非 Anchor Slot 搜索多个固定时长候选；
-- 根据 Segment 容量逐轮扩大搜索范围；
+- 指定 Segment 最多检索四轮；不足时仅扩展一次到前、中、后三个 Segment，
+  超额检索候选缺口的三倍并按统一单镜头分数选优补齐；
+- 只要求至少一个 Segment 长于目标片段；候选作为互斥备选可以重叠和小幅平移，
+  但不能完全重复同一时间戳；
 - 用 VLM 检查人物身份、可见内容和 Slot 相关性；
 - 直接测量候选运动强度并剔除静态画面；
 - 保留拒绝证据，避免重复搜索失败窗口；

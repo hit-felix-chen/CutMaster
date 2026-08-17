@@ -22,10 +22,8 @@ function storage(revealSupported: boolean) {
       { name: 'database', file_count: 1, size_bytes: 2048 },
       { name: 'materials', file_count: 0, size_bytes: 0 },
       { name: 'projects', file_count: 0, size_bytes: 0 },
-      { name: 'direct', file_count: 0, size_bytes: 0 },
       { name: 'logs', file_count: 0, size_bytes: 0 },
     ],
-    direct_bundle_count: 0,
     total_size_bytes: 2048,
     reveal_supported: revealSupported,
   }

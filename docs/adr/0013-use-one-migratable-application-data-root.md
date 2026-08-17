@@ -8,9 +8,9 @@ defaulting to `CutMaster/.cutmaster/`, while allowing the user to choose another
 local directory. The path changes through a guarded Data Root Migration that requires no active
 Attempt, pauses queued-job dispatch, copies and verifies the complete canonical
 managed database and filesystem state, and atomically switches only after
-success. Direct Workflow Bundles stored under `direct/` are application-owned
-and will move with the root even though they are not project history. Historical and
-external content such as `.cutmaster/materials-backup/` is excluded. Keeping
+success. Historical and external content such as
+`.cutmaster/materials-backup/` and pre-refactor workflow-output directories is
+excluded and left untouched. Keeping
 one root avoids split-brain project and Material state; preserving the original
 as authoritative until verification prevents a failed move from making
 existing work unavailable.
@@ -30,6 +30,5 @@ migration. Cancellation or failure removes only manifest-owned staging files,
 keeps unknown external entries, leaves the original pointer authoritative, and
 restores dispatch.
 
-Direct Workflow Bundles have no automatic retention policy. Settings reports
-their count and size. Bulk deletion with two-click confirmation and active-lock
-skipping is Proposed.
+All current workflow artifacts belong to managed Materials, Projects, Runs,
+Frozen Edits, Render Variants, Attempts, or logs and move with the root.

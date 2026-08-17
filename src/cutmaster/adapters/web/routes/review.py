@@ -18,7 +18,7 @@ from starlette.types import Receive, Scope, Send
 from cutmaster.adapters.web.dependencies import (
     ApplicationDependency,
     IdempotencyKey,
-    RenderDispatcherDependency,
+    JobDispatcherDependency,
 )
 from cutmaster.adapters.web.presenters import (
     frozen_edit_review_view,
@@ -240,7 +240,7 @@ def save_guided_revision(
     edit_id: str,
     payload: SaveRevisionPayload,
     application: ApplicationDependency,
-    dispatcher: RenderDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     source_id = FrozenEditId.parse(edit_id)
@@ -270,7 +270,7 @@ def create_render_variant(
     body: CreateRenderVariantPayload,
     response: Response,
     application: ApplicationDependency,
-    dispatcher: RenderDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     submission = application.renders.create(
@@ -368,7 +368,7 @@ def get_render_variant(
 def retry_render_variant(
     render_variant_id: str,
     application: ApplicationDependency,
-    dispatcher: RenderDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     return _recover(
@@ -387,7 +387,7 @@ def retry_render_variant(
 def resume_render_variant(
     render_variant_id: str,
     application: ApplicationDependency,
-    dispatcher: RenderDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     return _recover(
@@ -406,7 +406,7 @@ def resume_render_variant(
 def render_again(
     render_variant_id: str,
     application: ApplicationDependency,
-    dispatcher: RenderDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
     return _recover(

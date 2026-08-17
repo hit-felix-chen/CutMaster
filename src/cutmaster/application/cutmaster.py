@@ -6,11 +6,10 @@ import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from threading import RLock
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from dotenv import load_dotenv
 
-from cutmaster.application.direct.service import DirectService
 from cutmaster.application.jobs.service import JobsService
 from cutmaster.application.materials.service import MaterialsService
 from cutmaster.application.projects.service import ProjectsService
@@ -25,6 +24,9 @@ from cutmaster.domain.ids import MaterialId
 from cutmaster.infrastructure.storage.local.data_root_coordination import (
     LocalDataRootCoordinator,
 )
+
+if TYPE_CHECKING:
+    from cutmaster.application.workflow.coordinator import ManagedWorkflowCoordinator
 
 _Service = TypeVar("_Service")
 
@@ -111,17 +113,6 @@ class CutMasterApplication:
             return cast(_Service, service)
 
     @property
-    def direct(self) -> DirectService:
-        return self._get_service(
-            "direct",
-            lambda: DirectService(
-                self._effective_configuration,
-                self.materials,
-                self._data_root_coordinator,
-            ),
-        )
-
-    @property
     def materials(self) -> MaterialsService:
         return self._get_service(
             "materials",
@@ -185,6 +176,19 @@ class CutMasterApplication:
                 process_environment_names=self._process_environment_names,
                 data_root_coordinator=self._data_root_coordinator,
             ),
+        )
+
+    @property
+    def workflows(self) -> ManagedWorkflowCoordinator:
+        """Return the managed workflow boundary shared by every adapter."""
+
+        from cutmaster.application.workflow.coordinator import (
+            ManagedWorkflowCoordinator,
+        )
+
+        return self._get_service(
+            "workflows",
+            lambda: ManagedWorkflowCoordinator(self),
         )
 
     @property

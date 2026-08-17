@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cutmaster.contracts import ExecuteManagedWorkflowCommand
+from cutmaster.application.workflow import ExecuteManagedWorkflowCommand
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +106,14 @@ def test_removed_legacy_workflow_modules_are_not_importable() -> None:
         "cutmaster.renderer",
         "cutmaster.orchestrator",
         "cutmaster.runtime",
+        "cutmaster.adapters.local_workflow",
+        "cutmaster.adapters.web.material_supervisor",
+        "cutmaster.adapters.web.render_supervisor",
+        "cutmaster.adapters.web.run_supervisor",
+        "cutmaster.adapters.web.server",
+        "cutmaster.contracts",
+        "cutmaster.contracts.workflow",
+        "cutmaster.application.direct",
     ):
         try:
             importlib.import_module(name)

@@ -3,6 +3,7 @@ import re
 import threading
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from cutmaster.configuration.schema import (
@@ -15,11 +16,12 @@ from cutmaster.workflow.prompting.failure_catalog import (
     build_prompt_failure,
 )
 from cutmaster.workflow.planners.timeline_scout import (
+    _candidate_motion,
     _candidate_segment_video_descriptions,
     _retrieval_segment_context,
     _validate_candidates,
     _validate_visual_grounding,
-    _window_capacity,
+    _usable_segment_count,
     retrieve_candidates,
 )
 from cutmaster.workflow.planners.revision_editor import review_and_patch
@@ -27,7 +29,7 @@ from cutmaster.workflow.planners.aster_team import ASTERTeam
 from cutmaster.workflow.planners.edit_composer import (
     NoFeasiblePathError,
     _pair_key,
-    _unary,
+    score_unary_candidate,
     path_to_script,
     select_paths,
     validate_chronological_path,
@@ -258,6 +260,36 @@ def test_slot_validation_and_accent_alignment() -> None:
     )
     assert aligned[0]["output_end_sec"] == 5.0
     assert sum(slot["planned_duration_sec"] for slot in aligned) == 8.0
+
+
+def test_slot_validation_requires_one_segment_longer_than_the_clip() -> None:
+    video_description = _video_description()
+    video_description["segments"][0]["time_range"]["end_sec"] = 5.0
+    raw = {
+        "slots": [
+            {
+                "narrative_role": "setup",
+                "content_description": "setup",
+                "target_emotion": "hopeful",
+                "target_emotional_intensity": 0.2,
+                "target_kinetic_energy": 0.2,
+                "desired_duration_sec": 5.0,
+                "continuity_from_previous": "opening",
+                "source_segment_ids": ["segment_0001"],
+                "required_visible_subjects": [],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="source Segment longer than"):
+        _validate_slots(
+            raw,
+            5.0,
+            5.0,
+            video_description,
+            set(),
+            set(),
+        )
 
 
 def test_slot_validation_requires_strictly_increasing_segment_ranges() -> None:
@@ -920,7 +952,7 @@ def test_current_slot_unary_and_pairwise_scoring_overlap(
     assert len(worker_ids) == 2
 
 
-def test_candidate_validation_requires_exact_duration_and_nonoverlap() -> None:
+def test_candidate_validation_requires_exact_duration_and_allows_overlap() -> None:
     slots = [_slots()[0] | {"planned_duration_sec": 5.0}]
     source_segments = {
         "slot_01": [
@@ -969,13 +1001,28 @@ def test_candidate_validation_requires_exact_duration_and_nonoverlap() -> None:
         **raw_item,
         "timestamp": "00:00:12,000-00:00:17,000",
     }
-    with pytest.raises(ValueError, match="overlap"):
+    overlapping = _validate_candidates(
+        {
+            "candidates": [
+                {
+                    "slot_id": "slot_01",
+                    "items": [raw_item, overlapping_item],
+                }
+            ]
+        },
+        slots,
+        source_segments,
+        2,
+    )
+    assert len(overlapping["slot_01"]) == 2
+
+    with pytest.raises(ValueError, match="duplicated"):
         _validate_candidates(
             {
                 "candidates": [
                     {
                         "slot_id": "slot_01",
-                        "items": [raw_item, overlapping_item],
+                        "items": [raw_item, raw_item],
                     }
                 ]
             },
@@ -1005,7 +1052,7 @@ def test_candidate_validation_requires_exact_duration_and_nonoverlap() -> None:
         )
 
 
-def test_fixed_duration_window_capacity_accounts_for_exclusions() -> None:
+def test_usable_segment_count_only_requires_one_complete_displaceable_window() -> None:
     segments = [
         {
             "segment_id": "segment_0001",
@@ -1014,12 +1061,53 @@ def test_fixed_duration_window_capacity_accounts_for_exclusions() -> None:
         }
     ]
 
-    assert _window_capacity(segments, 5.0, []) == 4
-    assert _window_capacity(
-        segments,
-        5.0,
-        ["00:00:05,000-00:00:10,000"],
-    ) == 3
+    assert _usable_segment_count(segments, 5.0) == 1
+    assert _usable_segment_count(segments, 20.0) == 0
+
+
+def test_candidate_motion_trims_one_transient_frame_difference() -> None:
+    class FakeMedia:
+        @staticmethod
+        def sample_frames(_sample_times):
+            frames = []
+            for index in range(20):
+                if index < 14:
+                    level = 0
+                elif index == 14:
+                    level = 6
+                else:
+                    level = 3
+                frames.append(np.full((90, 160, 3), level, dtype="uint8"))
+            return frames
+
+    score = _candidate_motion(FakeMedia(), 0.0, 4.0, 5.0)
+
+    assert score == pytest.approx(0.00363, abs=1e-5)
+
+
+def test_candidate_motion_keeps_sustained_low_motion() -> None:
+    class FakeMedia:
+        @staticmethod
+        def sample_frames(_sample_times):
+            return [np.full((90, 160, 3), index, dtype="uint8") for index in range(20)]
+
+    score = _candidate_motion(FakeMedia(), 0.0, 4.0, 5.0)
+
+    assert score == pytest.approx(1.0 / 255.0 / 0.18)
+
+
+def test_candidate_motion_does_not_trim_a_too_short_clip() -> None:
+    class FakeMedia:
+        @staticmethod
+        def sample_frames(_sample_times):
+            return [
+                np.full((90, 160, 3), level, dtype="uint8")
+                for level in (0, 1, 4)
+            ]
+
+    score = _candidate_motion(FakeMedia(), 0.0, 1.5, 2.0)
+
+    assert score == pytest.approx(2.0 / 255.0 / 0.18)
 
 
 def test_targeted_slot_replan_is_bounded_by_neighboring_fixed_slots() -> None:
@@ -1296,7 +1384,7 @@ def test_retrieval_context_expands_only_when_adjacent_scope_is_requested() -> No
     ] == ["segment_0001", "segment_0002", "segment_0003"]
 
 
-def test_candidate_retrieval_expands_without_calling_infeasible_round(
+def test_candidate_retrieval_allows_overlapping_alternatives_in_one_segment(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1328,9 +1416,9 @@ def test_candidate_retrieval_expands_without_calling_infeasible_round(
                             "salience": 0.7,
                         }
                         for timestamp in (
-                            "00:00:00,000-00:00:04,000",
                             "00:00:10,000-00:00:14,000",
-                            "00:00:20,000-00:00:24,000",
+                            "00:00:11,000-00:00:15,000",
+                            "00:00:12,000-00:00:16,000",
                         )
                     ],
                 }
@@ -1377,11 +1465,11 @@ def test_candidate_retrieval_expands_without_calling_infeasible_round(
         context,
     )
 
-    assert operations == ["Candidate retrieval round 4 slot slot_01"]
+    assert operations == ["Candidate retrieval round 1 slot slot_01"]
     assert len(pool["slot_01"]) == 3
 
 
-def test_candidate_retrieval_uses_four_planned_then_three_adjacent_rounds(
+def test_candidate_retrieval_uses_four_planned_then_one_adjacent_round(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1437,9 +1525,9 @@ def test_candidate_retrieval_uses_four_planned_then_three_adjacent_rounds(
 
     assert operations == [
         f"Candidate retrieval round {round_index} slot slot_01"
-        for round_index in range(1, 8)
+        for round_index in range(1, 6)
     ]
-    assert adjacent_flags == [False, False, False, False, True, True, True]
+    assert adjacent_flags == [False, False, False, False, True]
 
 
 def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate(
@@ -1754,6 +1842,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
         CandidateRetrievalConfig(
             candidates_per_slot=1,
             retrieval_max_rounds=1,
+            static_kinetic_energy_threshold=0.05,
         ),
         context,
         replan_slots=replan_slots,
@@ -1769,7 +1858,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
     assert context.get_artifact("candidate_rejections") == []
 
 
-def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
+def test_too_short_source_segment_triggers_targeted_replan_before_llm(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1786,7 +1875,10 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
     slots = [slot]
     context = WorkflowContext(tmp_path / "history.json")
     context.set_artifact("request", {"instruction": "show a supported event"})
-    context.set_artifact("video_description", _video_description())
+    video_description = _video_description()
+    video_description["segments"][0]["time_range"]["end_sec"] = 5.0
+    video_description["segments"][0]["shots"][0]["time_range"]["end_sec"] = 5.0
+    context.set_artifact("video_description", video_description)
     replan_calls: list[list[dict[str, object]]] = []
     model_operations: list[str] = []
 
@@ -1794,17 +1886,13 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
         replan_calls.append(failures)
         assert failures == [
             build_prompt_failure(
-                PromptFailureCode.INSUFFICIENT_NON_OVERLAPPING_CAPACITY,
+                PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
                 slot_id="slot_01",
                 round=1,
                 scope="planned_segments",
                 scope_round=1,
-                available_capacity=1,
-                candidates_needed=2,
-                candidate_deficit=1,
                 planned_duration_sec=6.0,
-                minimum_usable_source_duration_sec=12.0,
-                excluded_ranges=[],
+                longest_segment_duration_sec=5.0,
                 source_segment_ids=["segment_0001"],
             )
         ]
@@ -1885,7 +1973,7 @@ def test_insufficient_candidate_capacity_triggers_targeted_replan_before_llm(
     assert len(pool["slot_01"]) == 2
 
 
-def test_vlm_rejection_retries_adjacent_segment_scope(
+def test_adjacent_segment_round_overretrieves_threefold_and_keeps_best_scores(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1893,7 +1981,7 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
         **_slots()[0],
         "planned_duration_sec": 4.0,
         "source_segment_ids": ["segment_0002"],
-        "required_visible_subjects": ["focal subject"],
+        "required_visible_subjects": [],
     }
     context = WorkflowContext(tmp_path / "history.json")
     context.set_artifact("request", {"instruction": "test"})
@@ -1903,18 +1991,19 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
     def call_prompt(**kwargs):
         package = kwargs["package"]
         operations.append(package.operation)
-        timestamps = (
-            [
-                "00:00:00,000-00:00:04,000",
-                "00:00:10,000-00:00:14,000",
-                "00:00:20,000-00:00:24,000",
-            ]
-            if len(operations) == 1
-            else [
-                "00:00:04,000-00:00:08,000",
-                "00:00:14,000-00:00:18,000",
-            ]
-        )
+        if len(operations) <= 4:
+            raise RuntimeError("force adjacent expansion")
+        timestamps = [
+            "00:00:00,000-00:00:04,000",
+            "00:00:01,000-00:00:05,000",
+            "00:00:02,000-00:00:06,000",
+            "00:00:10,000-00:00:14,000",
+            "00:00:11,000-00:00:15,000",
+            "00:00:12,000-00:00:16,000",
+            "00:00:20,000-00:00:24,000",
+            "00:00:21,000-00:00:25,000",
+            "00:00:22,000-00:00:26,000",
+        ]
         response = {
             "candidates": [
                 {
@@ -1924,11 +2013,11 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
                             "timestamp": timestamp,
                             "description": "visible source content",
                             "matched_dialogue": "",
-                            "semantic_relevance": 0.8,
+                            "semantic_relevance": (index + 1) / 10,
                             "emotional_intensity": 0.5,
                             "salience": 0.7,
                         }
-                        for timestamp in timestamps
+                        for index, timestamp in enumerate(timestamps)
                     ],
                 }
             ]
@@ -1937,19 +2026,13 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
 
     def add_visual_features(_video_path, slots, pool, *_args, **_kwargs):
         for candidate in pool[slots[0]["slot_id"]]:
-            accepted = (
-                len(operations) > 1
-                or candidate["timestamp"] == "00:00:10,000-00:00:14,000"
-            )
             candidate.update(
                 {
                     "description": "visible source content",
-                    "visible_subjects": ["focal subject"] if accepted else [],
-                    "protagonist_visibility_likert": 5 if accepted else 1,
+                    "visible_subjects": [],
+                    "protagonist_visibility_likert": 2,
                     "visual_slot_relevance_likert": 5,
-                    "visual_evidence": (
-                        "clear identity" if accepted else "different identity"
-                    ),
+                    "visual_evidence": "clear visible event",
                 }
             )
 
@@ -1974,16 +2057,20 @@ def test_vlm_rejection_retries_adjacent_segment_scope(
         VLMConfig(model="vision", base_url="", api_key="test"),
         CandidateRetrievalConfig(
             candidates_per_slot=3,
-            retrieval_max_rounds=2,
+            retrieval_max_rounds=3,
         ),
         context,
     )
 
     assert operations == [
-        "Candidate retrieval round 4 slot slot_01",
-        "Candidate retrieval round 5 slot slot_01",
+        f"Candidate retrieval round {round_index} slot slot_01"
+        for round_index in range(1, 6)
     ]
-    assert len(pool["slot_01"]) == 3
+    assert [candidate["timestamp"] for candidate in pool["slot_01"]] == [
+        "00:00:20,000-00:00:24,000",
+        "00:00:21,000-00:00:25,000",
+        "00:00:22,000-00:00:26,000",
+    ]
 
 
 def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
@@ -1999,8 +2086,30 @@ def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
     context = WorkflowContext(tmp_path / "history.json")
     context.set_artifact("request", {"instruction": "test"})
     context.set_artifact("video_description", _video_description())
+    retrieval_call = 0
 
     def call_prompt(**kwargs):
+        nonlocal retrieval_call
+        retrieval_call += 1
+        timestamps = {
+            1: [
+                "00:00:10,000-00:00:14,000",
+                "00:00:11,000-00:00:15,000",
+                "00:00:12,000-00:00:16,000",
+            ],
+            2: [
+                "00:00:13,000-00:00:17,000",
+                "00:00:14,000-00:00:18,000",
+            ],
+            3: [
+                "00:00:00,000-00:00:04,000",
+                "00:00:01,000-00:00:05,000",
+                "00:00:02,000-00:00:06,000",
+                "00:00:20,000-00:00:24,000",
+                "00:00:21,000-00:00:25,000",
+                "00:00:22,000-00:00:26,000",
+            ],
+        }[retrieval_call]
         response = {
             "candidates": [
                 {
@@ -2014,11 +2123,7 @@ def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
                             "emotional_intensity": 0.5,
                             "salience": 0.7,
                         }
-                        for timestamp in (
-                            "00:00:00,000-00:00:04,000",
-                            "00:00:10,000-00:00:14,000",
-                            "00:00:20,000-00:00:24,000",
-                        )
+                        for timestamp in timestamps
                     ],
                 }
             ]
@@ -2209,10 +2314,14 @@ def test_visual_likert_scores_are_normalized_for_unary() -> None:
         "kinetic_energy": 0.2,
         "salience": 0.8,
     }
-    assert _unary(slot, base | {"protagonist_visibility_likert": 5}) > _unary(
+    assert score_unary_candidate(
+        slot, base | {"protagonist_visibility_likert": 5}
+    ) > score_unary_candidate(
         slot, base | {"protagonist_visibility_likert": 1}
     )
-    assert _unary(slot, base | {"protagonist_visibility_likert": 5}) > _unary(
+    assert score_unary_candidate(
+        slot, base | {"protagonist_visibility_likert": 5}
+    ) > score_unary_candidate(
         slot,
         base
         | {
@@ -2236,7 +2345,7 @@ def test_unary_uses_requested_quality_weights() -> None:
         "kinetic_energy": 0.5,
         "salience": 0.9,
     }
-    assert _unary(slot, candidate) == pytest.approx(0.73)
+    assert score_unary_candidate(slot, candidate) == pytest.approx(0.73)
 
 
 def test_review_accepts_maximal_feasible_patch_subset(tmp_path, monkeypatch) -> None:

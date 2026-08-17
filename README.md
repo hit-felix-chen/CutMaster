@@ -39,12 +39,18 @@ ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-CLI 与 Benchmark 的完整工作流通过共享本地托管入口执行；`CutMasterApplication.direct` 保留为内部同步阶段协作者和显式 Python 兼容接口。`ASTERTeam` 是五个剪辑智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
+CLI、FastAPI Web、Worker 与 Benchmark Adapter 是四个平级入口。CLI 和
+Benchmark 的同步完整流程调用 `CutMasterApplication.workflows`；Web 将 HTTP/SSE
+请求转换为 Application use case；Worker 执行 Application 已持久化的 durable Job。
+Application Layer 负责托管素材、项目、Run、Frozen Edit、Render Variant 与 Job
+生命周期，再由 `ASTERTeam` 统一编排五个剪辑智能体。智能体之间不直接互相调用，
+所有前向协作与反馈修复都由团队编排器管理。
 
 ## 架构
 
-> 当前已实现 `CutMasterApplication`、Direct/Materials 服务、
-> SQLite 管理状态、handle-only v2 Workflow 契约、Artifact Manifest，
+> 当前已实现 `CutMasterApplication`、Managed Workflow Coordinator、
+> Material/Run/Render executors、durable Job executor、SQLite 管理状态、
+> handle-only v2 Workflow 契约与 Managed Artifact Manifest，
 > 以及 FastAPI + React/Vite 本地 Web 工作台。CLI、Web 和
 > Mashup-Benchmark 均经由 Application Layer 调用真实后端。Web 已支持素材
 > 导入、分析、预览与完整恢复动作；ASTER Run 的启动、重试、边界续跑、再次
@@ -83,22 +89,23 @@ flowchart LR
 完整调用关系：
 
 ```text
-CLI
-└── CutMasterApplication.direct
-    ├── Analyser
-    │   └── MaterialAnalystAgent
-    ├── Planners
-    │   ├── ASTERTeam
-    │   │   ├── ArrangementArchitectAgent
-    │   │   ├── StoryEditorAgent
-    │   │   ├── TimelineScoutAgent
-    │   │   ├── EditComposerAgent
-    │   │   └── RevisionEditorAgent
-    │   └── plan compiler / source-window optimization tools
-    └── Renderer
-        ├── dialogue audio preparation
-        └── frame-exact rendering
+CLI Adapter -----------> CutMasterApplication.workflows
+Benchmark Adapter -----> CutMasterApplication.workflows
+FastAPI Web Adapter ---> CutMasterApplication grouped use cases
+Worker Adapter --------> ManagedJobExecutor
+                                   │
+                                   └── Application Layer
+                                       ├── ManagedWorkflowCoordinator
+                                       ├── ManagedMaterialAnalysisExecutor
+                                       │   └── Analyser → MaterialAnalystAgent
+                                       ├── RunPlanningExecutor
+                                       │   └── Planners → ASTERTeam → A/S/T/E/R
+                                       └── ManagedRenderExecutor → Renderer
 ```
+
+Adapter 只转换各自的协议：CLI 负责参数、终端输出与退出码，FastAPI 负责 HTTP/SSE，
+Worker 负责一个 durable Job 的进程入口，Benchmark Adapter 负责评测任务转换和提交
+副本导出。它们彼此不调用，也不直接构造 Agent、Tool、Repository 或输出目录。
 
 ### 智能体与工具的边界
 
@@ -106,7 +113,7 @@ CLI
 - **Tool 负责能力**：ASR、完整音乐分析、媒体读取、Music Profile 投影、运动计算、视觉评分和 ASTER 协作反馈分别位于 `workflow/analyser/tools/` 与 `workflow/planners/tools/`；素材生命周期属于 `app.materials`。
 - **Planners 交付精确计划**：源窗口优化、Beat 微调和输出帧分配都属于剪辑决策，最终固化为不可变的 `RenderPlan`。
 - **Renderer 负责执行**：只按照 `RenderPlan` 准备人声、执行 FFmpeg 渲染和混音，不访问 LLM/VLM，也不修改规划。
-- **分层边界清晰**：配置、公共契约、Workflow Prompt 和具体基础设施分别位于 `configuration/`、`contracts/`、`workflow/prompting/` 与 `infrastructure/`。
+- **分层边界清晰**：配置、托管 Application 契约、阶段契约、Workflow Prompt 和具体基础设施分别位于 `configuration/`、`application/workflow/`、`workflow/contracts/`、`workflow/prompting/` 与 `infrastructure/`。
 
 ## 核心机制
 
@@ -139,7 +146,7 @@ Story Editor 从 Material Memory 中选择少量高价值原声台词，并将�
 
 ### 4. 候选空间与闭环修复
 
-Timeline Scout 为非锚点 Slot 沿原片时间线检索候选，并验证主体身份、内容相关性、可见性和运动强度。候选不足时，它不会静默降级，而是把诊断返回 Arrangement Architect，触发定向 Slot 修复；如果 Slot 语义发生变化，Story Editor 会重新检查锚点。
+Timeline Scout 为非锚点 Slot 沿原片时间线检索候选，并验证主体身份、内容相关性、可见性和运动强度。指定 Segment 检索耗尽后，它只扩展一次到前、中、后三个 Segment，超额检索候选缺口的三倍，再按统一单镜头分数选优补齐。候选备选之间允许重叠和小幅平移；只有完全重复的时间戳会被拒绝。候选不足时，它不会静默降级，而是把诊断返回 Arrangement Architect，触发定向 Slot 修复；如果 Slot 语义发生变化，Story Editor 会重新检查锚点。
 
 ### 5. 高效的全局序列选择
 
@@ -258,9 +265,9 @@ Variant、播放、Range 下载、Finder、完整性验证、Render again 和安
 
 Settings/首次 Setup 支持 Provider 预设或自定义 OpenAI-compatible 连接、分能力
 连接测试、原子 `.env`/`config.toml` 写入和受保护的 Data Root Migration。当前
-仍有意保留为后续工作的范围包括持久化应用内通知、Activity 日志抽屉、Direct
-Bundle 批量清理/保留策略、OpenAPI 生成的 TypeScript 漂移 CI、多用户/云部署，
-以及更完整的 provider/media port 注入。
+仍有意保留为后续工作的范围包括持久化应用内通知、Activity 日志抽屉、OpenAPI
+生成的 TypeScript 漂移 CI、多用户/云部署，以及更完整的 provider/media port
+注入。
 
 ### 命令行
 
@@ -347,8 +354,7 @@ uv run cutmaster render \
 from pathlib import Path
 
 from cutmaster import CutMasterApplication
-from cutmaster.adapters.local_workflow import LocalManagedWorkflow
-from cutmaster.contracts import ExecuteManagedWorkflowCommand
+from cutmaster.application.workflow import ExecuteManagedWorkflowCommand
 
 app = CutMasterApplication.open(Path("config.toml"))
 request = ExecuteManagedWorkflowCommand(
@@ -361,13 +367,14 @@ request = ExecuteManagedWorkflowCommand(
     audio_mode="bgm_only",
 )
 
-result = LocalManagedWorkflow(app).execute_workflow(request)
+result = app.workflows.execute_and_wait(request)
 print(result.project_id, result.render_variant_id)
 ```
 
-CLI 和 Benchmark Adapter 使用 `LocalManagedWorkflow` 完成同步托管执行；它驱动
-与 Web 相同的 durable Job 和 Application use case，不绕过 Application Layer
-依赖内部 Agent 或 Tool。
+CLI 与 Benchmark Adapter 通过 `CutMasterApplication.workflows` 驱动同步完整流程；
+FastAPI Web 和 Worker 分别连接同一 Application 的托管 use cases 与 durable Job
+executor。四个 Adapter 彼此不调用，也不会绕过 Application Layer 依赖内部 Agent
+或 Tool。
 
 ## 配置
 
@@ -431,7 +438,16 @@ Video Material 分析目录还保存自己的 `model_usage.json`。其中 `curre
 
 ```text
 src/cutmaster/
-├── application/                     # CutMasterApplication 与七组 use case
+├── bootstrap/                       # 本地 Web 与 Worker 的最外层组合
+├── application/                     # Composition Root 与托管 use cases
+│   ├── workflow/                        # Coordinator、合同与 durable Job executor
+│   ├── materials/                       # Material 生命周期与 Analysis executor
+│   ├── projects/                        # Edit Project 与 Creative Brief
+│   ├── runs/                            # ASTER Run 与 Planning executor
+│   ├── renders/                         # Render Variant 与 Render executor
+│   ├── jobs/                            # Attempt、Job、事件与恢复
+│   ├── settings/                        # Effective Configuration 与 Data Root
+│   └── ports/                           # Application 向内端口
 ├── domain/                          # 纯领域值与状态
 ├── workflow/
 │   ├── analyser/                       # M + tools
@@ -440,11 +456,14 @@ src/cutmaster/
 │   ├── contracts/                      # handle-only v2
 │   ├── prompting/
 │   └── shared/
-├── adapters/                       # CLI、Web 与共享本地托管执行适配器
+├── adapters/                        # 平级 CLI、Web 与 Worker 进程适配器
 ├── infrastructure/                  # SQLite、Material Catalog、模型、媒体与日志
-├── configuration/                   # Effective Configuration
-└── contracts/                       # 稳定托管与 Direct API
+└── configuration/                   # Effective Configuration
 ```
+
+Mashup-Benchmark 中的 Adapter 保留在独立 Benchmark 仓库，与 CLI/Web/Worker
+平级，通过 `cutmaster.application.workflow` 的公开合同调用 Application；执行完成后
+只把评测需要的 managed artifacts 复制到 Benchmark Run 目录。
 
 详细的依赖边界和公共 API 参见 [`docs/architecture.md`](docs/architecture.md)，架构决策参见 [`docs/adr/`](docs/adr/)。
 

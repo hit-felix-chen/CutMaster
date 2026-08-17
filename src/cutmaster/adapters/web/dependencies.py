@@ -7,9 +7,7 @@ from typing import Annotated
 from fastapi import Depends, Header, Request
 
 from cutmaster.application import CutMasterApplication
-from cutmaster.adapters.web.run_supervisor import RunDispatcher
-from cutmaster.adapters.web.material_supervisor import MaterialDispatcher
-from cutmaster.adapters.web.render_supervisor import RenderDispatcher
+from cutmaster.application.ports import JobDispatcher
 
 
 def application(request: Request) -> CutMasterApplication:
@@ -19,39 +17,19 @@ def application(request: Request) -> CutMasterApplication:
     return value
 
 
-def run_dispatcher(request: Request) -> RunDispatcher:
-    return request.app.state.cutmaster_run_dispatcher
-
-
-def material_dispatcher(request: Request) -> MaterialDispatcher:
-    return request.app.state.cutmaster_material_dispatcher
-
-
-def render_dispatcher(request: Request) -> RenderDispatcher:
-    return request.app.state.cutmaster_render_dispatcher
+def job_dispatcher(request: Request) -> JobDispatcher:
+    return request.app.state.cutmaster_job_dispatcher
 
 
 ApplicationDependency = Annotated[CutMasterApplication, Depends(application)]
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key")]
-RunDispatcherDependency = Annotated[RunDispatcher, Depends(run_dispatcher)]
-MaterialDispatcherDependency = Annotated[
-    MaterialDispatcher,
-    Depends(material_dispatcher),
-]
-RenderDispatcherDependency = Annotated[
-    RenderDispatcher,
-    Depends(render_dispatcher),
-]
+JobDispatcherDependency = Annotated[JobDispatcher, Depends(job_dispatcher)]
 
 
 __all__ = [
     "ApplicationDependency",
     "IdempotencyKey",
-    "MaterialDispatcherDependency",
-    "RenderDispatcherDependency",
-    "RunDispatcherDependency",
+    "JobDispatcherDependency",
     "application",
-    "material_dispatcher",
-    "render_dispatcher",
-    "run_dispatcher",
+    "job_dispatcher",
 ]

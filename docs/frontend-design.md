@@ -19,7 +19,7 @@ degraded to a read-only compatibility mode. Strict
 Render Specifications, automatic Dialogue Preview, durable SSE with replay and
 resync, provider connection tests/local writes, structured Activity navigation,
 and guarded Data Root Migration are implemented. Persistent notifications, the
-Activity log drawer, Direct Bundle bulk cleanup/retention, generated OpenAPI
+Activity log drawer, generated OpenAPI
 TypeScript drift CI, multi-user/cloud operation, and broader provider/media
 ports remain later work.
 
@@ -511,8 +511,8 @@ Frozen Edit.
 Frozen Edit is the product-history identity and RenderPlan is its exact
 Renderer contract. SQLite stores identity, Run ownership, lineage, and a
 portable RenderPlan reference; it does not duplicate the timeline as another
-writable representation. Direct CLI and Benchmark plans do not become Frozen
-Edits. A Frozen Edit records whether it is the Run's `initial` version or a
+writable representation. CLI and Benchmark executions create the same managed
+Frozen Edits as Web. A Frozen Edit records whether it is the Run's `initial` version or a
 `guided_revision` derived from an optional parent Frozen Edit. Review state and
 all Render Variants attach to this stable version identity, not to a plan file
 path or an Execution Attempt.
@@ -850,11 +850,6 @@ Deletion requires two clicks but no typed-name challenge. The first click opens
 a confirmation dialog listing the cascade and relevant storage size; the
 second click is an explicit destructive **Delete permanently** action.
 
-Direct Workflow Bundles are never deleted automatically and do not appear as
-Project or Activity records. Settings → Storage shows their count and total
-size and provides **Open in Finder**. **Delete all direct bundles**, active-lock
-skipping, and any automatic retention policy remain Proposed P2 work.
-
 ## Settings and model setup
 
 Settings manages product-level model connections for the local application. It
@@ -930,7 +925,7 @@ The React project is rooted at `web/`; the FastAPI adapter belongs at
 `src/cutmaster/adapters/web/`.
 
 All inbound adapters obtain use cases from one `CutMasterApplication`
-composition entry point. The object groups `direct`, `materials`, `projects`,
+composition entry point. The object groups `workflows`, `materials`, `projects`,
 `runs`, `renders`, `jobs`, and `settings` services; it wires their dependencies
 but does not implement their business rules. The CLI and Benchmark worker
 already map transport input and output to those services. FastAPI route
@@ -940,14 +935,13 @@ infrastructure independently.
 The implemented `settings` service owns Effective Configuration reads,
 validated single-file saves, and storage reporting. Model-connection UI,
 credential writes, per-capability connection tests, and the macOS Data Root
-Finder action are implemented. Direct Bundle bulk cleanup/retention are
-proposed additions; Data Root Migration is implemented. Locale and
+Finder action are implemented. Data Root Migration is implemented. Locale and
 Colour Mode remain browser presentation preferences and therefore do not call
 this Application service.
 
 Every implemented adapter calls `CutMasterApplication.open(config_path)` and therefore
 resolves the same Application Data Root and Material Catalog. Service groups
-are initialized lazily: direct CLI and Benchmark calls do not initialize
+are initialized lazily: CLI and Benchmark calls do not initialize
 unrelated managed services. The `serve` command activates the services required
 by the Web workspace, including the shared supervisor and Material Analysis,
 ASTER, Renderer, and Data Root Migration workers. Review reads and Guided
@@ -1108,7 +1102,7 @@ one `cutmaster.workflow` package after the refactor. Their stage names and
 public root-package class import paths remain unchanged. Their v2 request
 contracts are handle-only and intentionally break the old raw-path Python DTO
 signatures; no dual-mode stage wrapper is retained. CLI and Benchmark callers
-keep their file/name-facing compatibility through `app.direct`, which resolves
+map their file/name-facing input through `app.workflows`, which resolves
 Materials and constructs valid stage handles. The package distinguishes the
 CutMaster Workflow from `domain`, `application`, `adapters`, and
 `infrastructure` without adding another layer inside each stage.
@@ -1152,7 +1146,7 @@ error; those historical files are neither migrated, rewritten, nor deleted.
 ### Application data root
 
 **Implemented:** default/custom root resolution, managed SQLite/Material/
-Project/Direct Bundle/log namespaces, Settings UI, and guarded migration of a
+Project/log namespaces, Settings UI, and guarded migration of a
 non-empty root.
 
 The frontend keeps its managed local state under one **Application Data Root**.
@@ -1170,7 +1164,6 @@ CutMaster/.cutmaster/                 # default Application Data Root
 │   ├── video/mat_<uuid>/             # managed source + Video Material Memory
 │   └── music/mat_<uuid>/             # managed source + Music Memory
 ├── projects/<project-id>/            # Run, Frozen Edit, and render artifacts
-├── direct/bundle_<uuid>/              # non-project Direct Workflow Bundles
 └── logs/                              # application and job logs
 ```
 
@@ -1178,9 +1171,8 @@ The Settings page shows the selected path and, on macOS, exposes a real **Open
 in Finder** action backed by the fixed Application Data Root. A custom path
 change moves the whole Application Data Root; Materials, project state,
 job state, and artifacts cannot be assigned unrelated roots independently.
-The Storage section separately reports database, Materials, Projects, Direct
-Workflow Bundles, and logs so non-project CLI output remains visible as disk
-usage without appearing in product history.
+The Storage section separately reports database, Materials, Projects, and logs.
+CLI and Benchmark output is part of the same managed project history.
 
 The implemented migration flow exposes a **Move CutMaster Data** operation in
 Settings. After confirming no Attempt is active,
@@ -1213,61 +1205,38 @@ Migration never deletes the old Data Root after a successful switch. The old
 copy remains for deliberate manual recovery/cleanup; CutMaster does not expose
 an automatic old-root deletion action.
 
-### Direct and managed execution
+### Managed execution across peer adapters
 
-The Application Layer implements two boundaries. Managed product services
-create durable SQLite domain records and Execution Attempts. The Web adapter
-drives Project, Material import/analysis, Project Setup, Activity,
-Settings/Setup, ASTER Run, Review, Render Variant/Outputs, and Data Root
-Migration use cases. Its long-running commands dispatch real Analyser,
-Planners, Renderer, or migration subprocesses through the shared supervisor.
-Frozen Edit Review and atomic Guided Revision validation are synchronous;
-automatic Dialogue Preview dispatch is managed asynchronously. The synchronous
-Direct surface preserves the `analyse`,
-`analyse-music`, `plan`, `render`, and `run` CLI commands without implicitly
-creating Project or SQLite history.
+The Application Layer is the single workflow boundary. CLI, FastAPI Web,
+Mashup-Benchmark, and the local worker are peer inbound adapters: none invokes
+another adapter, and all translate their transport or process inputs into
+Application commands. `ManagedWorkflowCoordinator` owns the complete managed
+Material, Project, Run, Frozen Edit, Render Variant, job, usage, and artifact
+lifecycle. The durable job executors own stage execution; the shared local job
+supervisor only dispatches isolated worker processes.
 
-`cutmaster run` is the stable complete-generation CLI for evaluation. One
-invocation synchronously analyses or reuses both Materials, plans the edit,
-renders the final video, writes the workflow Artifact Manifest, and exits with
-a machine-readable result. It uses the same direct workflow use case as the
-Benchmark adapter and never depends on the Web server, product database, or
-durable queue.
+The Web adapter drives Project, Material import/analysis, Project Setup,
+Activity, Settings/Setup, ASTER Run, Review, Render Variant/Outputs, and Data
+Root Migration use cases. Frozen Edit Review and atomic Guided Revision
+validation are synchronous; automatic Dialogue Preview dispatch is managed
+asynchronously.
 
-When `--output-dir` is omitted, the Application allocates a unique Direct
-Workflow Bundle under `direct/` in the active Data Root. It is included in
-storage totals but is not Web project history; Data Root Migration moves it
-with the root. An explicit CLI output directory must be outside
-the Data Root and remains external. Managed artifacts are allocated only from
-an owning Project/Run/Variant identity by a managed use case; a CLI path can
-never impersonate one.
+The CLI retains `analyse`, `analyse-music`, `plan`, `render`, and `run`, plus
+`serve`, as transport commands. They no longer accept a custom output root.
+`cutmaster run` synchronously analyses or reuses Materials, creates managed
+Project and ASTER history, plans the edit, renders the final video, and returns
+a machine-readable managed execution receipt. The resulting records and
+canonical artifacts use the same Application Data Root layout and are visible
+in Web.
 
-The implemented CLI consists of the five Direct commands `analyse`,
-`analyse-music`, `plan`, `render`, and `run`, plus `serve` for the local Web
-workspace. Project, ASTER Run, Activity, and other managed product operations
-are Web-only in the first UI release. Their Application use cases remain
-independent of FastAPI so managed CLI adapters can be added later without
-redesigning them.
-
-Mashup-Benchmark is an implemented peer adapter alongside CLI and FastAPI. Its
-integration keeps the per-task worker subprocess but calls
-the synchronous direct-execution Application API rather than calling the CLI or
-Web adapter. The implemented worker directly calls
-`CutMasterApplication.open(...).direct.execute_workflow(...)`. CLI and
-Benchmark share that direct Application use case. Neither path requires an HTTP
-server or product SQLite history, and both preserve the current three-stage
-artifact layout.
-
-The direct result includes a versioned logical Artifact Manifest so the
-Benchmark adapter does not need to infer internal paths. Manifest v1 uses stable
-dotted keys and normalized POSIX paths relative to the Direct Workflow Bundle;
-absolute paths, parent traversal, directory entries, and symlink escapes are
-invalid. Required references are validated before `result.json` is atomically
-published, while optional missing artifacts are omitted rather than set to
-`null`. The result also supplies an explicit stable Material Name from benchmark
-media metadata, falling back to the existing local filename stem when metadata
-omits one. This preserves cross-task and cross-run Material Memory reuse without
-making the fingerprint a selector.
+Mashup-Benchmark calls the same coordinator rather than CLI, HTTP, or Web
+worker modules. After successful completion it validates the receipt's
+Application-Data-Root-relative artifact references and copies only the required
+evaluation files into the adapter-supplied Benchmark Run directory. Those files
+are submission copies; CutMaster's managed entities and artifacts remain
+authoritative. Stable Material Names from benchmark metadata preserve safe
+cross-task Material Memory reuse without making a source path or fingerprint a
+public selector.
 
 ### Durable local job execution
 

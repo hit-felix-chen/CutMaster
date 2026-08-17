@@ -93,8 +93,6 @@ def test_storage_report_counts_real_managed_categories(
     (root / "media/video/source.mp4").write_bytes(b"video")
     (root / "projects/p").mkdir(parents=True)
     (root / "projects/p/plan.json").write_bytes(b"{}")
-    (root / "direct/bundle_one").mkdir(parents=True)
-    (root / "direct/bundle_one/result.json").write_bytes(b"{}")
     (root / "logs").mkdir(parents=True)
     (root / "logs/app.log").write_bytes(b"log")
     service = SettingsService(managed_configuration)
@@ -102,10 +100,8 @@ def test_storage_report_counts_real_managed_categories(
     report = service.storage_report()
     categories = {item.name: item for item in report.categories}
 
-    assert report.direct_bundle_count == 1
     assert categories["materials"].size_bytes == 5
     assert categories["projects"].file_count == 1
-    assert categories["direct"].file_count == 1
     assert categories["logs"].size_bytes == 3
     assert categories["database"].file_count == 0
     assert report.total_size_bytes == sum(item.size_bytes for item in report.categories)

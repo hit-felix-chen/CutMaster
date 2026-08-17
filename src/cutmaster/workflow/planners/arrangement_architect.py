@@ -96,6 +96,13 @@ def _validate_slots(
         str(segment["segment_id"]): index
         for index, segment in enumerate(source_segments)
     }
+    segment_duration_by_id = {
+        str(segment["segment_id"]): (
+            float(segment["time_range"]["end_sec"])
+            - float(segment["time_range"]["start_sec"])
+        )
+        for segment in source_segments
+    }
     previous_segment_end_index = -1
     for index, item in enumerate(raw, 1):
         if not isinstance(item, dict):
@@ -132,6 +139,14 @@ def _validate_slots(
             raise ValueError(f"Slot {index} reuses a visually disproven source Segment")
         if tuple(segment_ids) in failed_segment_assignments:
             raise ValueError(f"Slot {index} repeats a failed source-Segment assignment")
+        if not any(
+            segment_duration_by_id[segment_id] > duration + DURATION_TOLERANCE_SEC
+            for segment_id in segment_ids
+        ):
+            raise ValueError(
+                f"Slot {index} must assign at least one source Segment longer than "
+                f"desired_duration_sec={duration:.6f}"
+            )
         segment_start_index = min(
             segment_order[segment_id] for segment_id in segment_ids
         )
@@ -544,8 +559,24 @@ def _validate_targeted_slots(
         str(segment["segment_id"]): index
         for index, segment in enumerate(video_description["segments"])
     }
+    segment_duration_by_id = {
+        str(segment["segment_id"]): (
+            float(segment["time_range"]["end_sec"])
+            - float(segment["time_range"]["start_sec"])
+        )
+        for segment in video_description["segments"]
+    }
     previous_end_index = -1
     for slot in merged:
+        if not any(
+            segment_duration_by_id[str(segment_id)]
+            > float(slot["planned_duration_sec"]) + DURATION_TOLERANCE_SEC
+            for segment_id in slot["source_segment_ids"]
+        ):
+            raise ValueError(
+                f"Targeted Slot {slot['slot_id']} must assign at least one source "
+                "Segment longer than planned_duration_sec"
+            )
         current_start_index = min(
             segment_order[str(segment_id)]
             for segment_id in slot["source_segment_ids"]

@@ -1,32 +1,30 @@
-"""Execute one durable Material Analysis Job outside the Web process."""
+"""Execute one durable Material Analysis Job inside the Application boundary."""
 
 from __future__ import annotations
 
-import argparse
 import os
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event, Thread
 
-from cutmaster.adapters.web.job_cancellation import DatabaseJobCancellationToken
-from cutmaster.adapters.web.worker_lease import (
-    add_supervisor_lease_arguments,
-    adopt_supervisor_lease,
-    validate_claimed_submission,
-)
 from cutmaster.application import CutMasterApplication
-from cutmaster.application.direct import AnalyseMusicCommand, AnalyseVideoCommand
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     FailAttemptCommand,
     HeartbeatJobCommand,
     JobSubmissionView,
 )
-from cutmaster.application.materials import MaterialView
+from cutmaster.application.jobs.cancellation import DatabaseJobCancellationToken
+from cutmaster.application.jobs.lease import validate_claimed_submission
+from cutmaster.application.materials import (
+    ExecuteMaterialAnalysisCommand,
+    ManagedMaterialAnalysisExecutor,
+    MaterialView,
+)
 from cutmaster.domain.attempts import TERMINAL_ATTEMPT_STATUSES, AttemptStatus
 from cutmaster.domain.ids import AttemptId, JobId, MaterialId
-from cutmaster.domain.materials import MaterialCondition, MaterialType
+from cutmaster.domain.materials import MaterialCondition
 from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialInconsistentError,
 )
@@ -35,6 +33,7 @@ from cutmaster.workflow.ports import (
     CancellationToken,
     WorkflowCancelledError,
 )
+from cutmaster.workflow.contracts import AnalysisWorkspace
 
 MaterialAnalyser = Callable[[CutMasterApplication, MaterialView, Path], None]
 
@@ -62,7 +61,7 @@ def execute_material_job(
     if claimed_submission is None:
         claimed = application.jobs.claim_next(
             ClaimJobCommand(
-                worker_id or f"web-material-{resolved_process_id}",
+                worker_id or f"managed-material-{resolved_process_id}",
                 resolved_process_id,
                 job_id,
             )
@@ -152,36 +151,18 @@ def _analyse_material(
     *,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
-    # Resolve private managed paths only for the synchronous Direct boundary.
-    # Direct re-validates the exact name/fingerprint binding before analysis.
-    with application.materials.lease(material.material_id) as binding:
-        source_path = binding.source_path
-        subtitle_path = (
-            application.materials.resolve_subtitle(binding)
-            if material.material_type is MaterialType.VIDEO
-            else None
-        )
-
-    if material.material_type is MaterialType.VIDEO:
-        application.direct.analyse_video(
-            AnalyseVideoCommand(
-                video_path=source_path,
-                output_dir=workspace,
-                video_title=material.name,
-                subtitle_path=subtitle_path,
-                material_name=material.name,
-                cancellation_token=cancellation_token,
-            )
-        )
-    else:
-        application.direct.analyse_music(
-            AnalyseMusicCommand(
-                audio_path=source_path,
-                output_dir=workspace,
-                material_name=material.name,
-                cancellation_token=cancellation_token,
-            )
-        )
+    ManagedMaterialAnalysisExecutor(
+        application.settings.effective_configuration,
+        application.materials,
+    ).execute(
+        ExecuteMaterialAnalysisCommand(
+            material_id=material.material_id,
+            workspace=AnalysisWorkspace(workspace),
+            video_title=material.name,
+            material_reused=material.reused,
+        ),
+        cancellation_token=cancellation_token,
+    )
 
 
 def _progress(
@@ -255,47 +236,4 @@ def _finish_failed_or_interrupted(
     application.jobs.mark_failed(FailAttemptCommand(attempt_id, message))
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Execute one CutMaster Material Analysis Job"
-    )
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--job-id", required=True)
-    add_supervisor_lease_arguments(parser)
-    args = parser.parse_args(argv)
-    application = CutMasterApplication.open(args.config)
-    job_id = JobId.parse(args.job_id)
-    exact_supervisor_grant = all(
-        value is not None
-        for value in (
-            args.attempt_id,
-            args.lease_worker_id,
-            args.lease_process_id,
-        )
-    )
-    with application.data_root_coordinator.shared(
-        allow_maintenance=exact_supervisor_grant
-    ):
-        claimed = adopt_supervisor_lease(
-            application,
-            job_id=job_id,
-            attempt_id=args.attempt_id,
-            lease_worker_id=args.lease_worker_id,
-            lease_process_id=args.lease_process_id,
-            worker_kind="material",
-        )
-        status = execute_material_job(
-            application,
-            job_id,
-            claimed_submission=claimed,
-        )
-    return (
-        0 if status in {None, AttemptStatus.COMPLETE, AttemptStatus.INTERRUPTED} else 1
-    )
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
-__all__ = ["MaterialAnalyser", "execute_material_job", "main"]
+__all__ = ["MaterialAnalyser", "execute_material_job"]

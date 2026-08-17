@@ -399,7 +399,6 @@ class SettingsService:
             "database": (root / "cutmaster.db",),
             "materials": (root / "media",),
             "projects": (root / "projects",),
-            "direct": (root / "direct",),
             "logs": (root / "logs",),
         }
         for name, paths in known_paths.items():
@@ -421,20 +420,9 @@ class SettingsService:
                     size_bytes=size_bytes,
                 )
             )
-        direct_root = root / "direct"
-        direct_bundle_count = 0
-        if direct_root.is_dir() and not direct_root.is_symlink():
-            direct_bundle_count = sum(
-                1
-                for item in direct_root.iterdir()
-                if item.is_dir()
-                and not item.is_symlink()
-                and item.name.startswith("bundle_")
-            )
         return StorageReportView(
             data_root=root,
             categories=tuple(categories),
-            direct_bundle_count=direct_bundle_count,
             total_size_bytes=sum(item.size_bytes for item in categories),
             reveal_supported=self._reveal_supported,
         )

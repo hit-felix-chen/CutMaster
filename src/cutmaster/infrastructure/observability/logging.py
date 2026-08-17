@@ -31,6 +31,13 @@ VALID_LEVELS = frozenset(
 VALID_COMPONENTS = frozenset(
     {
         "cutmaster",
+        "application.workflow",
+        "application.materials",
+        "application.runs",
+        "application.renders",
+        "application.jobs",
+        "worker",
+        "web",
         "analyser",
         "dialogue",
         "dialogue_audio",
@@ -179,15 +186,18 @@ def _patch_record(record: dict[str, Any]) -> None:
     extra["fields_suffix"] = f" | {' '.join(fields)}" if fields else ""
 
 
-def configure_logging(
-    file_path: Path,
+def configure_console_logging(
     *,
     console_level: str = "INFO",
-    file_level: str = "DEBUG",
     console_color: bool | None = None,
 ) -> None:
-    """Configure the process-wide operational log sinks."""
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    """Configure one structured console sink for the current process.
+
+    Worker processes use this boundary because their supervisor already owns
+    the per-Job file and redirects stderr into it.  Keeping this API
+    console-only prevents a second file sink from duplicating every event.
+    """
+
     logger.remove()
     logger.configure(patcher=_patch_record)
     for level, color in LEVEL_COLORS.items():
@@ -202,6 +212,21 @@ def configure_logging(
         level=console_level,
         format=CONSOLE_LOG_FORMAT,
         colorize=console_colorize,
+    )
+
+
+def configure_logging(
+    file_path: Path,
+    *,
+    console_level: str = "INFO",
+    file_level: str = "DEBUG",
+    console_color: bool | None = None,
+) -> None:
+    """Configure the process-wide operational log sinks."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    configure_console_logging(
+        console_level=console_level,
+        console_color=console_color,
     )
     logger.add(
         file_path,

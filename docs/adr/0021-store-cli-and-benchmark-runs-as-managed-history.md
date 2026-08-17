@@ -5,13 +5,15 @@
 CLI and Mashup-Benchmark complete executions create the same managed Material,
 Edit Project, ASTER Run, Execution Attempt, Frozen Edit, and Render Variant
 records as the local Web workspace. They do not accept a caller-selected output
-directory and do not make a Direct Workflow Bundle the authoritative result.
+directory for canonical artifacts and do not create a separate non-project
+workflow bundle.
 All canonical media and planning artifacts therefore remain under the active
 Application Data Root with portable managed references and are immediately
 visible in the Web UI.
 
-The synchronous local adapter claims and runs the same durable Analyser,
-Planners, and Renderer Jobs used by Web. Adapter-only Planners controls are
+CLI and Benchmark call the Application managed-workflow coordinator, which
+claims and runs the same durable Analyser, Planners, and Renderer Jobs used by
+Web and the worker adapter. Adapter-only Planners controls are
 stored in a separate immutable Run planning-options snapshot so Benchmark
 semantics survive Retry and Resume without contaminating Effective
 Configuration.

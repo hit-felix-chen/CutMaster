@@ -33,6 +33,7 @@ class MaterialDetailView:
     source: Mapping[str, Any]
     memory_summary: Mapping[str, Any]
     preview_available: bool
+    analysis_cost_yuan: float | None
 
     @property
     def reference_count(self) -> int:

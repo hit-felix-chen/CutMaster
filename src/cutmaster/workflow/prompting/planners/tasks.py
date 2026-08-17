@@ -199,8 +199,8 @@ Slot's minimum Segment index. Never repeat a source_segment_ids assignment liste
 forbidden_segment_assignments.
 
 The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
-static imagery, or the deterministic capacity check proved that the assigned source range cannot
-contain the required number of distinct, non-overlapping windows. Use rejection_feedback to
+static imagery, or the deterministic duration check proved that no assigned Segment is longer
+than one complete planned clip. Use rejection_feedback to
 correct the actual cause. Every feedback item has reason_code, diagnosis, and repair_requirement:
 reason_code is the stable machine-readable category, diagnosis explains the concrete failed
 constraint with measured values, and repair_requirement is mandatory for the replacement. Redesign
@@ -255,6 +255,9 @@ dialogue plays.
 
 Each slot must be realizable from supplied source_segment_ids. Use the reusable story summary for
 plot understanding, and use Segment summaries and appearing characters as visual source truth.
+At least one assigned source Segment must be longer than that Slot's desired_duration_sec so a
+complete candidate passage and a small timestamp displacement are both possible. Multiple
+alternative candidates may overlap; do not reserve several non-overlapping windows per Slot.
 Never invent props,
 gestures, settings, identities, or actions absent from the description. Keep source_segment_ids
 in strictly increasing source order across Slots: every Slot's maximum Segment index must be
@@ -277,7 +280,7 @@ requires them.
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.SLOT_ARRANGEMENT,
-        prompt_version="3.3",
+        prompt_version="3.4",
         operation=(
             "Arrangement Architect targeted repair"
             if targeted
@@ -558,21 +561,22 @@ candidate as a precise time window:
 - its duration must equal that Slot's planned_duration_sec, to millisecond timestamp precision;
 - it must be fully contained in the supplied Segment timeline;
 - it may start or end inside a Shot and does not need to use Shot boundaries;
-- candidates for the same Slot must not overlap each other or any excluded range.
+- candidates for the same Slot may overlap each other and confirmed candidates, allowing small
+  timestamp displacements, but must not exactly duplicate another candidate or excluded range.
 Silent Segments are valid source material. Do not return source Shot IDs; the application derives
 the overlapping Shots deterministically from the validated timestamp.
 
-Prefer each Slot's source_segment_ids, preserve source chronology, and avoid every excluded
-range. Describe only the content expected inside the selected time window, based on its
+Prefer each Slot's source_segment_ids, preserve source chronology, and avoid exact excluded
+timestamps. Describe only the content expected inside the selected time window, based on its
 overlapping Shot descriptions. Use the maintained video summary for plot understanding; exact
 transcript text is intentionally omitted from visual candidate retrieval. Never let inferred
 speech override visible identity or action. Score semantic relevance, emotional intensity, and
 editorial salience from 0 to 1.
 
 Candidates in confirmed_candidates already passed timestamp validation and VLM visual grounding.
-They are permanently retained. Return only the missing candidates requested by this contract, and
-never duplicate or overlap a confirmed candidate. Excluded ranges also contain rejected windows
-that must not be selected again.
+They are permanently retained. Return only the candidates requested by this contract and never
+duplicate a confirmed or excluded timestamp exactly. Excluded ranges also contain rejected
+windows; a genuinely different, slightly displaced window may overlap them.
 
 <slots>
 {json.dumps(details.slots, ensure_ascii=False)}
@@ -589,7 +593,7 @@ that must not be selected again.
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_RETRIEVAL,
-        prompt_version="2.0",
+        prompt_version="2.1",
         operation=details.operation,
         system_prompt=(
             "You are CutMaster's Timeline Scout. Scout real source-video passages from a "

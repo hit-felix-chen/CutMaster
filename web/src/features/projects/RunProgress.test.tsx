@@ -141,6 +141,7 @@ afterEach(() => {
 describe('live ASTER execution progress', () => {
   it('polls the lightweight Runs projection from queued through running to terminal', async () => {
     vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-13T00:01:31Z'))
     let runRequests = 0
     vi.stubGlobal(
       'fetch',
@@ -171,7 +172,11 @@ describe('live ASTER execution progress', () => {
                 run: { ...run, status: 'complete' },
                 execution: {
                   ...runningExecution(),
-                  attempt: { ...runningExecution().attempt, status: 'complete' },
+                  attempt: {
+                    ...runningExecution().attempt,
+                    status: 'complete',
+                    finished_at: '2026-08-13T00:02:01Z',
+                  },
                   job: { ...runningExecution().job, status: 'complete' },
                 },
               },
@@ -218,11 +223,13 @@ describe('live ASTER execution progress', () => {
     })
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getAllByText('Running')[0]).toBeVisible()
+    expect(screen.getByText('Elapsed time · 01:30')).toBeVisible()
     expect(screen.getByText('Timeline Scout is retrieving candidates')).toBeVisible()
 
     await act(async () => vi.advanceTimersByTimeAsync(2000))
     await flushPromises()
     expect(screen.getByText('Complete')).toBeVisible()
+    expect(screen.getByText('Run time · 02:00')).toBeVisible()
     expect(runRequests).toBe(2)
 
     await act(async () => vi.advanceTimersByTimeAsync(4000))

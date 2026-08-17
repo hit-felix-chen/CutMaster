@@ -1,29 +1,20 @@
-"""Execute one durable ASTER planning Job outside the Web server process."""
+"""Execute one durable ASTER planning Job inside the Application boundary."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from cutmaster.adapters.web.job_cancellation import DatabaseJobCancellationToken
-from cutmaster.adapters.web.worker_lease import (
-    add_supervisor_lease_arguments,
-    adopt_supervisor_lease,
-    validate_claimed_submission,
-)
 from cutmaster.application import CutMasterApplication
-from cutmaster.application.direct import DirectService, PlanCommand
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     FailAttemptCommand,
@@ -31,19 +22,23 @@ from cutmaster.application.jobs import (
     JobSubmissionView,
     RecordAttemptUsageCommand,
 )
+from cutmaster.application.jobs.cancellation import DatabaseJobCancellationToken
+from cutmaster.application.jobs.lease import validate_claimed_submission
 from cutmaster.application.jobs.usage import (
     normalize_usage_summary,
 )
-from cutmaster.application.runs import CompleteRunCommand, RunView
+from cutmaster.application.runs import (
+    CompleteRunCommand,
+    ExecuteRunPlanningCommand,
+    RunPlanningArtifacts,
+    RunPlanningExecutor,
+    RunView,
+)
 from cutmaster.application.runs.review import (
     REVIEW_BUNDLE_FILENAME,
     REVIEW_BUNDLE_SCHEMA_VERSION,
     artifact_manifest_entry,
     write_json_atomic,
-)
-from cutmaster.configuration.effective import (
-    EffectiveConfiguration,
-    SecretReferences,
 )
 from cutmaster.domain.attempts import TERMINAL_ATTEMPT_STATUSES
 from cutmaster.domain.ids import AttemptId, JobId, RunId
@@ -72,18 +67,6 @@ _ASTER_AGENTS = (
     "edit_composer",
     "revision_editor",
 )
-
-
-@dataclass(frozen=True)
-class _RunPlanArtifacts:
-    render_plan: Path
-    candidate_pool: Path
-    edit_plan: Path
-    dialogue_anchors: Path
-    raw_script: Path
-    music_profile: Path
-    selection_diagnostics: Path
-    model_usage_summary: Mapping[str, Any]
 
 
 class ASTERJobProgressReporter(ProgressReporter):
@@ -143,8 +126,8 @@ def execute_run_job(
     """Claim and execute exactly one queued ASTER planning Job.
 
     ``planner`` is injectable so transport tests exercise the durable state
-    machine without contacting model providers. Production uses the same
-    synchronous Direct planning service as the CLI and Benchmark adapters.
+    machine without contacting model providers. Production delegates to the
+    same Application planning executor used by every inbound adapter.
     """
 
     if not isinstance(application, CutMasterApplication):
@@ -157,7 +140,7 @@ def execute_run_job(
     if claimed_submission is None:
         claimed = application.jobs.claim_next(
             ClaimJobCommand(
-                worker_id or f"web-run-{resolved_process_id}",
+                worker_id or f"managed-run-{resolved_process_id}",
                 resolved_process_id,
                 job_id,
             )
@@ -172,7 +155,7 @@ def execute_run_job(
         application.jobs.mark_failed(
             FailAttemptCommand(
                 attempt.attempt_id,
-                "Web Run worker received a non-ASTER planning Job",
+                "Managed Run executor received a non-ASTER planning Job",
             )
         )
         return RunStatus.FAILED
@@ -218,7 +201,7 @@ def execute_run_job(
         )
         with tempfile.TemporaryDirectory(prefix=f"cutmaster-{run_id}-") as raw:
             workspace = Path(raw).resolve()
-            planned: Path | _RunPlanArtifacts | None = None
+            planned: Path | RunPlanningArtifacts | None = None
             try:
                 if planner is None:
                     planned = _plan_run(
@@ -239,7 +222,7 @@ def execute_run_job(
                 relative_plan = _run_plan_relative_path(run)
                 source_plan = (
                     planned.render_plan
-                    if isinstance(planned, _RunPlanArtifacts)
+                    if isinstance(planned, RunPlanningArtifacts)
                     else planned
                 )
                 cancellation_token.raise_if_cancelled()
@@ -250,7 +233,7 @@ def execute_run_job(
                 )
                 published_paths.append(published_plan)
                 cancellation_token.raise_if_cancelled()
-                if isinstance(planned, _RunPlanArtifacts):
+                if isinstance(planned, RunPlanningArtifacts):
                     published_paths.extend(
                         _publish_review_bundle(
                             planned,
@@ -332,77 +315,29 @@ def _plan_run(
     progress_reporter: ProgressReporter | None = None,
     cancellation_token: CancellationToken | None = None,
     checkpoint_store: PlannersCheckpointStore | None = None,
-) -> _RunPlanArtifacts:
-    if len(run.video_material_ids) != 1 or len(run.music_material_ids) != 1:
-        raise ValueError("ASTER Run snapshot requires exactly one video and one music")
-    video = application.materials.get(run.video_material_ids[0])
-    music = application.materials.get(run.music_material_ids[0])
-    if video is None or music is None:
-        raise FileNotFoundError("An ASTER Run snapshot Material is unavailable")
-    current = application.settings.effective_configuration
-    snapshot = EffectiveConfiguration(
-        sources=current.sources,
-        data_root=current.data_root,
-        secret_references=_snapshot_secret_references(run.configuration),
-        _values=run.configuration,
-    )
-    options = _managed_planners_options(run.planning_options)
-    result = DirectService(snapshot, application.materials).plan(
-        PlanCommand(
-            prompt=run.creative_brief.editing_intent,
-            output_dir=workspace,
-            video_material=video.name,
-            music_material=music.name,
-            target_output_length_sec=run.creative_brief.target_duration_sec,
-            target_shot_length_sec=options["target_shot_length_sec"],
-            prompt_type=options["prompt_type"],
-            video_title=options["video_title"],
-            max_clip_duration_sec=options["max_clip_duration_sec"],
+) -> RunPlanningArtifacts:
+    return RunPlanningExecutor(
+        application.settings.effective_configuration,
+        application.materials,
+    ).execute(
+        ExecuteRunPlanningCommand(
+            run=run,
+            workspace=workspace.resolve(),
             progress_reporter=progress_reporter,
             cancellation_token=cancellation_token,
             checkpoint_store=checkpoint_store,
         )
     )
-    return _RunPlanArtifacts(
-        render_plan=result.render_plan_path,
-        candidate_pool=result.candidate_pool_path,
-        edit_plan=result.edit_plan_path,
-        dialogue_anchors=result.dialogue_anchors_path,
-        raw_script=result.raw_script_path,
-        music_profile=result.music_profile_path,
-        selection_diagnostics=result.selection_diagnostics_path,
-        model_usage_summary=dict(result.model_usage_summary),
-    )
-
-
-def _managed_planners_options(raw: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        return {
-            "target_shot_length_sec": 4.0,
-            "prompt_type": "event",
-            "video_title": "",
-            "max_clip_duration_sec": None,
-        }
-    return {
-        "target_shot_length_sec": float(raw.get("target_shot_length_sec", 4.0)),
-        "prompt_type": str(raw.get("prompt_type") or "event"),
-        "video_title": str(raw.get("video_title") or ""),
-        "max_clip_duration_sec": (
-            None
-            if raw.get("max_clip_duration_sec") is None
-            else float(raw["max_clip_duration_sec"])
-        ),
-    }
 
 
 def _capture_attempt_usage(
     workspace: Path,
-    planned: Path | _RunPlanArtifacts | None,
+    planned: Path | RunPlanningArtifacts | None,
 ) -> dict[str, Any] | None:
     """Capture only this planners invocation's aggregate before cleanup."""
 
     try:
-        if isinstance(planned, _RunPlanArtifacts):
+        if isinstance(planned, RunPlanningArtifacts):
             candidate = planned.model_usage_summary
         else:
             # This import is intentionally on the executing worker path: the
@@ -449,27 +384,6 @@ def _record_attempt_usage_best_effort(
         LOGGER.exception("Unable to persist ASTER Attempt model usage")
 
 
-def _snapshot_secret_references(
-    values: Mapping[str, Any],
-) -> SecretReferences:
-    def reference(*sections: str) -> str | None:
-        value: Any = values
-        for section in sections:
-            if not isinstance(value, Mapping):
-                return None
-            value = value.get(section)
-        if not isinstance(value, Mapping):
-            return None
-        raw = value.get("api_key_env")
-        return None if raw is None else str(raw)
-
-    return SecretReferences(
-        llm_api_key_env=reference("llm"),
-        vlm_api_key_env=reference("vlm"),
-        asr_api_key_env=reference("analyser", "asr"),
-    )
-
-
 def _run_plan_relative_path(run: RunView) -> str:
     return f"projects/{run.project_id}/runs/{run.run_id}/plan.json"
 
@@ -507,7 +421,7 @@ def _publish_plan(source: Path, data_root: Path, relative_path: str) -> Path:
 
 
 def _publish_review_bundle(
-    artifacts: _RunPlanArtifacts,
+    artifacts: RunPlanningArtifacts,
     target_directory: Path,
     *,
     cancellation_token: CancellationToken | None = None,
@@ -638,52 +552,8 @@ def _create_and_dispatch_preview(
         LOGGER.exception("Unable to create or dispatch the default dialogue Preview")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Execute one CutMaster Web Run Job")
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--job-id", required=True)
-    add_supervisor_lease_arguments(parser)
-    args = parser.parse_args(argv)
-    application = CutMasterApplication.open(args.config)
-    job_id = JobId.parse(args.job_id)
-    exact_supervisor_grant = all(
-        value is not None
-        for value in (
-            args.attempt_id,
-            args.lease_worker_id,
-            args.lease_process_id,
-        )
-    )
-    with application.data_root_coordinator.shared(
-        allow_maintenance=exact_supervisor_grant
-    ):
-        claimed = adopt_supervisor_lease(
-            application,
-            job_id=job_id,
-            attempt_id=args.attempt_id,
-            lease_worker_id=args.lease_worker_id,
-            lease_process_id=args.lease_process_id,
-            worker_kind="run",
-        )
-        status = execute_run_job(
-            application,
-            job_id,
-            # Preview is only durably enqueued; the parent owns subprocesses.
-            preview_dispatcher=lambda _submission: None,
-            claimed_submission=claimed,
-        )
-    if status in {None, RunStatus.COMPLETE, RunStatus.INTERRUPTED}:
-        return 0
-    return 1
-
-
-if __name__ == "__main__":  # pragma: no cover - exercised through subprocess
-    raise SystemExit(main())
-
-
 __all__ = [
     "ASTERJobProgressReporter",
     "RunPlanner",
     "execute_run_job",
-    "main",
 ]

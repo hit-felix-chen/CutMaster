@@ -59,7 +59,14 @@ const fullSummary = {
   currency: 'CNY',
   price_unit: 'yuan_per_million_tokens',
   by_model: { 'qwen3.7-max': bucket },
-  by_task: { story_editor: bucket },
+  by_task: {
+    slot_arrangement: bucket,
+    dialogue_anchor_selection: bucket,
+    candidate_retrieval: bucket,
+    candidate_visual_scoring: bucket,
+    pairwise_scoring: bucket,
+    script_review: bucket,
+  },
 }
 
 const compactSummary = {
@@ -141,7 +148,12 @@ describe('Run model usage projection', () => {
       screen.getByText('Usage could not be recorded for this Attempt.'),
     ).toBeVisible()
     expect(screen.getByText('qwen3.7-max')).toBeVisible()
-    expect(screen.getByText('story_editor')).toBeVisible()
+    expect(screen.getByText('slot_arrangement')).toBeVisible()
+    expect(screen.getByLabelText('Arrangement Architect')).toHaveTextContent('A')
+    expect(screen.getByLabelText('Story Editor')).toHaveTextContent('S')
+    expect(screen.getAllByLabelText('Timeline Scout')).toHaveLength(2)
+    expect(screen.getByLabelText('Edit Composer')).toHaveTextContent('E')
+    expect(screen.getByLabelText('Revision Editor')).toHaveTextContent('R')
     expect(
       screen.getByText(/Model requests without reported token usage: 1/),
     ).toBeVisible()

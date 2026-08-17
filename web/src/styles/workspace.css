@@ -553,6 +553,25 @@
   background: var(--surface-raised);
   padding: 0.55rem 0.7rem;
 }
+.material-analysis-cost {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid
+    color-mix(in srgb, var(--accent-narrative) 24%, var(--border-subtle));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent-narrative) 6%, var(--surface-raised));
+  padding: 0.65rem 0.75rem;
+}
+.material-analysis-cost span {
+  color: var(--text-secondary);
+}
+.material-analysis-cost strong {
+  color: var(--accent-narrative-strong);
+  font-family: var(--font-mono);
+}
 .reference-list a {
   width: 100%;
   color: var(--text-primary);
@@ -2247,6 +2266,11 @@
   font-family: var(--font-mono);
   font-size: 0.72rem;
 }
+.run-list-card__duration {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
 .history-list .run-list-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2285,7 +2309,7 @@
 }
 .run-detail__grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
 }
@@ -2403,8 +2427,30 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
 }
-.run-usage__groups article strong {
+.run-usage__group-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-3);
+}
+.run-usage__group-name strong {
   overflow-wrap: anywhere;
+}
+.run-usage__agent-badge {
+  display: inline-grid;
+  width: 1.85rem;
+  height: 1.85rem;
+  flex: 0 0 1.85rem;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent-narrative) 68%, transparent);
+  border-radius: 0.58rem;
+  background: color-mix(in srgb, var(--accent-narrative) 8%, var(--surface-panel));
+  color: var(--accent-narrative-strong);
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
 }
 .run-progress,
 .run-failure {

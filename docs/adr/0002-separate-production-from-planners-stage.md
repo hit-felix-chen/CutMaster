@@ -24,7 +24,9 @@ same plan portable and reusable across variants and Data Root Migration.
 ASTER agents decide the edit, and the deterministic Plan Compiler emits the
 RenderPlan. In managed use, the Application commits that plan as the sole
 immutable payload of a Frozen Edit; it does not create a second timeline copy.
-Direct workflows may render the same contract without creating product history.
+Every inbound adapter renders through this managed Application workflow and
+therefore retains the owning Project, Run, Frozen Edit, and Render Variant
+history.
 
 Each managed Render Variant also owns an immutable normalized Render
 Specification. All of its Attempts use that snapshot rather than current global

@@ -10,23 +10,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from cutmaster.adapters.web.job_supervisor import JobSupervisor, LocalJobSupervisor
 from cutmaster.adapters.web.data_root_migration_supervisor import (
     DataRootMigrationSupervisor,
     LocalDataRootMigrationSupervisor,
     finalize_migration_after_restart,
 )
-from cutmaster.adapters.web.material_supervisor import (
-    MaterialDispatcher,
-    SubprocessMaterialDispatcher,
-)
 from cutmaster.adapters.web.problem_details import (
     install_problem_handlers,
     problem_response,
-)
-from cutmaster.adapters.web.render_supervisor import (
-    RenderDispatcher,
-    SubprocessRenderDispatcher,
 )
 from cutmaster.adapters.web.routes import (
     activity_router,
@@ -40,16 +31,22 @@ from cutmaster.adapters.web.routes import (
     runs_router,
     settings_router,
 )
-from cutmaster.adapters.web.run_supervisor import (
-    RunDispatcher,
-    SubprocessRunDispatcher,
-)
 from cutmaster.application import CutMasterApplication
+from cutmaster.application.ports import JobDispatcher, LifecycleJobSupervisor
 
 DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
 )
+
+
+class _DormantJobDispatcher:
+    """Leave durable submissions queued in inspection-only/test Web hosts."""
+
+    __slots__ = ()
+
+    def dispatch(self, _submission: object) -> None:
+        return
 
 
 def create_app(
@@ -58,37 +55,21 @@ def create_app(
     application: CutMasterApplication | None = None,
     spa_directory: Path | str | None = None,
     allowed_origins: tuple[str, ...] = DEFAULT_DEV_ORIGINS,
-    material_dispatcher: MaterialDispatcher | None = None,
-    run_dispatcher: RunDispatcher | None = None,
-    render_dispatcher: RenderDispatcher | None = None,
-    job_supervisor: JobSupervisor | None = None,
+    job_dispatcher: JobDispatcher | None = None,
+    job_supervisor: LifecycleJobSupervisor | None = None,
     data_root_migration_supervisor: DataRootMigrationSupervisor | None = None,
-    enable_job_supervisor: bool = True,
-    job_max_concurrency: int = 2,
-    job_poll_interval_sec: float = 0.25,
-    job_orphan_after_sec: float = 45.0,
-    job_orphan_audit_interval_sec: float = 10.0,
 ) -> FastAPI:
     """Create one local Web adapter over one Application composition root."""
 
     cutmaster = application or CutMasterApplication.open(config_path)
-    custom_dispatcher = any(
-        dispatcher is not None
-        for dispatcher in (material_dispatcher, run_dispatcher, render_dispatcher)
-    )
-    if job_supervisor is not None and not enable_job_supervisor:
-        raise ValueError("job_supervisor requires enable_job_supervisor=True")
-    if job_supervisor is not None and custom_dispatcher:
-        raise ValueError("job_supervisor cannot be mixed with custom dispatchers")
-    supervisor = job_supervisor
-    if supervisor is None and enable_job_supervisor and not custom_dispatcher:
-        supervisor = LocalJobSupervisor(
-            cutmaster,
-            max_concurrency=job_max_concurrency,
-            poll_interval_sec=job_poll_interval_sec,
-            orphan_after_sec=job_orphan_after_sec,
-            orphan_audit_interval_sec=job_orphan_audit_interval_sec,
-        )
+    if job_supervisor is not None and job_dispatcher is not None:
+        raise ValueError("job_supervisor cannot be mixed with job_dispatcher")
+    if job_supervisor is not None:
+        dispatcher: JobDispatcher = job_supervisor
+    elif job_dispatcher is not None:
+        dispatcher = job_dispatcher
+    else:
+        dispatcher = _DormantJobDispatcher()
     migration_supervisor = data_root_migration_supervisor or (
         LocalDataRootMigrationSupervisor(cutmaster)
     )
@@ -97,13 +78,13 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         finalize_migration_after_restart(cutmaster)
         migration_supervisor.start()
-        if supervisor is not None:
-            supervisor.start()
+        if job_supervisor is not None:
+            job_supervisor.start()
         try:
             yield
         finally:
-            if supervisor is not None:
-                supervisor.stop()
+            if job_supervisor is not None:
+                job_supervisor.stop()
             migration_supervisor.stop()
 
     app = FastAPI(
@@ -115,22 +96,8 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.cutmaster_application = cutmaster
-    app.state.cutmaster_job_supervisor = supervisor
+    app.state.cutmaster_job_dispatcher = dispatcher
     app.state.cutmaster_data_root_migration_supervisor = migration_supervisor
-    if supervisor is not None:
-        app.state.cutmaster_material_dispatcher = supervisor
-        app.state.cutmaster_run_dispatcher = supervisor
-        app.state.cutmaster_render_dispatcher = supervisor
-    else:
-        app.state.cutmaster_material_dispatcher = (
-            material_dispatcher or SubprocessMaterialDispatcher(cutmaster)
-        )
-        app.state.cutmaster_run_dispatcher = run_dispatcher or SubprocessRunDispatcher(
-            cutmaster
-        )
-        app.state.cutmaster_render_dispatcher = (
-            render_dispatcher or SubprocessRenderDispatcher(cutmaster)
-        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(allowed_origins),

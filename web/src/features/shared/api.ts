@@ -64,6 +64,7 @@ export type MaterialReference =
 
 export interface MaterialDetail extends MaterialSummary {
   analysis_available: boolean
+  analysis_cost_yuan?: number | null
   source?: {
     filename?: string
     size_bytes?: number
@@ -576,7 +577,6 @@ export interface ProviderConnectionResult {
 export interface StorageReport {
   data_root: string
   categories: Array<{ name: string; file_count: number; size_bytes: number }>
-  direct_bundle_count: number
   total_size_bytes: number
   reveal_supported: boolean
 }

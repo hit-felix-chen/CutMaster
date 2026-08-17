@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,6 +29,65 @@ function jsonResponse(value: unknown) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Material Memory deep links', () => {
+  it('shows the persisted analysis API cost in the drawer and Technical Memory', async () => {
+    const costMaterial = { ...material, analysis_cost_yuan: 0.123456 }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/memory/technical')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: material.material_id,
+              material_type: 'video',
+              tab: 'technical',
+              payload: {
+                schema_version: '3.0',
+                source: { duration_sec: 120, fps: 24 },
+                segment_count: 2,
+              },
+            }),
+          )
+        }
+        if (url === '/api/materials/mat_video') {
+          return Promise.resolve(jsonResponse(costMaterial))
+        }
+        if (url.startsWith('/api/materials?')) {
+          return Promise.resolve(jsonResponse({ items: [costMaterial], total: 1 }))
+        }
+        return Promise.resolve(new Response(null, { status: 404 }))
+      }),
+    )
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/materials/:type/:materialId?',
+          element: <MaterialsWorkspace />,
+        },
+        {
+          path: '/materials/:type/:materialId/memory/:tab',
+          element: <MaterialsWorkspace />,
+        },
+      ],
+      { initialEntries: ['/materials/video/mat_video'] },
+    )
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('API cost')).toBeVisible()
+    expect(screen.getByText(/0\.123456/)).toBeVisible()
+
+    await act(() => router.navigate('/materials/video/mat_video/memory/technical'))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText('API cost')).toBeVisible()
+    expect(within(dialog).getByText(/0\.123456/)).toBeVisible()
+  })
+
   it.each([
     {
       type: 'video',

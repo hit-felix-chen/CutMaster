@@ -8,7 +8,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from cutmaster import CutMasterApplication
-from cutmaster.application.direct.service import DirectService
 from cutmaster.application.jobs.service import JobsService
 from cutmaster.application.materials.service import MaterialsService
 from cutmaster.application.projects.service import ProjectsService
@@ -19,6 +18,7 @@ from cutmaster.application.settings import (
     SaveProviderSettingsCommand,
 )
 from cutmaster.application.settings.service import SettingsService
+from cutmaster.application.workflow.coordinator import ManagedWorkflowCoordinator
 from cutmaster.configuration.effective import load_effective_configuration
 
 MINIMAL_CONFIG = """
@@ -76,7 +76,7 @@ def test_application_exposes_seven_concrete_lazy_singleton_services(
 ) -> None:
     app = CutMasterApplication.open(_write_config(tmp_path))
     expected = {
-        "direct": DirectService,
+        "workflows": ManagedWorkflowCoordinator,
         "materials": MaterialsService,
         "projects": ProjectsService,
         "runs": RunsService,

@@ -29,7 +29,7 @@ from starlette.types import Receive, Scope, Send
 from cutmaster.adapters.web.dependencies import (
     ApplicationDependency,
     IdempotencyKey,
-    MaterialDispatcherDependency,
+    JobDispatcherDependency,
 )
 from cutmaster.adapters.web.presenters import (
     attempt_view,
@@ -231,7 +231,7 @@ def preflight_material_name(
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 def import_material(
     application: ApplicationDependency,
-    dispatcher: MaterialDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
     material_type: MaterialType = Form(),
     name: str = Form(),
@@ -389,7 +389,7 @@ def get_material(
 def retry_material_analysis(
     material_id: str,
     application: ApplicationDependency,
-    dispatcher: MaterialDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> JSONResponse:
     identifier = MaterialId.parse(material_id)
@@ -416,7 +416,7 @@ def retry_material_analysis(
 def resume_material_analysis(
     material_id: str,
     application: ApplicationDependency,
-    dispatcher: MaterialDispatcherDependency,
+    dispatcher: JobDispatcherDependency,
     command_id: IdempotencyKey,
 ) -> JSONResponse:
     identifier = MaterialId.parse(material_id)

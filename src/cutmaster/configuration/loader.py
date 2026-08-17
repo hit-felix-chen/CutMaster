@@ -577,7 +577,7 @@ def _build_config(
                 motion_sample_fps=float(retrieval.get("motion_sample_fps", 2.0)),
                 motion_workers=int(retrieval.get("motion_workers", 4)),
                 static_kinetic_energy_threshold=float(
-                    retrieval.get("static_kinetic_energy_threshold", 0.05)
+                    retrieval.get("static_kinetic_energy_threshold", 0.01)
                 ),
                 visual_sample_frames=int(retrieval.get("visual_sample_frames", 4)),
                 protagonist_visibility_likert_threshold=visibility,

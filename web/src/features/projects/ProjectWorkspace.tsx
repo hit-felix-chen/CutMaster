@@ -728,6 +728,48 @@ function secondsToTime(value: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 }
 
+function RunExecutionTime({
+  run,
+  execution,
+  compact = false,
+}: {
+  run: RunSummary
+  execution: ExecutionSummary | null
+  compact?: boolean
+}) {
+  const { t } = useTranslation('common')
+  const status = executionStatus(run.status, execution).trim().toLowerCase()
+  const running = ['running', 'retrying', 'stopping'].includes(status)
+  const complete = ['complete', 'completed'].includes(run.status.trim().toLowerCase())
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [running])
+
+  if (!running && !complete) return null
+  const startedAt = Date.parse(execution?.attempt.started_at ?? run.created_at)
+  const finishedAt = complete
+    ? Date.parse(execution?.attempt.finished_at ?? run.updated_at)
+    : now
+  if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return null
+  const elapsed = secondsToTime(Math.max(0, (finishedAt - startedAt) / 1000))
+  const label = running ? t('projects.runningDuration') : t('projects.runDuration')
+
+  return compact ? (
+    <span className="run-list-card__duration">
+      {label} · {elapsed}
+    </span>
+  ) : (
+    <article className="summary-panel">
+      <span>{label}</span>
+      <strong>{elapsed}</strong>
+    </article>
+  )
+}
+
 export function CreativeBrief() {
   const { t } = useTranslation('common')
   const { workspace } = useProjectContext()
@@ -1051,6 +1093,7 @@ export function ProjectRuns() {
                     </strong>
                     <StatusBadge status={executionStatus(run.status, execution)} />
                   </span>
+                  <RunExecutionTime run={run} execution={execution} compact />
                   {active ? (
                     <AsterProgress
                       compact
@@ -1122,6 +1165,7 @@ export function RunDetail() {
           <span>{t('projects.frozenEdits')}</span>
           <strong>{detail.data.frozen_edits.length}</strong>
         </article>
+        <RunExecutionTime run={run} execution={execution} />
       </section>
       {detail.data.model_usage ? (
         <RunUsagePanel modelUsage={detail.data.model_usage} />
@@ -1257,7 +1301,11 @@ function RunUsagePanel({ modelUsage }: { modelUsage: RunModelUsage }) {
       {modelEntries.length > 0 || taskEntries.length > 0 ? (
         <div className="run-usage__groups">
           <UsageBreakdown title={t('projects.usageByModel')} items={modelEntries} />
-          <UsageBreakdown title={t('projects.usageByTask')} items={taskEntries} />
+          <UsageBreakdown
+            title={t('projects.usageByTask')}
+            items={taskEntries}
+            showAsterAgent
+          />
         </div>
       ) : null}
     </section>
@@ -1276,9 +1324,11 @@ function UsageMetric({ label, value }: { label: string; value: number | string }
 function UsageBreakdown({
   title,
   items,
+  showAsterAgent = false,
 }: {
   title: string
   items: Array<[string, ModelUsageBucket]>
+  showAsterAgent?: boolean
 }) {
   const { t, i18n } = useTranslation('common')
   if (items.length === 0) return null
@@ -1288,7 +1338,10 @@ function UsageBreakdown({
       <div>
         {items.map(([name, usage]) => (
           <article key={name}>
-            <strong>{name}</strong>
+            <div className="run-usage__group-name">
+              {showAsterAgent ? <AsterAgentBadge task={name} /> : null}
+              <strong>{name}</strong>
+            </div>
             <span>
               {t('projects.usageBreakdown', {
                 requests: usage.request_count,
@@ -1300,5 +1353,29 @@ function UsageBreakdown({
         ))}
       </div>
     </section>
+  )
+}
+
+const asterAgentByTask: Record<string, { initial: string; name: string }> = {
+  slot_arrangement: { initial: 'A', name: 'Arrangement Architect' },
+  arrangement_architect: { initial: 'A', name: 'Arrangement Architect' },
+  dialogue_anchor_selection: { initial: 'S', name: 'Story Editor' },
+  story_editor: { initial: 'S', name: 'Story Editor' },
+  candidate_retrieval: { initial: 'T', name: 'Timeline Scout' },
+  candidate_visual_scoring: { initial: 'T', name: 'Timeline Scout' },
+  timeline_scout: { initial: 'T', name: 'Timeline Scout' },
+  pairwise_scoring: { initial: 'E', name: 'Edit Composer' },
+  edit_composer: { initial: 'E', name: 'Edit Composer' },
+  script_review: { initial: 'R', name: 'Revision Editor' },
+  revision_editor: { initial: 'R', name: 'Revision Editor' },
+}
+
+function AsterAgentBadge({ task }: { task: string }) {
+  const agent = asterAgentByTask[task]
+  if (!agent) return null
+  return (
+    <abbr className="run-usage__agent-badge" title={agent.name} aria-label={agent.name}>
+      {agent.initial}
+    </abbr>
   )
 }

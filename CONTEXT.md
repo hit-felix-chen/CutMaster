@@ -9,20 +9,22 @@ CutMaster turns long-form footage into a finished montage through a three-stage
 The backend implements the three-stage **Analyser → Planners → Renderer**
 workflow, reusable video and music Materials, name-based selection, Material
 Fingerprint verification, and single-video/single-music editing. A real
-`CutMasterApplication` exposes seven Application service groups. CLI and
-Mashup-Benchmark complete executions now use shared local managed orchestration:
-they create the same Material, Edit Project, ASTER Run, Execution Attempt,
-Frozen Edit, and Render Variant history as Web and accept no custom output
-directory. The Direct service remains the internal synchronous stage boundary;
-it is no longer the authoritative complete-execution storage path for those
-adapters. The earlier monolithic complete-workflow facade and raw-path stage
-DTOs have been removed.
+`CutMasterApplication` exposes seven Application service groups. CLI, FastAPI
+Web, the isolated Worker, and Mashup-Benchmark are peer inbound adapters over
+the same Application Layer. Complete CLI and Benchmark executions enter through
+the public `cutmaster.application.workflow` contract and
+`CutMasterApplication.workflows`; they create the same Material, Edit Project,
+ASTER Run, Execution Attempt, Frozen Edit, and Render Variant history as Web
+and accept no custom output directory. The Worker dispatches already-claimed
+durable jobs to Application-owned Material, planning, and rendering executors.
+No adapter invokes another adapter; the earlier adapter-specific synchronous
+execution facades and raw-path stage DTOs have been removed.
 
 The backend also implements SQLite-backed managed identity and history for
 **Edit Projects**, **Material References**, **ASTER Runs**, **Execution
 Attempts**, **Frozen Edits**, **Render Variants**, jobs, durable events, command
-idempotency, and settings. The local Material Catalog, managed Direct Workflow
-Bundles, secret-free Effective Configuration, and Application Data Root
+idempotency, and settings. The local Material Catalog, managed workflow
+receipts, secret-free Effective Configuration, and Application Data Root
 resolution are active code, not design placeholders.
 
 The FastAPI peer adapter, React/Vite Web UI, `cutmaster serve`, and the first
@@ -44,7 +46,8 @@ implemented.
 
 One local Job Supervisor schedules Analyser, Planners, and Renderer work with a
 durable FIFO queue, concurrency capacity, per-owner serialization, heartbeat
-leases, cooperative cancellation, and orphan recovery. One global SSE stream
+leases, cooperative cancellation, and orphan recovery, then launches the peer
+Worker for each claimed job. One global SSE stream
 projects durable events with `Last-Event-ID` replay and `resync_required` REST
 recovery. Provider presets/custom connections, first-run Setup, per-capability
 connection tests, atomic `config.toml`/`.env` writes, structured Activity
@@ -52,9 +55,8 @@ navigation with paginated recent work, and guarded **Data Root Migration** are
 also implemented. Material and ASTER Run detail expose each current Attempt's
 absolute managed Job Log path plus an on-demand viewer backed by the retained
 file. Still deferred are persistent application notifications, the richer
-Activity log drawer, Direct Bundle bulk cleanup/retention, generated OpenAPI
-TypeScript drift checks in CI, multi-user/cloud operation, and broader provider
-and media port injection.
+Activity log drawer, generated OpenAPI TypeScript drift checks in CI,
+multi-user/cloud operation, and broader provider and media port injection.
 
 ## Language
 
@@ -82,24 +84,41 @@ _Avoid_: Production, Rendering Agent, editing agent
 **Application Layer** *(Implemented)*:
 The framework-independent use-case boundary above the CutMaster Workflow. It
 owns Material resolution, product history, execution policy, output ownership,
-and settings while exposing the same business operations to CLI, Web, and
-Benchmark adapters. It does not contain Analyser, Planners, or Renderer
+and settings while exposing the same business operations to CLI, FastAPI Web,
+Worker, and Benchmark adapters. It owns the complete-workflow coordinator and
+managed job executors, but does not contain Analyser, Planners, or Renderer
 implementation logic.
 _Avoid_: FastAPI, Web backend, complete-workflow facade, CutMaster Workflow
 
 **CutMasterApplication** *(Implemented)*:
 The single composition entry point that wires configuration, ports, concrete
-infrastructure, and the grouped `direct`, `materials`, `projects`, `runs`,
-`renders`, `jobs`, and `settings` Application services. It coordinates object
-construction but does not implement those use cases itself.
+infrastructure, and the grouped `materials`, `projects`, `runs`, `renders`,
+`jobs`, `settings`, and `workflows` Application services. Its public complete-
+workflow boundary is `CutMasterApplication.workflows`, whose command and receipt
+types are exported from `cutmaster.application.workflow`. The composition root
+coordinates object construction but does not implement those use cases itself.
 _Avoid_: monolithic service, complete-workflow facade, Web server
 
-**Peer Adapter** *(CLI, FastAPI Web, and Benchmark implemented)*:
+**Managed Workflow Coordinator** *(Implemented)*:
+The Application-owned complete-execution service exposed as
+`CutMasterApplication.workflows`. It resolves or creates managed Materials,
+creates an Edit Project and ASTER Run, freezes the accepted edit, renders a
+Render Variant, and returns a **Managed Workflow Receipt**. Its public command
+and receipt types are exported from `cutmaster.application.workflow`, and it has
+no knowledge of terminal flags, HTTP payloads, worker arguments, or benchmark
+task formats.
+_Avoid_: adapter workflow, transport facade, CutMaster Workflow
+
+**Peer Inbound Adapter** *(CLI, FastAPI Web, Worker, and Benchmark implemented)*:
 One transport-specific caller of the Application Layer. CLI, FastAPI Web, and
-Mashup-Benchmark are peers and map their own inputs and outputs to the same
-managed Application use cases. CLI and Benchmark synchronously drive the local
-managed Job executors; Web schedules those executors through its supervisor.
-_Avoid_: CLI wrapper around HTTP, Benchmark wrapper around CLI, Application Layer
+Mashup-Benchmark map their own inputs and outputs to the same managed
+Application use cases, while the isolated Worker maps claimed durable jobs to
+Application-owned job execution. CLI and Benchmark synchronously enter through
+`CutMasterApplication.workflows`; Web submits durable jobs through Application
+services, and the Job Supervisor launches the Worker. The four adapters are
+peers: none imports or calls another adapter.
+_Avoid_: CLI wrapper around HTTP, Benchmark wrapper around CLI, Web-owned Worker,
+Application Layer
 
 **Material Runtime Handle** *(Implemented)*:
 A runtime-only binding created by the Application Layer while it holds the
@@ -284,11 +303,11 @@ _Avoid_: Material Name, project ID, filesystem directory
 
 **Application Data Root** *(Resolution, storage, and migration implemented)*:
 The single local directory containing CutMaster's frontend database, Material
-Library, project artifacts, Direct Workflow Bundles, durable job state, and
-logs. It defaults to `CutMaster/.cutmaster/` and may be set to a custom local
-directory; individual data categories do not use independently configured
-roots. Repository-level bootstrap configuration, secrets, and the root-location
-pointer are outside it.
+Library, managed Project/Run/Frozen Edit/Render Variant artifacts, workflow
+receipts, durable job state, and logs. It defaults to `CutMaster/.cutmaster/`
+and may be set to a custom local directory; individual data categories do not
+use independently configured roots. Repository-level bootstrap configuration,
+secrets, and the root-location pointer are outside it.
 _Avoid_: browser storage, output directory, Material Library
 
 **Managed Artifact Reference** *(Implemented)*:
@@ -298,23 +317,24 @@ and an Application Data Root-relative path; an absolute Path is resolved only
 at a local service boundary.
 _Avoid_: absolute persisted path, exported copy, source path selector
 
-**Direct Workflow Bundle** *(Implemented)*:
-A self-contained artifact bundle produced by synchronous direct execution
-without an explicit external output directory. It moves with the Application
-Data Root but belongs to no Edit Project, ASTER Run, Activity history, or Render
-Variant, is never deleted automatically, and remains until explicit bulk
-cleanup.
-_Avoid_: Managed Artifact Reference, ASTER Run, external output directory
-
-**Artifact Manifest** *(Implemented)*:
-The versioned logical index embedded in a successful Direct Workflow
-`result.json`. It maps stable dotted artifact keys to normalized POSIX file paths
-relative to that Direct Workflow Bundle, allowing explicit Direct API consumers
-to locate outputs without reconstructing internal directory names. It never
-contains an absolute path, parent traversal, directory entry, Material Catalog
-path, or Managed Artifact Reference.
-_Avoid_: filesystem scan, absolute result fields, Managed Artifact Reference,
+**Managed Workflow Receipt** *(Implemented)*:
+The portable result returned by `CutMasterApplication.workflows` after a complete
+managed execution and retained as `result.json` under the owning ASTER Run. It
+identifies the authoritative Project, Run, Frozen Edit, Render Variant, and
+Materials, and maps stable logical artifact keys to normalized Application Data
+Root-relative paths. It is an index over managed product history, not a second
+artifact bundle or an alternative history model.
+_Avoid_: standalone workflow bundle, exported copy, absolute artifact path,
 RenderPlan
+
+**Benchmark Submission Copy** *(Implemented by Mashup-Benchmark)*:
+The evaluation-facing copy of selected artifacts that the Mashup-Benchmark
+adapter writes into the benchmark-provided run directory after the managed
+workflow succeeds. The source artifacts and their Project/Run/Frozen
+Edit/Render Variant history remain authoritative inside CutMaster's Application
+Data Root; deleting or moving the submission copy does not alter that history.
+_Avoid_: Managed Artifact Reference, Render Variant master, CutMaster output
+directory
 
 **Data Root Migration** *(Implemented)*:
 The guarded operation for changing a non-empty **Application Data Root**. It
@@ -634,9 +654,9 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 
 > **Developer:** Does changing the prompt update the previous ASTER Run?
 >
-> **Domain expert:** Direct execution with `--overwrite` replaces artifacts in
-> an explicit output directory. Managed project execution creates another
-> immutable ASTER Run record and retains the previous result and usage.
+> **Domain expert:** No. Every adapter enters the same managed Application use
+> case, which creates another immutable ASTER Run and retains the previous
+> result and usage.
 
 > **Developer:** Does retrying a failed ASTER execution create another Run?
 >
@@ -658,6 +678,14 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 > **Developer:** Does a CLI result stored under `.cutmaster/` become an ASTER
 > Run in the Web UI?
 >
-> **Domain expert:** No. With no explicit output directory it is a Direct
-> Workflow Bundle: CutMaster migrates the bundle with its Data Root, but it does
-> not belong to project history.
+> **Domain expert:** Yes. CLI uses `CutMasterApplication.workflows`, so its
+> Project, ASTER Run, Frozen Edit, Render Variant, usage, and receipt are the
+> same managed history that Web reads.
+
+> **Developer:** Is the copy in a benchmark run directory CutMaster's canonical
+> output?
+>
+> **Domain expert:** No. Mashup-Benchmark first completes the same managed
+> workflow, then copies only the evaluation-required artifacts into its run
+> directory. That Benchmark Submission Copy does not replace CutMaster's
+> managed history or Render Variant master.

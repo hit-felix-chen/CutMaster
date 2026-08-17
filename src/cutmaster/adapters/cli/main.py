@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster import CutMasterApplication
-from cutmaster.adapters.local_workflow import LocalManagedWorkflow
-from cutmaster.contracts import ExecuteManagedWorkflowCommand
+from cutmaster.application.workflow import ExecuteManagedWorkflowCommand
 from cutmaster.domain.ids import FrozenEditId
 from cutmaster.infrastructure.observability.logging import error_summary, log_event
 from cutmaster.workflow.prompting.failure_catalog import (
@@ -147,7 +146,7 @@ def _command_component(command: str) -> str:
 
 
 def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
-    managed = LocalManagedWorkflow(CutMasterApplication.open(config_path))
+    managed = CutMasterApplication.open(config_path).workflows
     if args.command == "analyse":
         return managed.analyse_video(
             args.video.resolve(),
@@ -180,7 +179,7 @@ def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
             audio_mode=args.audio_mode,
         )
     if args.command == "run":
-        return managed.execute_workflow(
+        return managed.execute_and_wait(
             ExecuteManagedWorkflowCommand(
                 prompt=args.prompt,
                 video_path=args.video.resolve() if args.video else None,
@@ -207,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = args.config.resolve()
     try:
         if args.command == "serve":
-            from cutmaster.adapters.web.server import serve
+            from cutmaster.bootstrap.local_web import serve
 
             serve(
                 config_path,

@@ -95,7 +95,7 @@ class CandidateRetrievalConfig:
     retrieval_max_rounds: int = 3
     motion_sample_fps: float = 2.0
     motion_workers: int = 4
-    static_kinetic_energy_threshold: float = 0.05
+    static_kinetic_energy_threshold: float = 0.01
     visual_sample_frames: int = 4
     protagonist_visibility_likert_threshold: int = 3
 

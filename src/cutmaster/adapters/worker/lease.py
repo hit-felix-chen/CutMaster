@@ -1,4 +1,4 @@
-"""Validated hand-off from the Web supervisor to one worker subprocess."""
+"""Validated hand-off from a local supervisor to one worker subprocess."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def adopt_supervisor_lease(
             attempt_id=AttemptId.parse(attempt_id),
             expected_worker_id=lease_worker_id,
             expected_process_id=lease_process_id,
-            worker_id=f"web-{worker_kind}-{os.getpid()}",
+            worker_id=f"worker-{worker_kind}-{os.getpid()}",
             process_id=os.getpid(),
         )
     )
@@ -54,23 +54,4 @@ def adopt_supervisor_lease(
     return adopted
 
 
-def validate_claimed_submission(
-    submission: JobSubmissionView,
-    job_id: JobId,
-) -> None:
-    if not isinstance(submission, JobSubmissionView):
-        raise TypeError("claimed_submission must be a JobSubmissionView")
-    if (
-        submission.job.job_id != job_id
-        or submission.job.attempt_id != submission.attempt.attempt_id
-        or submission.attempt.status is not AttemptStatus.RUNNING
-        or submission.job.status is not AttemptStatus.RUNNING
-    ):
-        raise ValueError("claimed_submission does not own the exact active Job")
-
-
-__all__ = [
-    "add_supervisor_lease_arguments",
-    "adopt_supervisor_lease",
-    "validate_claimed_submission",
-]
+__all__ = ["add_supervisor_lease_arguments", "adopt_supervisor_lease"]

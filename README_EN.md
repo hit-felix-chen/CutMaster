@@ -39,18 +39,27 @@ ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-CLI and Benchmark complete workflows use the shared local managed entry point. `CutMasterApplication.direct` remains an internal synchronous stage collaborator and an explicit Python compatibility API. `ASTERTeam` remains the sole coordinator for the five editorial agents.
+CLI, FastAPI Web, Worker, and the Benchmark Adapter are peer inbound adapters.
+CLI and Benchmark invoke synchronous complete workflows through
+`CutMasterApplication.workflows`; Web maps HTTP/SSE to grouped Application use
+cases; Worker executes Application-owned durable Jobs. The Application Layer
+owns the managed Material, Project, Run, Frozen Edit, Render Variant, and Job
+lifecycles. `ASTERTeam` remains the sole coordinator for the five editorial
+agents: agents never call one another directly, and the team coordinator owns
+all forward collaboration and repair feedback.
 
 ## Architecture
 
-> The backend now implements `CutMasterApplication`, Direct and Material
-> services, SQLite-managed state, handle-only v2 Workflow contracts, and the
+> The backend now implements `CutMasterApplication`, a Managed Workflow
+> Coordinator, Material/Run/Render executors, a durable Job executor,
+> SQLite-managed state, handle-only v2 Workflow contracts, and the Managed
 > Artifact Manifest. CLI and Mashup-Benchmark now create Web-visible managed
 > Project, Run, Frozen Edit, and Render Variant history.
 > The FastAPI + React/Vite local Web workspace is now implemented alongside
-> the backend foundations. CLI, Web, and Mashup-Benchmark all enter through the
-> Application Layer. Web `Start editing` now runs real ASTER planning in an
-> isolated subprocess and persists its RenderPlan, initial Frozen Edit, and the
+> the backend foundations. CLI, FastAPI Web, Worker, and Mashup-Benchmark all
+> enter through the Application Layer. Web `Start editing` now submits real
+> ASTER planning to an isolated Worker process and persists its RenderPlan,
+> initial Frozen Edit, and the
 > required Candidate Bundle. The Web workspace also implements
 > Material import, analysis, previews, and recovery; ASTER Run retry, boundary
 > resume, run-again, deletion, and usage; Frozen Edit Review and atomic Guided
@@ -89,22 +98,25 @@ flowchart LR
 The executable call structure is:
 
 ```text
-CLI
-└── CutMasterApplication.direct
-    ├── Analyser
-    │   └── MaterialAnalystAgent
-    ├── Planners
-    │   ├── ASTERTeam
-    │   │   ├── ArrangementArchitectAgent
-    │   │   ├── StoryEditorAgent
-    │   │   ├── TimelineScoutAgent
-    │   │   ├── EditComposerAgent
-    │   │   └── RevisionEditorAgent
-    │   └── plan compiler / source-window optimization
-    └── Renderer
-        ├── dialogue audio preparation
-        └── frame-exact rendering
+CLI Adapter -----------> CutMasterApplication.workflows
+Benchmark Adapter -----> CutMasterApplication.workflows
+FastAPI Web Adapter ---> CutMasterApplication grouped use cases
+Worker Adapter --------> ManagedJobExecutor
+                                   │
+                                   └── Application Layer
+                                       ├── ManagedWorkflowCoordinator
+                                       ├── ManagedMaterialAnalysisExecutor
+                                       │   └── Analyser → MaterialAnalystAgent
+                                       ├── RunPlanningExecutor
+                                       │   └── Planners → ASTERTeam → A/S/T/E/R
+                                       └── ManagedRenderExecutor → Renderer
 ```
+
+Each adapter translates only its own protocol: CLI owns arguments, terminal
+output, and exit codes; FastAPI owns HTTP and SSE; Worker owns the process entry
+for one durable Job; Benchmark owns evaluation-task translation and submission
+copy export. Adapters do not invoke one another or directly construct agents,
+tools, repositories, or output directories.
 
 ### Agent–tool boundary
 
@@ -112,7 +124,7 @@ CLI
 - **Tools provide capabilities**: ASR, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and ASTER coordination feedback live under `workflow/analyser/tools/` and `workflow/planners/tools/`; Material lifecycle belongs to `app.materials`.
 - **The Planners stage finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
 - **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating ASTER artifacts.
-- **Layer boundaries stay explicit**: configuration, public contracts, Workflow prompting, and concrete infrastructure live under `configuration/`, `contracts/`, `workflow/prompting/`, and `infrastructure/`.
+- **Layer boundaries stay explicit**: configuration, managed Application contracts, stage contracts, Workflow prompting, and concrete infrastructure live under `configuration/`, `application/workflow/`, `workflow/contracts/`, `workflow/prompting/`, and `infrastructure/`.
 
 ## Core mechanisms
 
@@ -147,7 +159,7 @@ Ordinary clips keep their source audio muted. Only selected Dialogue Anchors are
 
 ### 4. Candidate space with closed-loop repair
 
-The Timeline Scout searches the original timeline for non-anchor Slots and validates protagonist identity, relevance, visibility, and motion. If a Slot lacks viable candidates, the Scout returns explicit diagnostics to the Arrangement Architect for targeted repair. When Slot semantics change, the Story Editor revalidates the anchors.
+The Timeline Scout searches the original timeline for non-anchor Slots and validates protagonist identity, relevance, visibility, and motion. After exhausting the assigned Segment, it expands only once to the previous, current, and next Segments, retrieves three times the remaining candidate deficit, and keeps the highest-scoring alternatives. Alternative windows may overlap or shift slightly; only exact timestamp duplicates are rejected. If a Slot still lacks viable candidates, the Scout returns explicit diagnostics to the Arrangement Architect for targeted repair. When Slot semantics change, the Story Editor revalidates the anchors.
 
 ### 5. Efficient global sequence composition
 
@@ -275,8 +287,8 @@ after `resync_required`.
 Settings and first-run Setup support provider presets or custom
 OpenAI-compatible connections, per-capability connection tests, atomic `.env`
 and `config.toml` writes, and guarded Data Root Migration. Deliberately deferred
-work includes persistent in-app notifications, an Activity log drawer, Direct
-Bundle bulk cleanup/retention, generated OpenAPI TypeScript drift checks in CI,
+work includes persistent in-app notifications, an Activity log drawer,
+generated OpenAPI TypeScript drift checks in CI,
 multi-user/cloud deployment, and broader provider/media port injection.
 
 ### CLI
@@ -374,8 +386,7 @@ not create directories detached from product history.
 from pathlib import Path
 
 from cutmaster import CutMasterApplication
-from cutmaster.adapters.local_workflow import LocalManagedWorkflow
-from cutmaster.contracts import ExecuteManagedWorkflowCommand
+from cutmaster.application.workflow import ExecuteManagedWorkflowCommand
 
 app = CutMasterApplication.open(Path("config.toml"))
 request = ExecuteManagedWorkflowCommand(
@@ -385,15 +396,17 @@ request = ExecuteManagedWorkflowCommand(
     project_name="Protagonist Growth Montage",
     target_output_length_sec=60,
     target_shot_length_sec=4,
+    audio_mode="bgm_only",
 )
 
-result = LocalManagedWorkflow(app).execute_workflow(request)
+result = app.workflows.execute_and_wait(request)
 print(result.project_id, result.render_variant_id)
 ```
 
-CLI and the Benchmark adapter use `LocalManagedWorkflow` for synchronous
-managed execution. It drives the same durable Jobs and Application use cases as
-Web; integrations do not reach into agents or tools.
+CLI and Benchmark invoke `CutMasterApplication.workflows`; FastAPI Web and
+Worker connect to the same Application's grouped use cases and durable Job
+executor respectively. The four adapters never invoke one another or bypass
+the Application Layer to reach internal agents or tools.
 
 ## Configuration
 
@@ -454,7 +467,16 @@ Each Video Material analysis directory also stores `model_usage.json`. `current_
 
 ```text
 src/cutmaster/
-├── application/                     # CutMasterApplication and seven use-case groups
+├── bootstrap/                       # outermost local Web + Worker composition
+├── application/                     # Composition Root and managed use cases
+│   ├── workflow/                    # Coordinator, contracts, durable Job executor
+│   ├── materials/                   # Material lifecycle and Analysis executor
+│   ├── projects/                    # Edit Project and Creative Brief
+│   ├── runs/                        # ASTER Run and Planning executor
+│   ├── renders/                     # Render Variant and Render executor
+│   ├── jobs/                        # Attempts, Jobs, events, and recovery
+│   ├── settings/                    # Effective Configuration and Data Root
+│   └── ports/                       # Inward-facing Application ports
 ├── domain/                          # pure domain values and state
 ├── workflow/
 │   ├── analyser/                       # M + tools
@@ -463,11 +485,16 @@ src/cutmaster/
 │   ├── contracts/                      # handle-only v2
 │   ├── prompting/
 │   └── shared/
-├── adapters/                       # CLI, Web, and shared local managed adapter
+├── adapters/                        # peer CLI, Web, and Worker process adapters
 ├── infrastructure/                  # SQLite, Material Catalog, models, media, logging
-├── configuration/                   # Effective Configuration
-└── contracts/                       # stable managed and Direct APIs
+└── configuration/                   # Effective Configuration
 ```
+
+The Mashup-Benchmark Adapter remains in the separate Benchmark repository. It
+is a peer of CLI, Web, and Worker, invokes the public
+`cutmaster.application.workflow` contract, and copies only the managed
+artifacts required for evaluation into the Benchmark Run directory after
+completion.
 
 See [`docs/architecture.md`](docs/architecture.md) for dependency rules and public APIs, and [`docs/adr/`](docs/adr/) for architecture decisions.
 

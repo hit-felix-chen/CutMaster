@@ -123,6 +123,32 @@ def test_workflow_does_not_import_inbound_adapters() -> None:
     )
 
 
+def test_peer_adapter_packages_do_not_import_each_other() -> None:
+    adapters_root = PACKAGE_ROOT / "adapters"
+    violations: list[str] = []
+    for adapter_root in sorted(
+        path for path in adapters_root.iterdir() if path.is_dir()
+    ):
+        adapter_name = adapter_root.name
+        own_prefix = f"cutmaster.adapters.{adapter_name}"
+        for path in sorted(adapter_root.rglob("*.py")):
+            for line, module in _imports(path):
+                if (
+                    module.startswith("cutmaster.adapters.")
+                    and not (
+                        module == own_prefix
+                        or module.startswith(own_prefix + ".")
+                    )
+                ):
+                    violations.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
+                    )
+
+    assert not violations, "Peer adapters import each other:\n" + "\n".join(
+        violations
+    )
+
+
 def test_planners_does_not_import_analyser_implementation() -> None:
     planners_root = PACKAGE_ROOT / "workflow" / "planners"
     violations: list[str] = []

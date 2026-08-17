@@ -385,7 +385,7 @@ def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
         def dispatch(self, submission) -> None:
             preview_submissions.append(submission)
 
-    review_fixture.client.app.state.cutmaster_render_dispatcher = PreviewDispatcher()
+    review_fixture.client.app.state.cutmaster_job_dispatcher = PreviewDispatcher()
     command_id = _command_id()
     request = {
         "replacements": [{"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}]

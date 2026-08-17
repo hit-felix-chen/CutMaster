@@ -62,7 +62,10 @@ def _score_unary_candidates(
     candidates: list[dict[str, Any]],
 ) -> dict[str, float]:
     with ThreadPoolExecutor(max_workers=max(1, min(8, len(candidates)))) as executor:
-        values = executor.map(lambda candidate: _unary(slot, candidate), candidates)
+        values = executor.map(
+            lambda candidate: score_unary_candidate(slot, candidate),
+            candidates,
+        )
         return {
             candidate["candidate_id"]: score
             for candidate, score in zip(candidates, values, strict=True)
@@ -234,7 +237,10 @@ def _score_pairwise_layer(
             }
     return scores
 
-def _unary(slot: dict[str, Any], candidate: dict[str, Any]) -> float:
+def score_unary_candidate(
+    slot: dict[str, Any],
+    candidate: dict[str, Any],
+) -> float:
     emotion_match = 1.0 - abs(
         float(slot["target_emotional_intensity"]) - float(candidate["emotional_intensity"])
     )
@@ -463,7 +469,7 @@ def _score_candidate_path(
 ) -> float:
     score = 0.0
     for index, (slot, candidate) in enumerate(zip(slots, path, strict=True)):
-        score += 0.60 * _unary(slot, candidate)
+        score += 0.60 * score_unary_candidate(slot, candidate)
         if index:
             try:
                 pair = _pairwise(
@@ -502,7 +508,7 @@ def path_to_script(
                 "output_end_sec": output_end,
                 "planned_duration_sec": slot["planned_duration_sec"],
                 "selection_scores": {
-                    "unary": round(_unary(slot, candidate), 6),
+                    "unary": round(score_unary_candidate(slot, candidate), 6),
                     "semantic_relevance": candidate["semantic_relevance"],
                     "visual_slot_relevance_likert": candidate[
                         "visual_slot_relevance_likert"

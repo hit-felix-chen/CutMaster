@@ -1,4 +1,4 @@
-"""Stable direct-execution contracts shared by CLI and peer adapters."""
+"""Public commands and receipts for the managed CutMaster workflow."""
 
 from __future__ import annotations
 
@@ -21,15 +21,15 @@ def _positive(value: object, name: str) -> float:
 
 
 @dataclass(frozen=True, kw_only=True)
-class ExecuteWorkflowCommand:
-    """Generate one complete video from raw paths or existing Material Names."""
+class ExecuteManagedWorkflowCommand:
+    """Create one managed Project, ASTER Run, Frozen Edit, and Render Variant."""
 
     prompt: str
     video_path: Path | None = None
     audio_path: Path | None = None
     video_material: str = ""
     music_material: str = ""
-    output_dir: Path | None = None
+    project_name: str = "CutMaster CLI"
     target_output_length_sec: float = 60.0
     target_shot_length_sec: float = 4.0
     prompt_type: str = "event"
@@ -37,7 +37,6 @@ class ExecuteWorkflowCommand:
     subtitle_path: Path | None = None
     max_clip_duration_sec: float | None = None
     audio_mode: AudioMode = "dialogue"
-    overwrite: bool = False
     video_material_name: str = ""
     music_material_name: str = ""
 
@@ -50,12 +49,17 @@ class ExecuteWorkflowCommand:
             raise ValueError(
                 "Exactly one of audio_path or music_material must be supplied"
             )
-        for field_name in ("video_path", "audio_path", "output_dir", "subtitle_path"):
+        for field_name in ("video_path", "audio_path", "subtitle_path"):
             value = getattr(self, field_name)
             if value is not None and not isinstance(value, Path):
                 raise TypeError(f"{field_name} must be a pathlib.Path or None")
-        if not isinstance(self.prompt, str) or not self.prompt.strip():
-            raise ValueError("Prompt must not be empty")
+        for value, label in (
+            (self.prompt, "Prompt"),
+            (self.project_name, "Project Name"),
+            (self.prompt_type, "Prompt type"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must not be empty")
         object.__setattr__(
             self,
             "target_output_length_sec",
@@ -73,15 +77,11 @@ class ExecuteWorkflowCommand:
                 _positive(self.max_clip_duration_sec, "Maximum clip duration"),
             )
         if self.audio_mode not in {"bgm_only", "dialogue"}:
-            raise ValueError(f"Unsupported audio mode: {self.audio_mode}")
+            raise ValueError(f"Unsupported audio mode: {self.audio_mode!r}")
         if self.video_material and self.video_material_name:
-            raise ValueError(
-                "video_material_name is only valid with a raw video_path"
-            )
+            raise ValueError("video_material_name is only valid with video_path")
         if self.music_material and self.music_material_name:
-            raise ValueError(
-                "music_material_name is only valid with a raw audio_path"
-            )
+            raise ValueError("music_material_name is only valid with audio_path")
         if self.video_material and self.subtitle_path is not None:
             raise ValueError(
                 "subtitle_path cannot replace analysis for an existing Material"
@@ -89,34 +89,29 @@ class ExecuteWorkflowCommand:
 
 
 @dataclass(frozen=True)
-class WorkflowResult:
+class ManagedWorkflowResult:
+    """Portable receipt for a completed managed workflow."""
+
     status: str
-    analysis_result: str
-    planners_result: str
-    render_result: str
-    render_plan: str
-    output_video: str
-    material_directory: str
+    project_id: str
+    run_id: str
+    frozen_edit_id: str
+    render_variant_id: str
+    video_material_id: str
+    music_material_id: str
+    video_material_name: str
+    music_material_name: str
     target_output_length_sec: float
     actual_output_length_sec: float
-    num_raw_clips: int
-    num_planned_clips: int
     dialogue_audio_included: bool
-    stage_timings_sec: dict[str, float]
-    wall_clock_sec: float
-    model_usage: dict[str, Any] = field(default_factory=dict)
-    model_usage_artifact: str = ""
-    music_analysis_result: str = ""
-    video_material_name: str = ""
-    music_material_name: str = ""
-    music_material_directory: str = ""
-    artifact_manifest_version: str = "1.0"
+    artifact_root: str
     artifacts: dict[str, str] = field(default_factory=dict)
-    bundle_directory: str = ""
-    schema_version: str = "1.1"
+    artifact_manifest_version: str = "1.0"
+    model_usage: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = "2.0"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-__all__ = ["AudioMode", "ExecuteWorkflowCommand", "WorkflowResult"]
+__all__ = ["AudioMode", "ExecuteManagedWorkflowCommand", "ManagedWorkflowResult"]

@@ -10,6 +10,13 @@ from cutmaster.application.runs.commands import (
     RunAgainCommand,
     SaveGuidedRevisionCommand,
 )
+from cutmaster.application.runs.execution import (
+    ExecuteRunPlanningCommand,
+    PlanningEngine,
+    PlanningEngineFactory,
+    RunPlanningArtifacts,
+    RunPlanningExecutor,
+)
 from cutmaster.application.runs.service import RunsService
 from cutmaster.application.runs.views import (
     AttemptUsageView,
@@ -31,13 +38,18 @@ __all__ = [
     "CreateRunCommand",
     "DeleteRunCommand",
     "DeletedRunView",
+    "ExecuteRunPlanningCommand",
     "FrozenEditReviewView",
     "FrozenEditView",
+    "PlanningEngine",
+    "PlanningEngineFactory",
     "RecoverRunCommand",
     "RunAgainCommand",
     "RunSubmissionView",
     "RunUsageView",
     "RunView",
+    "RunPlanningArtifacts",
+    "RunPlanningExecutor",
     "RunsService",
     "SaveGuidedRevisionCommand",
 ]

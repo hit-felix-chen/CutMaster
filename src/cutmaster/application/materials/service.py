@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -179,6 +180,11 @@ class MaterialsService:
                         primary_memory,
                     )
                 )
+                analysis_cost_yuan = (
+                    _analysis_cost_yuan(binding.memory_root, material.material_type)
+                    if material.condition is MaterialCondition.READY
+                    else None
+                )
         except FileNotFoundError:
             # Inspection never blocks deletion. If delete wins before the
             # projection has pinned any bytes, the resource simply disappears.
@@ -191,6 +197,7 @@ class MaterialsService:
             source=frozen_payload(source),
             memory_summary=frozen_payload(memory_summary),
             preview_available=has_preview,
+            analysis_cost_yuan=analysis_cost_yuan,
         )
 
     @root_shared_operation
@@ -344,7 +351,7 @@ class MaterialsService:
         self,
         material_id: MaterialId,
     ) -> AbstractContextManager[MaterialBinding]:
-        """Internal Application collaborator used by Direct and managed workflows.
+        """Internal Application collaborator used by managed workflow executors.
 
         Inbound adapters receive :class:`MaterialView` objects and must not expose
         the binding's fingerprint or local paths as Material identity.
@@ -418,6 +425,29 @@ def _read_memory_document(path: Path) -> dict[str, Any]:
             f"Material Memory document is invalid: {path.name}"
         )
     return value
+
+
+def _analysis_cost_yuan(root: Path, kind: MaterialType) -> float | None:
+    """Read only the safe cumulative API cost from a current analysis result."""
+
+    if kind is MaterialType.MUSIC:
+        # Music analysis is local signal processing and makes no model API calls.
+        return 0.0
+    result = _optional_memory_document(root / "analysis_result.json")
+    if result is None:
+        return None
+    summary = result.get("model_usage_cumulative_summary")
+    if not isinstance(summary, Mapping):
+        return None
+    value = summary.get("total_cost_yuan")
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        return None
+    return float(value)
 
 
 def _public_video_source(value: Any) -> dict[str, Any]:

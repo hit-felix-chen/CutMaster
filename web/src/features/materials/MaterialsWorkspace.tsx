@@ -57,7 +57,12 @@ import {
 } from '@/features/shared/api'
 import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
 import { ExecutionLogAccess } from '@/features/shared/LiveLogDialog'
-import { formatBytes, formatFrameRate, formatNumber } from '@/i18n/formatters'
+import {
+  formatBytes,
+  formatCost,
+  formatFrameRate,
+  formatNumber,
+} from '@/i18n/formatters'
 
 const videoTabs = ['timeline', 'story', 'dialogue', 'technical'] as const
 const musicTabs = ['structure', 'technical'] as const
@@ -531,7 +536,7 @@ function MaterialDrawerContent({
   onStop: (attemptId: string) => void
   onDelete: () => void
 }) {
-  const { t } = useTranslation('common')
+  const { t, i18n } = useTranslation('common')
   const defaultTab = detail.material_type === 'video' ? 'timeline' : 'structure'
   const execution = detail.latest_execution
   const executionStatus = execution?.attempt.status.trim().toLocaleLowerCase()
@@ -659,6 +664,12 @@ function MaterialDrawerContent({
       </section>
       <section className="drawer-section">
         <h3>{t('materials.analysisAttempts')}</h3>
+        {typeof detail.analysis_cost_yuan === 'number' ? (
+          <div className="material-analysis-cost">
+            <span>{t('materials.apiCost')}</span>
+            <strong>{formatCost(detail.analysis_cost_yuan, i18n.language)}</strong>
+          </div>
+        ) : null}
         {execution ? <MaterialExecution execution={execution} /> : null}
         {detail.attempts?.length ? (
           detail.attempts.map((attempt) => (
@@ -1057,6 +1068,7 @@ function MemoryExplorer({
               tab={activeTab}
               materialId={materialId}
               payload={mergedMemory.payload}
+              analysisCostYuan={detail.data?.analysis_cost_yuan}
               selectedSegmentId={selectedSegmentId}
               selectedShotId={selectedShotId}
               onTimelineSelectionChange={updateTimelineSelection}
