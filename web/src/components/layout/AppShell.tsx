@@ -35,9 +35,12 @@ export function AppShell() {
   return (
     <>
       <div className="viewport-guard">
-        <div className="viewport-guard__mark" aria-hidden="true">
-          M
-        </div>
+        <img
+          className="viewport-guard__mark"
+          src="/cutmaster-logo.png"
+          alt=""
+          aria-hidden="true"
+        />
         <h1>{t('shell.narrowTitle')}</h1>
         <p>{t('shell.narrowBody')}</p>
       </div>
@@ -45,9 +48,12 @@ export function AppShell() {
         <aside className="app-rail">
           {rootBlocked ? (
             <span className="rail-brand" aria-label={t('appName')}>
-              <span className="rail-brand__mark" aria-hidden="true">
-                M
-              </span>
+              <img
+                className="rail-brand__mark"
+                src="/cutmaster-logo.png"
+                alt=""
+                aria-hidden="true"
+              />
               <span>CutMaster</span>
             </span>
           ) : (
@@ -56,9 +62,12 @@ export function AppShell() {
               to={appPaths.projects}
               aria-label={t('appName')}
             >
-              <span className="rail-brand__mark" aria-hidden="true">
-                M
-              </span>
+              <img
+                className="rail-brand__mark"
+                src="/cutmaster-logo.png"
+                alt=""
+                aria-hidden="true"
+              />
               <span>CutMaster</span>
             </NavLink>
           )}

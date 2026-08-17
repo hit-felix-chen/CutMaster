@@ -19,21 +19,16 @@
   gap: 0.7rem;
   padding: 0.6rem 0.65rem 1.5rem;
   text-decoration: none;
-  font-size: 1rem;
+  font-size: 1.2rem;
   font-weight: 650;
   letter-spacing: -0.02em;
 }
 .rail-brand__mark {
-  display: grid;
-  width: 2rem;
-  height: 2rem;
-  place-items: center;
-  border: 1px solid
-    color-mix(in srgb, var(--accent-narrative) 45%, var(--border-strong));
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--accent-narrative) 10%, var(--surface-panel));
-  color: var(--accent-narrative-strong);
-  font-size: 1.1rem;
+  display: block;
+  width: auto;
+  height: 2.25rem;
+  flex: 0 0 auto;
+  object-fit: contain;
 }
 .rail-navigation {
   display: grid;
@@ -3953,14 +3948,9 @@
     text-align: center;
   }
   .viewport-guard__mark {
-    display: grid;
-    width: 3rem;
+    width: auto;
     height: 3rem;
-    place-items: center;
-    border: 1px solid var(--accent-narrative);
-    border-radius: var(--radius-lg);
-    color: var(--accent-narrative-strong);
-    font-size: 1.5rem;
+    object-fit: contain;
   }
   .viewport-guard h1,
   .viewport-guard p {
