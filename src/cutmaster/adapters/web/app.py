@@ -31,6 +31,7 @@ from cutmaster.adapters.web.render_supervisor import (
 from cutmaster.adapters.web.routes import (
     activity_router,
     health_router,
+    logs_router,
     materials_router,
     project_render_router,
     projects_router,
@@ -170,6 +171,7 @@ def create_app(
         return await call_next(request)
     for router in (
         health_router,
+        logs_router,
         materials_router,
         projects_router,
         runs_router,

@@ -8,13 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster import CutMasterApplication
-from cutmaster.application.direct import (
-    AnalyseMusicCommand,
-    AnalyseVideoCommand,
-    PlanCommand,
-    RenderCommand,
-)
-from cutmaster.contracts import ExecuteWorkflowCommand
+from cutmaster.adapters.local_workflow import LocalManagedWorkflow
+from cutmaster.contracts import ExecuteManagedWorkflowCommand
+from cutmaster.domain.ids import FrozenEditId
 from cutmaster.infrastructure.observability.logging import error_summary, log_event
 from cutmaster.workflow.prompting.failure_catalog import (
     PromptFailureCode,
@@ -39,17 +35,6 @@ def _add_planners_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-clip-duration", type=float)
 
 
-def _add_output(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help=(
-            "External output directory. When omitted, CutMaster allocates a "
-            "managed Direct Workflow Bundle under the Application Data Root."
-        ),
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cutmaster",
@@ -66,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Public Material Name; defaults to the source filename stem",
     )
     _add_config(analyse)
-    _add_output(analyse)
 
     analyse_music = subparsers.add_parser(
         "analyse-music",
@@ -79,41 +63,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Public Material Name; defaults to the source filename stem",
     )
     _add_config(analyse_music)
-    _add_output(analyse_music)
 
-    plan = subparsers.add_parser("plan", help="Create an immutable render plan")
-    video_input = plan.add_mutually_exclusive_group(required=True)
-    video_input.add_argument("--analysis-result", type=Path)
-    video_input.add_argument(
-        "--video-material",
-        help="Use completed analysis selected by exact video Material Name",
-    )
-    music_input = plan.add_mutually_exclusive_group(required=True)
-    music_input.add_argument("--audio", type=Path)
-    music_input.add_argument("--music-analysis-result", type=Path)
-    music_input.add_argument(
-        "--music-material",
-        help="Use Music Memory selected by exact music Material Name",
+    plan = subparsers.add_parser(
+        "plan",
+        help="Create a Web-visible Project, ASTER Run, and Frozen Edit",
     )
     plan.add_argument(
-        "--music-material-name",
-        default="",
-        help="Candidate Material Name when --audio adds a track",
+        "--video-material",
+        required=True,
+        help="Use completed analysis selected by exact video Material Name",
     )
+    plan.add_argument(
+        "--music-material",
+        required=True,
+        help="Use Music Memory selected by exact music Material Name",
+    )
+    plan.add_argument("--project-name", default="CutMaster CLI")
     _add_planners_options(plan)
     _add_config(plan)
-    _add_output(plan)
-    plan.add_argument("--overwrite", action="store_true")
 
-    render = subparsers.add_parser("render", help="Render an existing plan")
-    render.add_argument("--plan", type=Path, required=True)
-    _add_output(render)
+    render = subparsers.add_parser(
+        "render",
+        help="Create a Web-visible Render Variant for a Frozen Edit",
+    )
+    render.add_argument("--edit-id", required=True)
     render.add_argument(
         "--audio-mode",
         choices=("bgm_only", "dialogue"),
         default="dialogue",
     )
-    render.add_argument("--overwrite", action="store_true")
     _add_config(render)
 
     run = subparsers.add_parser("run", help="Analyse, plan, and render a montage")
@@ -140,15 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Candidate Material Name when --audio adds a track",
     )
+    run.add_argument("--project-name", default="CutMaster CLI")
     _add_planners_options(run)
     _add_config(run)
-    _add_output(run)
     run.add_argument(
         "--audio-mode",
         choices=("bgm_only", "dialogue"),
         default="dialogue",
     )
-    run.add_argument("--overwrite", action="store_true")
 
     serve = subparsers.add_parser("serve", help="Run the local CutMaster Web UI")
     serve.add_argument("--host", default="127.0.0.1")
@@ -170,70 +147,47 @@ def _command_component(command: str) -> str:
 
 
 def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
-    direct = CutMasterApplication.open(config_path).direct
-    output_dir = args.output_dir.resolve() if args.output_dir else None
+    managed = LocalManagedWorkflow(CutMasterApplication.open(config_path))
     if args.command == "analyse":
-        return direct.analyse_video(
-            AnalyseVideoCommand(
-                video_path=args.video.resolve(),
-                output_dir=output_dir,
-                video_title=args.video_title,
-                subtitle_path=args.subtitle.resolve() if args.subtitle else None,
-                material_name=args.material_name,
-            )
+        return managed.analyse_video(
+            args.video.resolve(),
+            # Managed Material Analysis uses the public Material Name as its
+            # analysis title, just like the Web UI. Preserve the legacy
+            # --video-title input as the fallback name when no explicit
+            # Material Name was supplied.
+            material_name=args.material_name or args.video_title,
+            subtitle_path=args.subtitle.resolve() if args.subtitle else None,
         )
     if args.command == "analyse-music":
-        return direct.analyse_music(
-            AnalyseMusicCommand(
-                audio_path=args.audio.resolve(),
-                output_dir=output_dir,
-                material_name=args.material_name,
-            )
+        return managed.analyse_music(
+            args.audio.resolve(),
+            material_name=args.material_name,
         )
     if args.command == "plan":
-        return direct.plan(
-            PlanCommand(
-                prompt=args.prompt,
-                output_dir=output_dir,
-                analysis_result_path=(
-                    args.analysis_result.resolve()
-                    if args.analysis_result is not None
-                    else None
-                ),
-                video_material=args.video_material or "",
-                audio_path=args.audio.resolve() if args.audio is not None else None,
-                music_analysis_result_path=(
-                    args.music_analysis_result.resolve()
-                    if args.music_analysis_result is not None
-                    else None
-                ),
-                music_material=args.music_material or "",
-                music_material_name=args.music_material_name,
-                target_output_length_sec=args.target_duration,
-                target_shot_length_sec=args.target_shot_length,
-                prompt_type=args.prompt_type,
-                max_clip_duration_sec=args.max_clip_duration,
-                overwrite=args.overwrite,
-            )
+        return managed.plan(
+            video_material=args.video_material,
+            music_material=args.music_material,
+            prompt=args.prompt,
+            project_name=args.project_name,
+            target_output_length_sec=args.target_duration,
+            target_shot_length_sec=args.target_shot_length,
+            prompt_type=args.prompt_type,
+            max_clip_duration_sec=args.max_clip_duration,
         )
     if args.command == "render":
-        return direct.render(
-            RenderCommand(
-                plan_path=args.plan.resolve(),
-                output_dir=output_dir,
-                audio_mode=args.audio_mode,
-                overwrite=args.overwrite,
-            )
+        return managed.render(
+            FrozenEditId.parse(args.edit_id),
+            audio_mode=args.audio_mode,
         )
     if args.command == "run":
-        return direct.execute_workflow(
-            ExecuteWorkflowCommand(
+        return managed.execute_workflow(
+            ExecuteManagedWorkflowCommand(
                 prompt=args.prompt,
                 video_path=args.video.resolve() if args.video else None,
                 audio_path=args.audio.resolve() if args.audio else None,
                 video_material=args.video_material or "",
                 music_material=args.music_material or "",
-                output_dir=output_dir,
+                project_name=args.project_name,
                 target_output_length_sec=args.target_duration,
                 target_shot_length_sec=args.target_shot_length,
                 prompt_type=args.prompt_type,
@@ -241,7 +195,6 @@ def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
                 subtitle_path=args.subtitle.resolve() if args.subtitle else None,
                 max_clip_duration_sec=args.max_clip_duration,
                 audio_mode=args.audio_mode,
-                overwrite=args.overwrite,
                 video_material_name=args.video_material_name,
                 music_material_name=args.music_material_name,
             )
@@ -278,7 +231,8 @@ def main(argv: list[str] | None = None) -> int:
             **failure,
         )
         raise
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    payload = result.to_dict() if hasattr(result, "to_dict") else result
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

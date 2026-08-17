@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import anyio
 from fastapi.testclient import TestClient
 
 from cutmaster.application import CutMasterApplication
@@ -15,6 +18,7 @@ from cutmaster.application.projects import (
     SetProjectMaterialsCommand,
 )
 from cutmaster.application.runs import CreateRunCommand
+from cutmaster.adapters.web.routes.materials import _PinnedFileResponse
 from cutmaster.domain.ids import MaterialId, ProjectId
 from cutmaster.infrastructure.storage.local import (
     material_catalog as material_catalog_module,
@@ -36,9 +40,8 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
     )
     with application.materials.lease(material.material_id) as binding:
         description = {
-            "schema_version": "2.0",
+            "schema_version": "3.0",
             "source": {
-                "path": str(binding.source_path),
                 "title": "Film",
                 "duration_sec": 120.5,
                 "fps": 24.0,
@@ -49,7 +52,6 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
             "segments": [
                 {
                     "segment_id": "segment_0001",
-                    "clip_path": str(binding.memory_root / "private.mp4"),
                     "time_range": {"start_sec": 0.0, "end_sec": 4.0},
                     "segment_summary": "Opening",
                     "shots": [
@@ -62,7 +64,6 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
                 },
                 {
                     "segment_id": "segment_0002",
-                    "clip_path": str(binding.memory_root / "private-2.mp4"),
                     "time_range": {"start_sec": 4.0, "end_sec": 8.0},
                     "segment_summary": "Meeting",
                     "shots": [],
@@ -83,8 +84,7 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
             "ending": "They part.",
         }
         dialogue = {
-            "schema_version": "1.0",
-            "source_srt": str(binding.memory_root / "private.srt"),
+            "schema_version": "2.0",
             "postprocessor": {"prompt": "private"},
             "statistics": {"sentence_count": 2},
             "sentences": [
@@ -111,16 +111,23 @@ def publish_ready_video(application: CutMasterApplication, tmp_path: Path) -> st
         (frames / "shot_00042_02.jpg").write_bytes(
             b"\xff\xd8\xffreal-later-shot\xff\xd9"
         )
+        (binding.memory_root / "cover.jpg").write_bytes(THUMBNAIL_BYTES)
         staged = tmp_path / "analysis-result.json"
         staged.write_text(
             json.dumps(
                 {
-                    "schema_version": "2.0",
+                    "schema_version": "3.0",
                     "status": "success",
                     "material_id": str(binding.material.material_id),
                     "material_type": "video",
                     "material_name": binding.material.name,
                     "material_fingerprint": str(binding.material.fingerprint),
+                    "memory_schema_version": "3.0",
+                    "elapsed_sec": 0.0,
+                    "material_reused": False,
+                    "analysis_reused": False,
+                    "model_usage_summary": {},
+                    "model_usage_cumulative_summary": {},
                 }
             ),
             encoding="utf-8",
@@ -137,8 +144,7 @@ def publish_ready_music(application: CutMasterApplication, tmp_path: Path) -> st
     )
     with application.materials.lease(material.material_id) as binding:
         memory = {
-            "schema_version": "1.0",
-            "audio_path": str(binding.source_path),
+            "schema_version": "2.0",
             "source_duration_sec": 95.0,
             "tempo_bpm": 120.0,
             "beats_sec": [0.5, 1.0],
@@ -154,6 +160,9 @@ def publish_ready_music(application: CutMasterApplication, tmp_path: Path) -> st
                     "start_sec": 0.0,
                     "end_sec": 95.0,
                     "role": "intro",
+                    "mean_energy": 0.5,
+                    "energy_trend": "stable",
+                    "suggested_clip_duration_sec": [2.0, 4.0],
                 }
             ],
         }
@@ -164,12 +173,16 @@ def publish_ready_music(application: CutMasterApplication, tmp_path: Path) -> st
         staged.write_text(
             json.dumps(
                 {
-                    "schema_version": "2.0",
+                    "schema_version": "3.0",
                     "status": "success",
                     "material_id": str(binding.material.material_id),
                     "material_type": "music",
                     "material_name": binding.material.name,
                     "material_fingerprint": str(binding.material.fingerprint),
+                    "memory_schema_version": "2.0",
+                    "elapsed_sec": 0.0,
+                    "material_reused": False,
+                    "analysis_reused": False,
                 }
             ),
             encoding="utf-8",
@@ -246,7 +259,9 @@ def test_material_preview_endpoints_are_real_bounded_and_never_open_source_media
     assert len(thumbnail.content) < 2 * 1024 * 1024
     assert waveform.headers["content-type"] == "image/svg+xml"
     assert len(waveform.content) < 64 * 1024
-    assert b"<polygon" in waveform.content
+    assert b"<rect" in waveform.content
+    assert b"<polygon" not in waveform.content
+    assert waveform.content.count(b"<rect") == 2
     assert b"<script" not in waveform.content
     assert b"Main Score" not in waveform.content
     assert str(tmp_path).encode() not in waveform.content
@@ -263,7 +278,7 @@ def test_material_preview_endpoints_are_real_bounded_and_never_open_source_media
     assert wrong_waveform.json()["code"] == "material_preview_unavailable"
 
 
-def test_video_preview_rejects_symlinks_and_oversized_frames(
+def test_video_preview_reads_only_dedicated_cover_and_rejects_unsafe_files(
     client: TestClient,
     application: CutMasterApplication,
     tmp_path: Path,
@@ -273,9 +288,18 @@ def test_video_preview_rejects_symlinks_and_oversized_frames(
         frame_directory = binding.memory_root / "scene_frames"
         for frame in frame_directory.iterdir():
             frame.unlink()
+        frame_directory.rmdir()
+
+    independent = client.get(f"/api/materials/{material_id}/thumbnail")
+    assert independent.status_code == 200
+    assert independent.content == THUMBNAIL_BYTES
+
+    with application.materials.read_lease(MaterialId.parse(material_id)) as binding:
+        cover = binding.memory_root / "cover.jpg"
+        cover.unlink()
         outside = tmp_path / "outside.jpg"
         outside.write_bytes(b"\xff\xd8\xffprivate\xff\xd9")
-        (frame_directory / "shot_00003_02.jpg").symlink_to(outside)
+        cover.symlink_to(outside)
 
     unavailable = client.get(f"/api/materials/{material_id}/thumbnail")
     detail = client.get(f"/api/materials/{material_id}")
@@ -285,9 +309,9 @@ def test_video_preview_rejects_symlinks_and_oversized_frames(
     assert outside.read_bytes() not in unavailable.content
 
     with application.materials.read_lease(MaterialId.parse(material_id)) as binding:
-        frame = binding.memory_root / "scene_frames" / "shot_00003_02.jpg"
-        frame.unlink()
-        frame.write_bytes(
+        cover = binding.memory_root / "cover.jpg"
+        cover.unlink()
+        cover.write_bytes(
             b"\xff\xd8\xff" + b"x" * (2 * 1024 * 1024) + b"\xff\xd9"
         )
 
@@ -556,6 +580,78 @@ def test_web_material_reads_never_rehash_the_managed_source(
     assert listing.status_code == detail.status_code == memory.status_code == 200
     assert source_range.status_code == 206
     assert source_range.content == b"vi"
+
+
+def test_material_delete_rejects_active_consumer_without_waiting_and_replays(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+) -> None:
+    material = application.materials.add(
+        source(tmp_path / "consumed.mp4", b"video"),
+        "video",
+        "Consumed",
+    )
+    command_id = str(uuid4())
+
+    with application.materials.consume_lease(material.material_id):
+        started = time.monotonic()
+        blocked = client.delete(
+            f"/api/materials/{material.material_id}",
+            headers={"Idempotency-Key": command_id},
+        )
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "material_has_active_consumers"
+    assert blocked.json()["blockers"] == [{"kind": "active_consumer"}]
+
+    replay = client.delete(
+        f"/api/materials/{material.material_id}",
+        headers={"Idempotency-Key": command_id},
+    )
+    assert replay.status_code == 204
+    assert application.materials.get(material.material_id) is None
+
+
+def test_pinned_source_response_survives_path_unlink(tmp_path: Path) -> None:
+    path = source(tmp_path / "source.mp4", b"0123456789")
+    stream = path.open("rb")
+    response = _PinnedFileResponse(
+        path,
+        stream=stream,
+        stat_result=os.fstat(stream.fileno()),
+        media_type="video/mp4",
+    )
+    path.unlink()
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def invoke() -> None:
+        await response(
+            {
+                "type": "http",
+                "method": "GET",
+                "headers": [],
+                "extensions": {},
+            },
+            receive,
+            send,
+        )
+
+    anyio.run(invoke)
+
+    assert b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    ) == b"0123456789"
 
 
 def test_missing_material_source_is_problem_details(client: TestClient) -> None:

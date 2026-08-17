@@ -15,6 +15,7 @@ from cutmaster.workflow.contracts.checkpoints import (
     PlannersCheckpointStage,
     PlannersCheckpointStore,
 )
+from cutmaster.workflow.contracts.video import validate_video_description_document
 from cutmaster.workflow.planners.aster_team import ASTERTeam
 from cutmaster.workflow.planners.arrangement_architect import (
     prime_arrangement_context,
@@ -163,6 +164,7 @@ class Planners:
             request.video.video_description_path,
             "Video Description",
         )
+        validate_video_description_document(video_description)
         video_summary = _read_json_object(
             request.video.video_summary_path,
             "Video Summary",
@@ -191,7 +193,12 @@ class Planners:
         )
         context.set_artifact("video_description", video_description)
         context.set_artifact("video_summary", video_summary)
-        team = ASTERTeam(request.video_path, self.config, context)
+        team = ASTERTeam(
+            request.video_path,
+            request.video.material.memory_root / "segments",
+            self.config,
+            context,
+        )
 
         if checkpoint is None:
             stage_started = time.monotonic()

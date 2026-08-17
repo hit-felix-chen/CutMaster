@@ -174,6 +174,7 @@ def compile_render_plan(
     )
     clips = optimize_script_source_windows(
         request.video_path,
+        request.video.material.memory_root / "segments",
         clips,
         music_profile["beats_sec"],
         video_description,

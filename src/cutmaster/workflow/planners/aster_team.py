@@ -29,6 +29,7 @@ class ASTERTeam:
     def __init__(
         self,
         video_path: Path,
+        segment_cache_directory: Path,
         config: AppConfig,
         context: WorkflowContext,
     ) -> None:
@@ -40,7 +41,11 @@ class ASTERTeam:
             raise RuntimeError(
                 "Video description must be available before ASTERTeam initialization"
             )
-        self.media = SegmentMediaReader(video_path, video_description)
+        self.media = SegmentMediaReader(
+            video_path,
+            segment_cache_directory,
+            video_description,
+        )
         self.arrangement_architect = ArrangementArchitectAgent(config, context)
         self.story_editor = StoryEditorAgent(config, context)
         self.edit_composer = EditComposerAgent(

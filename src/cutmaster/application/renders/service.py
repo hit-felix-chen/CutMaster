@@ -55,8 +55,11 @@ from cutmaster.infrastructure.persistence.sqlite import (
     SQLiteApplicationStore,
 )
 
+MAX_RENDER_COVER_BYTES = 2 * 1024 * 1024
+
 if TYPE_CHECKING:
     from cutmaster.application.renders.execution import (
+        CoverGenerator,
         ExecuteManagedRenderCommand,
         RenderEngineFactory,
     )
@@ -174,6 +177,29 @@ class RendersService:
         except RenderIntegrityMismatchError as exc:
             raise RenderMediaUnavailableError(str(exc)) from exc
         return path
+
+    @root_shared_operation
+    def cover(self, render_id: RenderVariantId) -> bytes:
+        """Return the dedicated first-frame JPEG for one Ready master."""
+
+        _require_render_id(render_id)
+        variant = self.get(render_id)
+        if variant.status is not RenderVariantStatus.READY or variant.master is None:
+            raise RenderMediaUnavailableError(
+                "Render Variant has no Ready project cover"
+            )
+        master = self._resolve_managed_file(variant.master.relative_path)
+        cover = master.with_name("cover.jpg")
+        content = _read_bounded_jpeg(
+            cover,
+            expected_parent=master.parent,
+            maximum=MAX_RENDER_COVER_BYTES,
+        )
+        if content is None:
+            raise RenderMediaUnavailableError(
+                "Render Variant has no safe project cover"
+            )
+        return content
 
     def _open_media(
         self,
@@ -420,6 +446,7 @@ class RendersService:
         should_stop: Callable[[], bool],
         report_progress: Callable[[Mapping[str, object]], None],
         renderer_factory: RenderEngineFactory | None = None,
+        cover_generator: CoverGenerator | None = None,
     ) -> CompletedRenderView:
         """Execute through the Application-owned managed rendering boundary."""
 
@@ -435,17 +462,16 @@ class RendersService:
             materials,
             self,
         )
-        if renderer_factory is None:
-            return executor.execute(
-                command,
-                should_stop=should_stop,
-                report_progress=report_progress,
-            )
+        keyword: dict[str, Any] = {}
+        if renderer_factory is not None:
+            keyword["renderer_factory"] = renderer_factory
+        if cover_generator is not None:
+            keyword["cover_generator"] = cover_generator
         return executor.execute(
             command,
             should_stop=should_stop,
             report_progress=report_progress,
-            renderer_factory=renderer_factory,
+            **keyword,
         )
 
     def _create(
@@ -689,6 +715,50 @@ class RendersService:
         if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
             raise ValueError("Managed Job log is not a file")
         log.unlink()
+
+
+def _read_bounded_jpeg(
+    path: Path,
+    *,
+    expected_parent: Path,
+    maximum: int,
+) -> bytes | None:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        parent = expected_parent.resolve(strict=True)
+    except (FileNotFoundError, OSError, RuntimeError):
+        return None
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or not 0 < metadata.st_size <= maximum
+        or resolved.parent != parent
+    ):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_size != metadata.st_size:
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            content = stream.read(maximum + 1)
+        if (
+            len(content) != observed.st_size
+            or len(content) > maximum
+            or not content.startswith(b"\xff\xd8\xff")
+            or not content.endswith(b"\xff\xd9")
+        ):
+            return None
+        return content
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 def _require_render_id(value: RenderVariantId) -> None:

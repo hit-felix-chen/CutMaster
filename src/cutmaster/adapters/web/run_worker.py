@@ -79,6 +79,8 @@ class _RunPlanArtifacts:
     render_plan: Path
     candidate_pool: Path
     edit_plan: Path
+    dialogue_anchors: Path
+    raw_script: Path
     music_profile: Path
     selection_diagnostics: Path
     model_usage_summary: Mapping[str, Any]
@@ -344,6 +346,7 @@ def _plan_run(
         secret_references=_snapshot_secret_references(run.configuration),
         _values=run.configuration,
     )
+    options = _managed_planners_options(run.planning_options)
     result = DirectService(snapshot, application.materials).plan(
         PlanCommand(
             prompt=run.creative_brief.editing_intent,
@@ -351,6 +354,10 @@ def _plan_run(
             video_material=video.name,
             music_material=music.name,
             target_output_length_sec=run.creative_brief.target_duration_sec,
+            target_shot_length_sec=options["target_shot_length_sec"],
+            prompt_type=options["prompt_type"],
+            video_title=options["video_title"],
+            max_clip_duration_sec=options["max_clip_duration_sec"],
             progress_reporter=progress_reporter,
             cancellation_token=cancellation_token,
             checkpoint_store=checkpoint_store,
@@ -360,10 +367,32 @@ def _plan_run(
         render_plan=result.render_plan_path,
         candidate_pool=result.candidate_pool_path,
         edit_plan=result.edit_plan_path,
+        dialogue_anchors=result.dialogue_anchors_path,
+        raw_script=result.raw_script_path,
         music_profile=result.music_profile_path,
         selection_diagnostics=result.selection_diagnostics_path,
         model_usage_summary=dict(result.model_usage_summary),
     )
+
+
+def _managed_planners_options(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {
+            "target_shot_length_sec": 4.0,
+            "prompt_type": "event",
+            "video_title": "",
+            "max_clip_duration_sec": None,
+        }
+    return {
+        "target_shot_length_sec": float(raw.get("target_shot_length_sec", 4.0)),
+        "prompt_type": str(raw.get("prompt_type") or "event"),
+        "video_title": str(raw.get("video_title") or ""),
+        "max_clip_duration_sec": (
+            None
+            if raw.get("max_clip_duration_sec") is None
+            else float(raw["max_clip_duration_sec"])
+        ),
+    }
 
 
 def _capture_attempt_usage(
@@ -488,6 +517,8 @@ def _publish_review_bundle(
     sources = {
         "candidate_pool": artifacts.candidate_pool,
         "edit_plan": artifacts.edit_plan,
+        "dialogue_anchors": artifacts.dialogue_anchors,
+        "raw_script": artifacts.raw_script,
         "music_profile": artifacts.music_profile,
         "selection_diagnostics": artifacts.selection_diagnostics,
     }

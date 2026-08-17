@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +12,35 @@ from cutmaster.application import CutMasterApplication
 
 def key() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid4())}
+
+
+def publish_ready(application: CutMasterApplication, material, tmp_path: Path) -> None:
+    with application.materials.lease(material.material_id) as binding:
+        if binding.material.material_type.value == "music":
+            (binding.memory_root / "music_memory.json").write_text(
+                json.dumps({"schema_version": "2.0", "source_duration_sec": 120.0}),
+                encoding="utf-8",
+            )
+        payload = {
+            "schema_version": "3.0",
+            "status": "success",
+            "material_id": str(binding.material.material_id),
+            "material_type": binding.material.material_type.value,
+            "material_name": binding.material.name,
+            "material_fingerprint": str(binding.material.fingerprint),
+            "memory_schema_version": (
+                "3.0" if binding.material.material_type.value == "video" else "2.0"
+            ),
+            "elapsed_sec": 0.0,
+            "material_reused": False,
+            "analysis_reused": False,
+        }
+        if binding.material.material_type.value == "video":
+            payload["model_usage_summary"] = {}
+            payload["model_usage_cumulative_summary"] = {}
+        staged = tmp_path / f"{binding.material.material_id}.json"
+        staged.write_text(json.dumps(payload), encoding="utf-8")
+        application.materials.publish_analysis_result(binding, staged)
 
 
 def test_project_crud_brief_search_sort_and_workspace_are_application_backed(
@@ -108,6 +138,8 @@ def test_project_setup_atomically_saves_materials_and_brief(
     music_path.write_bytes(b"music")
     video = application.materials.add(video_path, "video", "Setup Video")
     music = application.materials.add(music_path, "music", "Setup Music")
+    publish_ready(application, video, tmp_path)
+    publish_ready(application, music, tmp_path)
 
     response = client.put(
         f"/api/projects/{created['project_id']}/setup",
@@ -142,7 +174,7 @@ def test_project_setup_atomically_saves_materials_and_brief(
                 "material_id": str(video.material_id),
                 "material_type": "video",
                 "name": "Setup Video",
-                "condition": "queued",
+                "condition": "ready",
                 "reused": False,
             }
         ],
@@ -151,7 +183,7 @@ def test_project_setup_atomically_saves_materials_and_brief(
                 "material_id": str(music.material_id),
                 "material_type": "music",
                 "name": "Setup Music",
-                "condition": "queued",
+                "condition": "ready",
                 "reused": False,
             }
         ],
@@ -159,4 +191,4 @@ def test_project_setup_atomically_saves_materials_and_brief(
     card = client.get("/api/projects").json()["items"][0]
     assert card["latest_run_state"] is None
     assert card["selected_materials"] == workspace.json()["materials"]
-    assert card["preview_url"] is None
+    assert card["preview_url"] == f"/api/projects/{created['project_id']}/cover"

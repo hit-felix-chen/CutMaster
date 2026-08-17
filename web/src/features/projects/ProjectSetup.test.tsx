@@ -121,6 +121,13 @@ describe('consolidated Project setup', () => {
     expect(
       screen.queryByRole('link', { name: 'Creative Brief' }),
     ).not.toBeInTheDocument()
+    expect(await screen.findByRole('radio', { name: 'Custom duration' })).toBeChecked()
+    expect(screen.getByRole('spinbutton', { name: 'Minutes' })).toHaveValue(1)
+    expect(screen.getByRole('spinbutton', { name: 'Seconds' })).toHaveValue(0)
+    expect(screen.getByRole('spinbutton', { name: 'Seconds' })).toHaveAttribute(
+      'max',
+      '30',
+    )
 
     fireEvent.change(screen.getByRole('textbox', { name: /Editing Intent/ }), {
       target: { value: 'Follow the emotional reunion.' },

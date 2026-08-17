@@ -47,11 +47,30 @@ import {
   isRunExecutionActive,
 } from '@/features/shared/execution-state'
 import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
+import { ExecutionLogAccess } from '@/features/shared/LiveLogDialog'
 import { formatCost, formatNumber } from '@/i18n/formatters'
 
 interface ProjectContext {
   workspace: WorkspaceData
   refetch: () => Promise<unknown>
+}
+
+type DurationMode = 'custom' | 'music'
+
+interface TargetDurationEditor {
+  mode: DurationMode
+  minutes: number
+  seconds: number
+  totalSeconds: number
+  maximumSeconds: number | null
+  maximumMinutes: number
+  maximumSecondsForMinute: number
+  hasMusic: boolean
+  valid: boolean
+  setMode: (mode: DurationMode) => void
+  setMinutes: (minutes: number) => void
+  setSeconds: (seconds: number) => void
+  constrainTo: (duration: number | null | undefined) => void
 }
 
 export function ProjectLayout() {
@@ -116,6 +135,187 @@ function useProjectContext() {
   return useOutletContext<ProjectContext>()
 }
 
+function wholeDurationParts(value: number) {
+  const total = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
+  return {
+    minutes: Math.floor(total / 60),
+    seconds: total % 60,
+  }
+}
+
+function boundedInteger(value: number, maximum: number) {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(maximum, Math.trunc(value)))
+}
+
+function useTargetDurationEditor(
+  savedTargetSeconds: number | undefined,
+  musicDuration: number | null | undefined,
+): TargetDurationEditor {
+  const initial = wholeDurationParts(savedTargetSeconds ?? 0)
+  const [minutes, updateMinutes] = useState(initial.minutes)
+  const [seconds, updateSeconds] = useState(initial.seconds)
+  const [selectedMode, setSelectedMode] = useState<DurationMode | null>(null)
+  const hasMusic =
+    typeof musicDuration === 'number' &&
+    Number.isFinite(musicDuration) &&
+    musicDuration > 0
+  const maximumSeconds = hasMusic ? Math.floor(musicDuration) : null
+  const inferredMode: DurationMode =
+    hasMusic &&
+    typeof savedTargetSeconds === 'number' &&
+    Math.abs(savedTargetSeconds - musicDuration) < 0.001
+      ? 'music'
+      : 'custom'
+  const mode = selectedMode ?? inferredMode
+  const storedCustomSeconds = minutes * 60 + seconds
+  const boundedCustomSeconds =
+    maximumSeconds === null
+      ? storedCustomSeconds
+      : Math.min(storedCustomSeconds, maximumSeconds)
+  const boundedCustom = wholeDurationParts(boundedCustomSeconds)
+  const maximumMinutes = maximumSeconds === null ? 0 : Math.floor(maximumSeconds / 60)
+  const maximumSecondsForMinute =
+    maximumSeconds === null
+      ? 59
+      : boundedCustom.minutes >= maximumMinutes
+        ? maximumSeconds - maximumMinutes * 60
+        : 59
+
+  const setMinutes = (value: number) => {
+    const nextMinutes = boundedInteger(value, maximumMinutes)
+    const nextSecondsLimit =
+      maximumSeconds === null || nextMinutes < maximumMinutes
+        ? 59
+        : maximumSeconds - maximumMinutes * 60
+    updateMinutes(nextMinutes)
+    updateSeconds((current) => Math.min(current, nextSecondsLimit))
+  }
+  const setSeconds = (value: number) => {
+    updateSeconds(boundedInteger(value, maximumSecondsForMinute))
+  }
+  const constrainTo = (duration: number | null | undefined) => {
+    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0)
+      return
+    const maximum = Math.floor(duration)
+    if (storedCustomSeconds <= maximum) return
+    const bounded = wholeDurationParts(maximum)
+    updateMinutes(bounded.minutes)
+    updateSeconds(bounded.seconds)
+  }
+  const totalSeconds =
+    mode === 'music' && hasMusic ? musicDuration : boundedCustomSeconds
+  const valid =
+    hasMusic &&
+    Number.isFinite(totalSeconds) &&
+    totalSeconds > 0 &&
+    totalSeconds <= musicDuration
+
+  return {
+    mode,
+    minutes: boundedCustom.minutes,
+    seconds: boundedCustom.seconds,
+    totalSeconds,
+    maximumSeconds,
+    maximumMinutes,
+    maximumSecondsForMinute,
+    hasMusic,
+    valid,
+    setMode: setSelectedMode,
+    setMinutes,
+    setSeconds,
+    constrainTo,
+  }
+}
+
+function TargetDurationField({
+  idPrefix,
+  editor,
+}: {
+  idPrefix: string
+  editor: TargetDurationEditor
+}) {
+  const { t } = useTranslation('common')
+  const helpId = `${idPrefix}-help`
+  return (
+    <fieldset className="target-duration-field" aria-describedby={helpId}>
+      <legend>{t('projects.targetDuration')}</legend>
+      <div className="target-duration-modes">
+        <label>
+          <input
+            type="radio"
+            name={`${idPrefix}-mode`}
+            value="custom"
+            checked={editor.mode === 'custom'}
+            disabled={!editor.hasMusic}
+            onChange={() => editor.setMode('custom')}
+          />
+          <span>{t('brief.customDuration')}</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`${idPrefix}-mode`}
+            value="music"
+            checked={editor.mode === 'music'}
+            disabled={!editor.hasMusic}
+            onChange={() => editor.setMode('music')}
+          />
+          <span>{t('brief.useMusicDuration')}</span>
+        </label>
+      </div>
+      {editor.mode === 'custom' ? (
+        <div className="target-duration-inputs">
+          <label htmlFor={`${idPrefix}-minutes`}>
+            <span>{t('brief.minutes')}</span>
+            <input
+              id={`${idPrefix}-minutes`}
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={editor.maximumMinutes}
+              step={1}
+              value={editor.minutes}
+              disabled={!editor.hasMusic}
+              onChange={(event) => editor.setMinutes(event.currentTarget.valueAsNumber)}
+            />
+          </label>
+          <span className="target-duration-inputs__separator" aria-hidden="true">
+            :
+          </span>
+          <label htmlFor={`${idPrefix}-seconds`}>
+            <span>{t('brief.seconds')}</span>
+            <input
+              id={`${idPrefix}-seconds`}
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={editor.maximumSecondsForMinute}
+              step={1}
+              value={editor.seconds}
+              disabled={!editor.hasMusic}
+              onChange={(event) => editor.setSeconds(event.currentTarget.valueAsNumber)}
+            />
+          </label>
+        </div>
+      ) : (
+        <div className="target-duration-audio">
+          <AudioWaveform size={18} aria-hidden="true" />
+          <span>{t('brief.selectedMusicDuration')}</span>
+          <strong>{secondsToTime(editor.totalSeconds)}</strong>
+        </div>
+      )}
+      <small id={helpId}>
+        {editor.hasMusic
+          ? t('brief.durationLimit', {
+              duration: secondsToTime(editor.maximumSeconds ?? 0),
+            })
+          : t('brief.requiresMusic')}
+      </small>
+    </fieldset>
+  )
+}
+
 function MaterialPanel({
   type,
   material,
@@ -161,9 +361,6 @@ export function ProjectOverview() {
   const [videoId, setVideoId] = useState(project.video_material_ids[0] ?? '')
   const [musicId, setMusicId] = useState(project.music_material_ids[0] ?? '')
   const [intent, setIntent] = useState(saved?.editing_intent ?? '')
-  const [duration, setDuration] = useState(
-    saved ? secondsToTime(saved.target_duration_sec) : '',
-  )
   const [startGuardOpen, setStartGuardOpen] = useState(false)
   const videos = useQuery({
     queryKey: ['materials', 'video', '', 'name_asc'],
@@ -177,19 +374,11 @@ export function ProjectOverview() {
   const musicItems = music.data ? collectionItems(music.data) : []
   const selectedVideo = videoItems.find((item) => item.material_id === videoId)
   const selectedMusic = musicItems.find((item) => item.material_id === musicId)
-  const seconds = parseTime(duration)
   const musicDuration = selectedMusic?.duration_sec
-  const exceedsMusic =
-    typeof musicDuration === 'number' &&
-    Number.isFinite(seconds) &&
-    seconds > musicDuration
+  const duration = useTargetDurationEditor(saved?.target_duration_sec, musicDuration)
+  const seconds = duration.totalSeconds
   const valid =
-    Boolean(videoId) &&
-    Boolean(musicId) &&
-    intent.trim().length > 0 &&
-    Number.isFinite(seconds) &&
-    seconds > 0 &&
-    !exceedsMusic
+    Boolean(videoId) && Boolean(musicId) && intent.trim().length > 0 && duration.valid
   const materialsReady =
     selectedVideo?.condition.toLowerCase() === 'ready' &&
     selectedMusic?.condition.toLowerCase() === 'ready'
@@ -197,7 +386,7 @@ export function ProjectOverview() {
     videoId !== (project.video_material_ids[0] ?? '') ||
     musicId !== (project.music_material_ids[0] ?? '') ||
     intent !== (saved?.editing_intent ?? '') ||
-    duration !== (saved ? secondsToTime(saved.target_duration_sec) : '')
+    (saved ? Math.abs(seconds - saved.target_duration_sec) >= 0.001 : seconds > 0)
   const blocker = useBlocker(dirty)
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -264,7 +453,7 @@ export function ProjectOverview() {
                 <select value={videoId} onChange={(e) => setVideoId(e.target.value)}>
                   <option value="">{t('projects.noVideo')}</option>
                   {videoItems
-                    .filter((item) => item.condition.toLowerCase() !== 'inconsistent')
+                    .filter((item) => item.condition.toLowerCase() === 'ready')
                     .map((item) => (
                       <option key={item.material_id} value={item.material_id}>
                         {item.name} · {item.condition}
@@ -274,10 +463,20 @@ export function ProjectOverview() {
               </label>
               <label className="field">
                 <span>{t('projects.selectedMusic')}</span>
-                <select value={musicId} onChange={(e) => setMusicId(e.target.value)}>
+                <select
+                  value={musicId}
+                  onChange={(event) => {
+                    duration.setMode(duration.mode)
+                    duration.constrainTo(
+                      musicItems.find((item) => item.material_id === event.target.value)
+                        ?.duration_sec,
+                    )
+                    setMusicId(event.target.value)
+                  }}
+                >
                   <option value="">{t('projects.noMusic')}</option>
                   {musicItems
-                    .filter((item) => item.condition.toLowerCase() !== 'inconsistent')
+                    .filter((item) => item.condition.toLowerCase() === 'ready')
                     .map((item) => (
                       <option key={item.material_id} value={item.material_id}>
                         {item.name} · {item.condition}
@@ -305,23 +504,7 @@ export function ProjectOverview() {
               />
               <small>{t('brief.intentHelp')}</small>
             </label>
-            <label className="field field--duration" htmlFor="setup-target-duration">
-              <span>{t('projects.targetDuration')}</span>
-              <input
-                id="setup-target-duration"
-                aria-invalid={exceedsMusic}
-                disabled={!musicId}
-                value={duration}
-                onChange={(event) => setDuration(event.target.value)}
-                placeholder="01:00"
-              />
-              <small className={exceedsMusic ? 'field-error' : undefined}>
-                {musicId ? t('brief.durationHelp') : t('brief.requiresMusic')}
-                {exceedsMusic && musicDuration
-                  ? ` (${secondsToTime(musicDuration)})`
-                  : ''}
-              </small>
-            </label>
+            <TargetDurationField idPrefix="setup-target-duration" editor={duration} />
           </section>
           <aside className="setup-card setup-card--master">
             <header>
@@ -480,7 +663,7 @@ export function ProjectMaterials() {
             >
               <option value="">{t('projects.noVideo')}</option>
               {videoItems
-                .filter((item) => item.condition.toLowerCase() !== 'inconsistent')
+                .filter((item) => item.condition.toLowerCase() === 'ready')
                 .map((item) => (
                   <option key={item.material_id} value={item.material_id}>
                     {item.name} · {item.condition}
@@ -496,7 +679,7 @@ export function ProjectMaterials() {
             >
               <option value="">{t('projects.noMusic')}</option>
               {musicItems
-                .filter((item) => item.condition.toLowerCase() !== 'inconsistent')
+                .filter((item) => item.condition.toLowerCase() === 'ready')
                 .map((item) => (
                   <option key={item.material_id} value={item.material_id}>
                     {item.name} · {item.condition}
@@ -545,14 +728,6 @@ function secondsToTime(value: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-function parseTime(value: string) {
-  const normalized = value.trim()
-  if (/^\d+$/.test(normalized)) return Number(normalized)
-  const match = /^(\d+):(\d{1,2})$/.exec(normalized)
-  if (!match) return Number.NaN
-  return Number(match[1]) * 60 + Number(match[2])
-}
-
 export function CreativeBrief() {
   const { t } = useTranslation('common')
   const { workspace } = useProjectContext()
@@ -560,25 +735,13 @@ export function CreativeBrief() {
   const project = workspace.project
   const saved = project.creative_brief
   const [intent, setIntent] = useState(saved?.editing_intent ?? '')
-  const [duration, setDuration] = useState(
-    saved ? secondsToTime(saved.target_duration_sec) : '',
-  )
+  const musicDuration = workspace.materials?.music[0]?.duration_sec
+  const duration = useTargetDurationEditor(saved?.target_duration_sec, musicDuration)
+  const seconds = duration.totalSeconds
   const dirty =
     intent !== (saved?.editing_intent ?? '') ||
-    duration !== (saved ? secondsToTime(saved.target_duration_sec) : '')
-  const seconds = parseTime(duration)
-  const hasMusic = Boolean(workspace.materials?.music.length)
-  const musicDuration = workspace.materials?.music[0]?.duration_sec
-  const exceedsMusic =
-    typeof musicDuration === 'number' &&
-    Number.isFinite(seconds) &&
-    seconds > musicDuration
-  const valid =
-    intent.trim().length > 0 &&
-    hasMusic &&
-    Number.isFinite(seconds) &&
-    seconds > 0 &&
-    !exceedsMusic
+    (saved ? Math.abs(seconds - saved.target_duration_sec) >= 0.001 : seconds > 0)
+  const valid = intent.trim().length > 0 && duration.valid
   const blocker = useBlocker(dirty)
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -626,21 +789,7 @@ export function CreativeBrief() {
           />
           <small>{t('brief.intentHelp')}</small>
         </label>
-        <label className="field field--duration" htmlFor="target-duration">
-          <span>{t('projects.targetDuration')}</span>
-          <input
-            id="target-duration"
-            aria-invalid={exceedsMusic}
-            disabled={!hasMusic}
-            value={duration}
-            onChange={(event) => setDuration(event.target.value)}
-            placeholder="01:00"
-          />
-          <small className={exceedsMusic ? 'field-error' : undefined}>
-            {hasMusic ? t('brief.durationHelp') : t('brief.requiresMusic')}
-            {exceedsMusic && musicDuration ? ` (${secondsToTime(musicDuration)})` : ''}
-          </small>
-        </label>
+        <TargetDurationField idPrefix="target-duration" editor={duration} />
         {save.isError ? <OperationProblem error={save.error} /> : null}
         <div className="form-actions">
           <button
@@ -991,6 +1140,7 @@ export function RunDetail() {
         <AsterProgress execution={execution} runStatus={run.status} />
       ) : null}
       <RunActions run={run} execution={execution} />
+      <ExecutionLogAccess execution={execution} className="run-detail__logs" />
       {detail.data.frozen_edits.length > 0 ? (
         <div className="history-list">
           {detail.data.frozen_edits.map((edit) => (

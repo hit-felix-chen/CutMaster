@@ -32,6 +32,7 @@ class RunView:
     video_material_ids: tuple[MaterialId, ...]
     music_material_ids: tuple[MaterialId, ...]
     configuration: Mapping[str, Any]
+    planning_options: Mapping[str, Any]
     failure_message: str | None
     created_at: datetime
     updated_at: datetime
@@ -105,6 +106,9 @@ def run_view(value: Mapping[str, Any]) -> RunView:
     configuration = value["configuration"]
     if not isinstance(configuration, Mapping):
         raise TypeError("Invalid Run configuration persistence result")
+    planning_options = value.get("planning_options")
+    if not isinstance(planning_options, Mapping):
+        raise TypeError("Invalid Run planning options persistence result")
     return RunView(
         run_id=RunId.parse(str(value["run_id"])),
         project_id=ProjectId.parse(str(value["project_id"])),
@@ -121,6 +125,7 @@ def run_view(value: Mapping[str, Any]) -> RunView:
             MaterialId.parse(str(item)) for item in value["music_material_ids"]
         ),
         configuration=MappingProxyType(dict(configuration)),
+        planning_options=MappingProxyType(dict(planning_options)),
         failure_message=(
             None
             if value.get("failure_message") is None

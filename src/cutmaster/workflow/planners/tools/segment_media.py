@@ -16,9 +16,15 @@ class SegmentMediaReader:
     def __init__(
         self,
         source_video: Path,
+        segment_cache_directory: Path,
         video_description: dict[str, Any],
     ) -> None:
+        if not isinstance(segment_cache_directory, Path):
+            raise TypeError("segment_cache_directory must be a pathlib.Path")
+        if not segment_cache_directory.is_absolute():
+            raise ValueError("segment_cache_directory must be an absolute path")
         self.source_video = source_video
+        self.segment_cache_directory = segment_cache_directory.resolve()
         self.segments = list(video_description["segments"])
         self._locks_guard = threading.Lock()
         self._segment_locks: dict[str, threading.Lock] = {}
@@ -40,12 +46,25 @@ class SegmentMediaReader:
         )
 
     def _clip_path(self, segment: dict[str, Any]) -> Path:
-        raw_path = str(segment.get("clip_path") or "").strip()
-        if not raw_path:
-            raise ValueError(
-                f"Segment {segment['segment_id']} does not define clip_path"
+        segment_id = segment.get("segment_id")
+        if (
+            not isinstance(segment_id, str)
+            or not segment_id
+            or segment_id in {".", ".."}
+            or "/" in segment_id
+            or "\\" in segment_id
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in segment_id
             )
-        return Path(raw_path).expanduser().resolve()
+        ):
+            raise ValueError(
+                "Segment cache identity must be a safe non-empty segment_id"
+            )
+        clip_path = (self.segment_cache_directory / f"{segment_id}.mp4").resolve()
+        if clip_path.parent != self.segment_cache_directory:
+            raise ValueError("Segment cache path escapes its supplied directory")
+        return clip_path
 
     def _extract_segment_clip(
         self,

@@ -15,6 +15,8 @@ from cutmaster.application.jobs.commands import (
 )
 from cutmaster.application.jobs.service import JobsService
 from cutmaster.application.jobs.views import (
+    AttemptLogEntryView,
+    AttemptLogPageView,
     AttemptView,
     EventBoundsView,
     EventPageView,
@@ -24,6 +26,8 @@ from cutmaster.application.jobs.views import (
 )
 
 __all__ = [
+    "AttemptLogEntryView",
+    "AttemptLogPageView",
     "AdoptSupervisedJobCommand",
     "AttemptView",
     "ClaimJobCommand",

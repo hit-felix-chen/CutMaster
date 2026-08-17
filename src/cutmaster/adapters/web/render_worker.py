@@ -34,6 +34,7 @@ def execute_render_job(
     job_id: JobId,
     *,
     renderer_factory=None,
+    cover_generator=None,
     worker_id: str | None = None,
     process_id: int | None = None,
     heartbeat_interval_sec: float = 10.0,
@@ -93,6 +94,8 @@ def execute_render_job(
         }
         if renderer_factory is not None:
             keyword["renderer_factory"] = renderer_factory
+        if cover_generator is not None:
+            keyword["cover_generator"] = cover_generator
         completed = application.renders.execute_attempt(
             ExecuteManagedRenderCommand(
                 render_variant_id=RenderVariantId.parse(attempt.owner_id),

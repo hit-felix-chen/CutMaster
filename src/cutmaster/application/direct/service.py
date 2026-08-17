@@ -156,7 +156,7 @@ class DirectService:
                 target_output_length_sec=command.target_output_length_sec,
                 target_shot_length_sec=command.target_shot_length_sec,
                 prompt_type=command.prompt_type,
-                video_title=video_analysis.video.material.material_name,
+                video_title=command.video_title,
                 max_clip_duration_sec=command.max_clip_duration_sec,
                 overwrite=command.overwrite,
                 progress_reporter=command.progress_reporter,
@@ -222,10 +222,32 @@ class DirectService:
             candidate_name=command.music_material_name,
         )
         with ExitStack() as stack:
-            leased = self._lease_many(
+            exclusive_ids = {
+                material_id
+                for material_id, exclusive in (
+                    (
+                        video_view.material_id,
+                        command.subtitle_path is not None
+                        or video_view.condition is not MaterialCondition.READY,
+                    ),
+                    (
+                        music_view.material_id,
+                        music_view.condition is not MaterialCondition.READY,
+                    ),
+                )
+                if exclusive
+            }
+            leased = {}
+            for material_id in sorted(
                 (video_view.material_id, music_view.material_id),
-                stack,
-            )
+                key=str,
+            ):
+                context = (
+                    self._materials.lease(material_id)
+                    if material_id in exclusive_ids
+                    else self._materials.consume_lease(material_id)
+                )
+                leased[material_id] = stack.enter_context(context)
             video_binding = leased[video_view.material_id]
             music_binding = leased[music_view.material_id]
             # A raw-path invocation can resolve to an already analysed Material.
@@ -529,7 +551,7 @@ class DirectService:
                 f"Video Material {binding.material.name!r} has no valid analysis"
             )
         result = replace(
-            VideoAnalysisResult.read(canonical),
+            VideoAnalysisResult.read(canonical, self._runtime_handle(binding)),
             material_reused=material_reused,
             analysis_reused=True,
             elapsed_sec=0.0,
@@ -563,7 +585,7 @@ class DirectService:
                 f"Music Material {binding.material.name!r} has no valid analysis"
             )
         result = replace(
-            MusicAnalysisResult.read(canonical),
+            MusicAnalysisResult.read(canonical, self._runtime_handle(binding)),
             material_reused=material_reused,
             analysis_reused=True,
             elapsed_sec=0.0,
@@ -705,23 +727,29 @@ class DirectService:
                 "Exactly one of analysis_result_path or video_material is required"
             )
         if command.analysis_result_path is not None:
-            result = VideoAnalysisResult.read(command.analysis_result_path.resolve())
-            view = self._materials.get(result.video.material.material_id)
+            result_path = command.analysis_result_path.resolve()
+            view = self._materials.get(VideoAnalysisResult.material_id(result_path))
         else:
             view = self._materials.find_by_name(
                 MaterialType.VIDEO,
                 command.video_material,
             )
-            result = None
+            result_path = None
         if view is None:
             raise FileNotFoundError(
                 "Video Material was not found in the active catalog"
             )
-        binding = stack.enter_context(self._materials.lease(view.material_id))
-        if result is None:
-            result = VideoAnalysisResult.read(
+        binding = stack.enter_context(
+            self._materials.consume_lease(view.material_id)
+        )
+        result = VideoAnalysisResult.read(
+            (
                 binding.memory_root / "analysis_result.json"
-            )
+                if result_path is None
+                else result_path
+            ),
+            self._runtime_handle(binding),
+        )
         self._require_analysis_binding(result.video.material, binding)
         return view, binding, result
 
@@ -760,15 +788,19 @@ class DirectService:
                 raise ValueError(
                     "music_material_name is only valid with a raw audio path"
                 )
-            result = MusicAnalysisResult.read(
-                command.music_analysis_result_path.resolve()
-            )
-            view = self._materials.get(result.music.material.material_id)
+            result_path = command.music_analysis_result_path.resolve()
+            view = self._materials.get(MusicAnalysisResult.material_id(result_path))
             if view is None:
                 raise FileNotFoundError(
                     "Music Material was not found in the active catalog"
                 )
-            binding = stack.enter_context(self._materials.lease(view.material_id))
+            binding = stack.enter_context(
+                self._materials.consume_lease(view.material_id)
+            )
+            result = MusicAnalysisResult.read(
+                result_path,
+                self._runtime_handle(binding),
+            )
         else:
             if command.music_material_name:
                 raise ValueError(
@@ -782,9 +814,12 @@ class DirectService:
                 raise FileNotFoundError(
                     f"No music Material named {command.music_material!r}"
                 )
-            binding = stack.enter_context(self._materials.lease(view.material_id))
+            binding = stack.enter_context(
+                self._materials.consume_lease(view.material_id)
+            )
             result = MusicAnalysisResult.read(
-                binding.memory_root / "music_analysis_result.json"
+                binding.memory_root / "music_analysis_result.json",
+                self._runtime_handle(binding),
             )
         self._require_analysis_binding(result.music.material, binding)
         return view, binding, result
@@ -813,7 +848,7 @@ class DirectService:
         leased: dict[MaterialId, MaterialBinding] = {}
         for material_id in sorted(set(material_ids), key=str):
             leased[material_id] = stack.enter_context(
-                self._materials.lease(material_id)
+                self._materials.consume_lease(material_id)
             )
         return leased
 

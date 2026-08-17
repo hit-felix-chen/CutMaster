@@ -798,15 +798,18 @@ class SQLiteApplicationStore:
         command_id: str,
         project_id: ProjectId,
         configuration_snapshot: Mapping[str, Any],
+        planning_options: Mapping[str, Any],
         *,
         validated_video_material_id: MaterialId,
         validated_music_material_id: MaterialId,
         music_duration_sec: float,
     ) -> IdempotentResult:
         snapshot_json = _canonical_json(dict(configuration_snapshot))
+        planning_options_json = _canonical_json(dict(planning_options))
         request = {
             "project_id": str(project_id),
             "configuration": _parse_json(snapshot_json),
+            "planning_options": _parse_json(planning_options_json),
         }
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
@@ -848,8 +851,8 @@ class SQLiteApplicationStore:
                 INSERT INTO runs (
                     run_id, project_id, sequence, status, editing_intent,
                     target_duration_sec, configuration_json, failure_message,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    created_at, updated_at, planning_options_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -861,6 +864,7 @@ class SQLiteApplicationStore:
                     snapshot_json,
                     now,
                     now,
+                    planning_options_json,
                 ),
             )
             for material_type, identifiers in (
@@ -970,8 +974,8 @@ class SQLiteApplicationStore:
                 INSERT INTO runs (
                     run_id, project_id, sequence, status, editing_intent,
                     target_duration_sec, configuration_json, failure_message,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    created_at, updated_at, planning_options_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -983,6 +987,7 @@ class SQLiteApplicationStore:
                     source["configuration_json"],
                     now,
                     now,
+                    source["planning_options_json"],
                 ),
             )
             connection.executemany(
@@ -1559,6 +1564,7 @@ class SQLiteApplicationStore:
             "editing_intent": row["editing_intent"],
             "target_duration_sec": row["target_duration_sec"],
             "configuration": _parse_json(row["configuration_json"]),
+            "planning_options": _parse_json(row["planning_options_json"]),
             "video_material_ids": [
                 item["material_id"]
                 for item in materials

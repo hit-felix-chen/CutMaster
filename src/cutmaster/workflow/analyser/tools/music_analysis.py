@@ -15,6 +15,59 @@ import numpy as np
 from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 
 
+MUSIC_MEMORY_SCHEMA_VERSION = "2.0"
+MUSIC_MEMORY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "source_duration_sec",
+        "tempo_bpm",
+        "beats_sec",
+        "accents_sec",
+        "energy_step_sec",
+        "energy_curve",
+        "sections",
+    }
+)
+_ENERGY_POINT_FIELDS = frozenset({"time_sec", "energy"})
+_SECTION_FIELDS = frozenset(
+    {
+        "section_id",
+        "start_sec",
+        "end_sec",
+        "role",
+        "mean_energy",
+        "energy_trend",
+        "suggested_clip_duration_sec",
+    }
+)
+
+
+def validate_music_memory(memory: dict[str, Any]) -> None:
+    """Require the current path-free Music Memory contract exactly."""
+
+    if not isinstance(memory, dict):
+        raise TypeError("Music Memory must be a mapping")
+    if set(memory) != MUSIC_MEMORY_FIELDS:
+        raise ValueError("Music Memory fields do not match schema 2.0")
+    if memory.get("schema_version") != MUSIC_MEMORY_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported Music Memory schema: {memory.get('schema_version')!r}"
+        )
+    if float(memory["source_duration_sec"]) <= 0.0:
+        raise ValueError("Music Memory source duration must be positive")
+    if float(memory["energy_step_sec"]) <= 0.0:
+        raise ValueError("Music Memory energy step must be positive")
+    for field_name in ("beats_sec", "accents_sec", "energy_curve", "sections"):
+        if not isinstance(memory[field_name], list):
+            raise TypeError(f"Music Memory {field_name} must be a list")
+    for point in memory["energy_curve"]:
+        if not isinstance(point, dict) or set(point) != _ENERGY_POINT_FIELDS:
+            raise ValueError("Music Memory energy point fields do not match schema 2.0")
+    for section in memory["sections"]:
+        if not isinstance(section, dict) or set(section) != _SECTION_FIELDS:
+            raise ValueError("Music Memory section fields do not match schema 2.0")
+
+
 def _normalize(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return values.astype(float)
@@ -194,8 +247,7 @@ def analyze_music_memory(
 
     raise_if_cancelled(cancellation_token)
     return {
-        "schema_version": "1.0",
-        "audio_path": str(audio_path),
+        "schema_version": MUSIC_MEMORY_SCHEMA_VERSION,
         "source_duration_sec": round(source_duration, 3),
         "tempo_bpm": round(float(np.asarray(tempo).reshape(-1)[0]), 3),
         "beats_sec": [round(float(value), 6) for value in source_beats],
@@ -207,6 +259,7 @@ def analyze_music_memory(
 
 
 def write_music_memory(path: Path, memory: dict[str, Any]) -> None:
+    validate_music_memory(memory)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
@@ -227,6 +280,9 @@ def write_music_memory(path: Path, memory: dict[str, Any]) -> None:
 
 
 __all__ = [
+    "MUSIC_MEMORY_FIELDS",
+    "MUSIC_MEMORY_SCHEMA_VERSION",
     "analyze_music_memory",
+    "validate_music_memory",
     "write_music_memory",
 ]

@@ -40,6 +40,17 @@
     "none": "无",
     "unknown": "未知"
   },
+  "executionLogs": {
+    "eyebrow": "EXECUTION LOG",
+    "title": "实时日志",
+    "path": "日志路径",
+    "open": "查看实时日志",
+    "live": "正在接收实时日志",
+    "waiting": "等待 Worker 创建日志文件",
+    "ended": "本次 Attempt 的日志已结束",
+    "empty": "当前还没有日志输出。",
+    "loadFailed": "无法读取本次 Attempt 的日志。"
+  },
   "shell": {
     "narrowTitle": "需要更宽的窗口",
     "narrowBody": "CutMaster 剪辑工作台需要至少 1280 像素宽度。"
@@ -253,6 +264,12 @@
     "intentHelp": "描述关键情节、情绪和希望强调的内容。",
     "durationHelp": "不能超过所选音乐的完整时长。",
     "requiresMusic": "选择音乐素材后才能设置目标时长。",
+    "customDuration": "自定义时长",
+    "useMusicDuration": "使用音频时长",
+    "minutes": "分钟",
+    "seconds": "秒",
+    "selectedMusicDuration": "所选音频完整时长",
+    "durationLimit": "自定义时长上限：{{duration}}",
     "saveChanges": "保存修改",
     "savedNotice": "创意简报已保存。",
     "leaveTitle": "有未保存的修改",
@@ -343,6 +360,7 @@
     "energy": "能量",
     "sections": "乐段",
     "musicTimeline": "音乐时间线",
+    "musicTimelineViewport": "音乐时间线轨道",
     "seekSection": "定位到 {{time}} 的 {{section}}",
     "seekBeat": "定位到 {{time}} 的节拍点",
     "seekAccent": "定位到 {{time}} 的重拍",

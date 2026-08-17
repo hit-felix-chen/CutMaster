@@ -30,7 +30,7 @@ from cutmaster.workflow.shared.execution_context import WorkflowContext
 _FRAME_MAX_SIDE = 640
 _FRAME_JPEG_QUALITY = 85
 SCENE_SEGMENTATION_VERSION = SCENE_BOUNDARY_PROMPT_VERSION
-SCENE_FRAME_CACHE_VERSION = "1.0"
+SCENE_FRAME_CACHE_VERSION = "2.0"
 
 
 @dataclass(frozen=True)
@@ -132,6 +132,25 @@ def _overlay_shot_marker(
     return frame
 
 
+def _resolve_frame_file(frame_directory: Path, file_ref: object) -> Path:
+    """Resolve one filename-only cache reference inside its owning directory."""
+
+    if not isinstance(file_ref, str) or not file_ref:
+        raise ValueError("Scene frame file reference must be a non-empty string")
+    relative = Path(file_ref)
+    if relative.is_absolute() or relative.name != file_ref:
+        raise ValueError("Scene frame file reference must be a filename")
+    root = frame_directory.resolve()
+    candidate = root / relative
+    if candidate.is_symlink():
+        raise ValueError("Scene frame cache files cannot be symlinks")
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Scene frame file reference escapes its cache") from exc
+    return candidate
+
+
 def prepare_scene_frames(
     video_path: Path,
     shots: list[dict[str, Any]],
@@ -144,12 +163,7 @@ def prepare_scene_frames(
     frame_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = frame_directory / "manifest.json"
     manifest = read_json_checkpoint(manifest_path)
-    force_rebuild = (
-        isinstance(manifest, dict)
-        and manifest.get("frame_cache_version") != SCENE_FRAME_CACHE_VERSION
-    )
     expected: dict[str, list[dict[str, Any]]] = {}
-    missing = 0
     for shot in shots:
         shot_id = str(shot["shot_id"])
         expected[shot_id] = []
@@ -157,13 +171,23 @@ def prepare_scene_frames(
             _frame_times(shot, config.frames_per_shot),
             1,
         ):
-            path = frame_directory / f"{shot_id}_{frame_index:02d}.jpg"
             expected[shot_id].append(
                 {
-                    "path": str(path.resolve()),
+                    "file": f"{shot_id}_{frame_index:02d}.jpg",
                     "time_sec": time_sec,
                 }
             )
+    expected_manifest = {
+        "schema_version": "2.0",
+        "frame_cache_version": SCENE_FRAME_CACHE_VERSION,
+        "frames_per_shot": config.frames_per_shot,
+        "shots": expected,
+    }
+    force_rebuild = manifest != expected_manifest
+    missing = 0
+    for samples in expected.values():
+        for sample in samples:
+            path = _resolve_frame_file(frame_directory, sample["file"])
             if force_rebuild or not path.is_file() or path.stat().st_size <= 0:
                 missing += 1
     if missing == 0:
@@ -192,7 +216,7 @@ def prepare_scene_frames(
                 shot_id = str(shot["shot_id"])
                 previous_path: Path | None = None
                 for frame_index, sample in enumerate(expected[shot_id], 1):
-                    output = Path(sample["path"])
+                    output = _resolve_frame_file(frame_directory, sample["file"])
                     if (
                         not force_rebuild
                         and output.is_file()
@@ -241,12 +265,7 @@ def prepare_scene_frames(
         capture.release()
     write_json_checkpoint(
         manifest_path,
-        {
-            "schema_version": "1.0",
-            "frame_cache_version": SCENE_FRAME_CACHE_VERSION,
-            "frames_per_shot": config.frames_per_shot,
-            "shots": expected,
-        },
+        expected_manifest,
     )
     raise_if_cancelled(cancellation_token)
     return expected
@@ -372,7 +391,7 @@ def detect_scene_boundaries(
         if decisions is None:
             raise_if_cancelled(cancellation_token)
             image_data_urls = [
-                _data_url(Path(sample["path"]))
+                _data_url(_resolve_frame_file(frame_directory, sample["file"]))
                 for shot in window_shots
                 for sample in frames[str(shot["shot_id"])]
             ]

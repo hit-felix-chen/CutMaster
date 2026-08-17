@@ -2,22 +2,21 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from cutmaster.workflow.planners.tools.segment_media import SegmentMediaReader
 
 
-def _video_description(first_clip: Path, second_clip: Path) -> dict:
+def _video_description() -> dict:
     return {
         "segments": [
             {
                 "segment_id": "segment_0001",
                 "time_range": {"start_sec": 0.0, "end_sec": 5.0},
-                "clip_path": str(first_clip),
             },
             {
                 "segment_id": "segment_0002",
                 "time_range": {"start_sec": 5.0, "end_sec": 10.0},
-                "clip_path": str(second_clip),
             },
         ]
     }
@@ -27,8 +26,10 @@ def test_segment_media_reader_maps_absolute_times_to_cached_clips(
     tmp_path,
     monkeypatch,
 ) -> None:
-    first_clip = tmp_path / "segment_0001.mp4"
-    second_clip = tmp_path / "segment_0002.mp4"
+    segment_cache_directory = tmp_path / "segments"
+    segment_cache_directory.mkdir()
+    first_clip = segment_cache_directory / "segment_0001.mp4"
+    second_clip = segment_cache_directory / "segment_0002.mp4"
     first_clip.write_bytes(b"first")
     second_clip.write_bytes(b"second")
     seek_calls: dict[str, list[float]] = {}
@@ -54,7 +55,8 @@ def test_segment_media_reader_maps_absolute_times_to_cached_clips(
     monkeypatch.setattr("cutmaster.workflow.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         tmp_path / "source.mp4",
-        _video_description(first_clip, second_clip),
+        segment_cache_directory,
+        _video_description(),
     )
 
     frames = reader.sample_frames([1.0, 5.0, 9.5])
@@ -101,7 +103,8 @@ def test_segment_media_reader_rebuilds_missing_cache(
     monkeypatch.setattr("cutmaster.workflow.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         source_video,
-        _video_description(first_clip, second_clip),
+        first_clip.parent,
+        _video_description(),
     )
 
     frames = reader.sample_frames([7.0])
@@ -118,8 +121,10 @@ def test_segment_media_reader_clamps_tail_sample_to_last_video_frame(
     tmp_path,
     monkeypatch,
 ) -> None:
-    first_clip = tmp_path / "segment_0001.mp4"
-    second_clip = tmp_path / "segment_0002.mp4"
+    segment_cache_directory = tmp_path / "segments"
+    segment_cache_directory.mkdir()
+    first_clip = segment_cache_directory / "segment_0001.mp4"
+    second_clip = segment_cache_directory / "segment_0002.mp4"
     first_clip.write_bytes(b"first")
     second_clip.write_bytes(b"second")
     seek_calls: list[float] = []
@@ -155,7 +160,8 @@ def test_segment_media_reader_clamps_tail_sample_to_last_video_frame(
     monkeypatch.setattr("cutmaster.workflow.planners.tools.segment_media.cv2.VideoCapture", Capture)
     reader = SegmentMediaReader(
         tmp_path / "source.mp4",
-        _video_description(first_clip, second_clip),
+        segment_cache_directory,
+        _video_description(),
     )
 
     frames = reader.sample_frames([4.999999])
@@ -163,3 +169,24 @@ def test_segment_media_reader_clamps_tail_sample_to_last_video_frame(
     assert len(frames) == 1
     assert int(frames[0][0, 0, 0]) == 7
     assert seek_calls == [4760.0]
+
+
+def test_segment_media_reader_rejects_segment_id_path_escape(tmp_path) -> None:
+    segment_cache_directory = tmp_path / "segments"
+    reader = SegmentMediaReader(
+        tmp_path / "source.mp4",
+        segment_cache_directory,
+        {
+            "segments": [
+                {
+                    "segment_id": "../escaped",
+                    "time_range": {"start_sec": 0.0, "end_sec": 1.0},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="safe non-empty segment_id"):
+        reader.cached_segments_for_range(0.0, 1.0)
+
+    assert not (tmp_path / "escaped.mp4").exists()

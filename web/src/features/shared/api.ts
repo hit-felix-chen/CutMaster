@@ -185,6 +185,31 @@ export interface RunSubmission {
 export interface ExecutionSummary {
   attempt: AttemptSummary
   job: JobSummary
+  log?: AttemptLogInfo
+}
+
+export interface AttemptLogInfo {
+  path: string
+  exists: boolean
+}
+
+export interface AttemptLogEntry {
+  cursor: number
+  timestamp: string | null
+  level: 'DEBUG' | 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR' | 'CRITICAL' | 'RAW'
+  component: string | null
+  event: string | null
+  fields: string
+  message: string
+}
+
+export interface AttemptLogPage {
+  attempt_id: string
+  log: AttemptLogInfo
+  entries: AttemptLogEntry[]
+  start_cursor: number
+  end_cursor: number
+  has_more_before: boolean
 }
 
 export interface ModelUsageBucket {
@@ -464,7 +489,6 @@ export interface ActivityCollection {
 export interface SettingsView {
   values: Record<string, unknown>
   base_path: string
-  overlay_path: string
   data_root: string
   secrets: {
     llm_configured: boolean
@@ -940,6 +964,14 @@ export const api = {
     },
   },
   attempts: {
+    logs: (attemptId: string) =>
+      apiRequest<AttemptLogPage>(`/api/attempts/${encodeURIComponent(attemptId)}/logs`),
+    logStreamUrl: (attemptId: string, afterCursor: number) =>
+      `/api/attempts/${encodeURIComponent(attemptId)}/logs/stream?${new URLSearchParams(
+        {
+          after_cursor: String(afterCursor),
+        },
+      ).toString()}`,
     stop: (attemptId: string) =>
       apiRequest<{ attempt: AttemptSummary; job: Record<string, unknown> }>(
         `/api/attempts/${encodeURIComponent(attemptId)}/stop`,

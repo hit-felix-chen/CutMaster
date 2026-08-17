@@ -42,9 +42,6 @@ from cutmaster.workflow.analyser.tools.cache import (
     read_json_checkpoint as _read_json_checkpoint,
 )
 from cutmaster.workflow.analyser.tools.cache import (
-    reuse_compatible_stage_checkpoints as _reuse_compatible_stage_checkpoints,
-)
-from cutmaster.workflow.analyser.tools.cache import (
     valid_segment_checkpoint as _valid_segment_checkpoint,
 )
 from cutmaster.workflow.analyser.tools.cache import (
@@ -80,6 +77,7 @@ from cutmaster.workflow.contracts.video import (
     TimeRange,
     VideoDescription,
     VisualAnnotationStatus,
+    validate_video_description_document,
 )
 from cutmaster.workflow.ports import (
     CancellationToken,
@@ -99,6 +97,11 @@ from cutmaster.workflow.prompting.failure_catalog import (
 from cutmaster.workflow.shared.execution_context import WorkflowContext
 from cutmaster.workflow.shared.shot_detection import detect_source_cuts
 from cutmaster.workflow.shared.timecode import format_range, parse_time
+from cutmaster.workflow.shared.video_cover import (
+    VIDEO_COVER_FILENAME,
+    is_video_cover_file,
+    write_video_cover,
+)
 
 
 @dataclass(frozen=True)
@@ -248,7 +251,7 @@ def _split_segment_clips(
             raise_if_cancelled(cancellation_token)
             start = float(segment["time_range"]["start_sec"])
             end = float(segment["time_range"]["end_sec"])
-            output = clips_dir / f"{segment['segment_id']}.mp4"
+            output = _segment_clip_path(material_directory, segment.get("segment_id"))
             expected_duration = end - start
             try:
                 existing_duration = float(probe_media(output)["duration"])
@@ -264,7 +267,6 @@ def _split_segment_clips(
                     segment_id=segment["segment_id"],
                     path=output,
                 )
-                segment["clip_path"] = str(output.resolve())
                 continue
             temporary_output = output.with_suffix(".partial.mp4")
             command = [
@@ -304,7 +306,25 @@ def _split_segment_clips(
                 temporary_output.unlink(missing_ok=True)
                 raise
             temporary_output.replace(output)
-            segment["clip_path"] = str(output.resolve())
+
+
+def _segment_clip_path(material_directory: Path, segment_id: object) -> Path:
+    """Resolve one runtime-only Segment clip from its portable identity."""
+
+    if (
+        not isinstance(segment_id, str)
+        or not segment_id
+        or segment_id in {".", ".."}
+        or "/" in segment_id
+        or "\\" in segment_id
+        or any(ord(character) < 32 or ord(character) == 127 for character in segment_id)
+    ):
+        raise ValueError("Segment clip identity must be a safe non-empty segment_id")
+    clips_directory = (material_directory / "segments").resolve()
+    clip_path = (clips_directory / f"{segment_id}.mp4").resolve()
+    if clip_path.parent != clips_directory:
+        raise ValueError("Segment clip path escapes its Material Memory directory")
+    return clip_path
 
 
 def _sample_shot_frames(
@@ -556,7 +576,10 @@ def _annotate_segments(
 
     def annotate_segment(segment: dict[str, Any]) -> SegmentDescription:
         raise_if_cancelled(cancellation_token)
-        clip_path = Path(segment["clip_path"])
+        clip_path = _segment_clip_path(
+            annotation_directory.parent,
+            segment.get("segment_id"),
+        )
         segment_start = float(segment["time_range"]["start_sec"])
         source_shots = segment["shots"]
         shot_ids = [str(shot["shot_id"]) for shot in source_shots]
@@ -1073,7 +1096,6 @@ def _annotate_segments(
         description = SegmentDescription(
             segment_id=segment["segment_id"],
             time_range=TimeRange(**segment["time_range"]),
-            clip_path=segment["clip_path"],
             has_dialogue=bool(segment["has_dialogue"]),
             speech_mode=SpeechMode(segment["speech_mode"]),
             content_type=content_type,
@@ -1320,29 +1342,54 @@ def _cache_result(
     manifest_path = material_directory / "analysis_manifest.json"
     description_path = material_directory / "video_description.json"
     summary_path = material_directory / "video_summary.json"
+    cover_path = material_directory / VIDEO_COVER_FILENAME
     manifest = _read_json_checkpoint(manifest_path)
+    expected_manifest_fields = set(expected_signature) | {
+        "scene_segmentation_method",
+        "scene_segmentation_version",
+        "scene_boundaries",
+        "segment_summary_prompt_version",
+        "video_description",
+        "video_summary",
+    }
     if (
         not isinstance(manifest, dict)
+        or set(manifest) != expected_manifest_fields
         or any(manifest.get(key) != value for key, value in expected_signature.items())
+        or manifest.get("scene_segmentation_method") != "scene_vlm"
         or manifest.get("scene_segmentation_version") != SCENE_SEGMENTATION_VERSION
+        or manifest.get("scene_boundaries") != "scene_boundaries.json"
         or manifest.get("segment_summary_prompt_version") != "2.0"
+        or manifest.get("video_description") != "video_description.json"
+        or manifest.get("video_summary") != "video_summary.json"
         or not description_path.is_file()
         or not summary_path.is_file()
+        or not is_video_cover_file(cover_path)
     ):
         return None
     description = json.loads(description_path.read_text(encoding="utf-8"))
+    try:
+        validate_video_description_document(description)
+    except (TypeError, ValueError):
+        return None
+    segments = description["segments"]
     summary = _valid_video_summary(
         _read_json_checkpoint(summary_path),
-        [str(segment["segment_id"]) for segment in description.get("segments") or []],
+        [str(segment["segment_id"]) for segment in segments],
     )
     if summary is None:
+        return None
+    if _dialogue_checkpoint(material_directory) is None:
         return None
     required = [
         material_directory / "source.srt",
         material_directory / "dialogue_merged.srt",
         material_directory / "dialogues.json",
         material_directory / "analysis_history.json",
-        *[Path(segment["clip_path"]) for segment in description.get("segments") or []],
+        *[
+            _segment_clip_path(material_directory, segment.get("segment_id"))
+            for segment in segments
+        ],
     ]
     if not required or any(not path.is_file() for path in required):
         return None
@@ -1411,6 +1458,29 @@ def _require_compatible_incomplete_analysis(
     _write_json_checkpoint(spec_path, analysis_signature)
 
 
+def _video_cover_candidate_times(shots: list[dict[str, Any]]) -> tuple[float, ...]:
+    """Use the existing earliest-Shot, middle/early/late selection policy."""
+
+    candidates: list[float] = []
+    for shot in shots:
+        time_range = shot.get("time_range")
+        if not isinstance(time_range, dict):
+            continue
+        start = float(time_range["start_sec"])
+        end = float(time_range["end_sec"])
+        duration = end - start
+        if duration <= 0:
+            continue
+        samples = tuple(
+            round(start + duration * (index + 0.5) / 3, 6)
+            for index in range(3)
+        )
+        candidates.extend((samples[1], samples[0], samples[2]))
+    if not candidates:
+        raise ValueError("Video analysis produced no valid Shot for its cover")
+    return tuple(candidates)
+
+
 def _analyse_video_material(
     video_path: Path,
     video_title: str,
@@ -1423,12 +1493,14 @@ def _analyse_video_material(
     vlm_config: VLMConfig,
     material_directory: Path,
     cancellation_token: CancellationToken | None = None,
+    *,
+    source_fingerprint: str,
 ) -> _MaterialAnalysisArtifacts:
     raise_if_cancelled(cancellation_token)
     if annotation_config.shot_sample_frames != 5:
         raise ValueError("shot_annotation.shot_sample_frames must be exactly 5")
     analysis_signature = _analysis_signature(
-        video_path,
+        source_fingerprint,
         video_title,
         provided_subtitle,
         detection_config,
@@ -1466,11 +1538,6 @@ def _analyse_video_material(
 
     media = probe_media(video_path)
     duration_sec = float(media["duration"])
-    _reuse_compatible_stage_checkpoints(
-        material_directory,
-        analysis_signature,
-        duration_sec,
-    )
     shots_path = material_directory / "shots.json"
     shots = _valid_shot_checkpoint(
         _read_json_checkpoint(shots_path),
@@ -1524,8 +1591,7 @@ def _analyse_video_material(
     context.set_artifact("shot_boundaries", shots)
 
     source_metadata = {
-        "path": str(video_path.resolve()),
-        "title": video_title or video_path.stem,
+        "title": video_title,
         "duration_sec": duration_sec,
         "fps": fps,
         "width": int(media["width"]),
@@ -1851,6 +1917,14 @@ def _analyse_video_material(
             stage_index=7,
             stage_count=7,
         )
+    cover_path = material_directory / VIDEO_COVER_FILENAME
+    if not is_video_cover_file(cover_path):
+        write_video_cover(
+            video_path,
+            cover_path,
+            _video_cover_candidate_times(shots),
+            cancellation_token=cancellation_token,
+        )
     raise_if_cancelled(cancellation_token)
     _write_json_checkpoint(
         material_directory / "analysis_manifest.json",
@@ -1858,13 +1932,10 @@ def _analyse_video_material(
             **analysis_signature,
             "scene_segmentation_method": "scene_vlm",
             "scene_segmentation_version": SCENE_SEGMENTATION_VERSION,
-            "scene_boundaries": str(
-                (material_directory / "scene_boundaries.json").resolve()
-            ),
+            "scene_boundaries": "scene_boundaries.json",
             "segment_summary_prompt_version": "2.0",
-            "material_directory": str(material_directory.resolve()),
-            "video_description": str(description_path.resolve()),
-            "video_summary": str(summary_path.resolve()),
+            "video_description": "video_description.json",
+            "video_summary": "video_summary.json",
         },
     )
     context.save_model_usage()
@@ -1897,6 +1968,7 @@ class MaterialAnalystAgent:
         video_title: str,
         provided_subtitle: Path | None,
         *,
+        source_fingerprint: str,
         material_directory: Path,
         cancellation_token: CancellationToken | None = None,
     ) -> _MaterialAnalysisArtifacts:
@@ -1912,6 +1984,7 @@ class MaterialAnalystAgent:
             self.config.vlm,
             material_directory,
             cancellation_token=cancellation_token,
+            source_fingerprint=source_fingerprint,
         )
 
     def analyse_music(

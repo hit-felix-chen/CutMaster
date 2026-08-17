@@ -24,9 +24,12 @@ def command_id() -> str:
     return str(uuid4())
 
 
-def test_settings_save_writes_sparse_overlay_atomically_and_reloads(
+def test_settings_save_updates_config_toml_atomically_and_reloads(
     managed_configuration: EffectiveConfiguration,
 ) -> None:
+    config = managed_configuration.sources.base_path
+    before = config.read_text(encoding="utf-8")
+    mode = config.stat().st_mode & 0o777
     service = SettingsService(managed_configuration)
 
     saved = service.save(
@@ -38,20 +41,20 @@ def test_settings_save_writes_sparse_overlay_atomically_and_reloads(
 
     assert saved.restart_required
     assert saved.settings.values["renderer"]["width"] == 1280
-    overlay = managed_configuration.sources.overlay_path
-    assert overlay.read_text(encoding="utf-8") == (
-        "[renderer]\nfps = 24\nheight = 720\nwidth = 1280\n"
-    )
-    assert overlay.stat().st_mode & 0o777 == 0o600
-    assert not list(overlay.parent.glob(f".{overlay.name}.*.tmp"))
+    content = config.read_text(encoding="utf-8")
+    assert ("# Stage 0a" in content) == ("# Stage 0a" in before)
+    assert "width = 1280" in content
+    assert "height = 720" in content
+    assert "fps = 24" in content
+    assert config.stat().st_mode & 0o777 == mode
+    assert not list(config.parent.glob(f".{config.name}.*.tmp"))
 
 
 def test_invalid_settings_candidate_preserves_previous_bytes(
     managed_configuration: EffectiveConfiguration,
 ) -> None:
-    overlay = managed_configuration.sources.overlay_path
-    overlay.write_text("[renderer]\nwidth = 1280\n", encoding="utf-8")
-    before = overlay.read_bytes()
+    config = managed_configuration.sources.base_path
+    before = config.read_bytes()
     service = SettingsService(managed_configuration)
 
     with pytest.raises((TypeError, ValueError)):
@@ -62,18 +65,19 @@ def test_invalid_settings_candidate_preserves_previous_bytes(
             )
         )
 
-    assert overlay.read_bytes() == before
+    assert config.read_bytes() == before
 
 
-def test_settings_replay_detects_overlay_changed_outside_application(
+def test_settings_replay_detects_config_changed_outside_application(
     managed_configuration: EffectiveConfiguration,
 ) -> None:
     service = SettingsService(managed_configuration)
     identifier = command_id()
     command = SaveSettingsCommand(identifier, {"renderer": {"width": 1280}})
     service.save(command)
-    managed_configuration.sources.overlay_path.write_text(
-        "[renderer]\nwidth = 1920\n",
+    config = managed_configuration.sources.base_path
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("width = 1280", "width = 1920"),
         encoding="utf-8",
     )
 
@@ -174,8 +178,8 @@ def test_provider_projection_derives_preset_without_exposing_secret(
 ) -> None:
     view = SettingsService(managed_configuration).get()
 
-    assert view.connections.profile == "cost_saving"
-    assert view.connections.providers["llm"]["model"] == "deepseek-v4-flash"
+    assert view.connections.profile == "simple"
+    assert view.connections.providers["llm"]["model"] == "qwen3.7-max"
     assert view.connections.credentials["llm"].source == "none"
     assert view.connections.credentials["llm"].suffix is None
 
@@ -207,6 +211,9 @@ def test_provider_save_writes_one_shared_dotenv_secret_with_mode_0600(
     assert saved.settings.connections.profile == "simple"
     assert saved.settings.connections.credentials["llm"].suffix == "alue"
     assert set(saved.credential_results.values()) == {"set"}
+    assert 'model = "qwen3.7-max"' in managed_configuration.sources.base_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_provider_receipt_has_no_secret_verifier_and_repairs_dotenv_mode(
@@ -274,10 +281,10 @@ def test_process_secret_is_locked_without_blocking_public_provider_save(
     managed_configuration: EffectiveConfiguration,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "process-secret")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "process-secret")
     service = SettingsService(
         managed_configuration,
-        process_environment_names=frozenset({"DEEPSEEK_API_KEY"}),
+        process_environment_names=frozenset({"DASHSCOPE_API_KEY"}),
     )
     providers = {
         name: dict(value) for name, value in service.get().connections.providers.items()
@@ -300,7 +307,7 @@ def test_process_secret_is_locked_without_blocking_public_provider_save(
     assert saved.settings.connections.credentials["llm"].writable is False
 
 
-def test_provider_save_rolls_back_dotenv_when_overlay_write_fails(
+def test_provider_save_rolls_back_dotenv_when_config_write_fails(
     managed_configuration: EffectiveConfiguration,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,14 +316,16 @@ def test_provider_save_rolls_back_dotenv_when_overlay_write_fails(
     dotenv = managed_configuration.sources.dotenv_path
     dotenv.write_text("KEEP=value\n", encoding="utf-8")
     before = dotenv.read_bytes()
+    config = managed_configuration.sources.base_path
+    config_before = config.read_bytes()
     real_atomic_write = service_module._atomic_write
 
-    def fail_overlay(path: Path, content: str) -> None:
-        if path == managed_configuration.sources.overlay_path:
-            raise OSError("injected overlay failure")
-        real_atomic_write(path, content)
+    def fail_config(path: Path, content: str, *, mode: int | None = None) -> None:
+        if path == config:
+            raise OSError("injected config failure")
+        real_atomic_write(path, content, mode=mode)
 
-    monkeypatch.setattr(service_module, "_atomic_write", fail_overlay)
+    monkeypatch.setattr(service_module, "_atomic_write", fail_config)
     service = SettingsService(managed_configuration)
 
     with pytest.raises(OSError, match="injected"):
@@ -330,7 +339,7 @@ def test_provider_save_rolls_back_dotenv_when_overlay_write_fails(
         )
 
     assert dotenv.read_bytes() == before
-    assert not managed_configuration.sources.overlay_path.exists()
+    assert config.read_bytes() == config_before
 
 
 def test_atomic_write_and_both_restore_paths_fsync_the_parent_directory(
@@ -361,6 +370,7 @@ def test_connection_test_uses_ephemeral_candidate_without_persisting(
         return 12.34
 
     service = SettingsService(managed_configuration, connection_tester=tester)
+    config_before = managed_configuration.sources.base_path.read_bytes()
     configuration = dict(service.get().connections.providers["llm"])
     configuration["model"] = "ephemeral-model"
 
@@ -376,5 +386,5 @@ def test_connection_test_uses_ephemeral_candidate_without_persisting(
     assert result.latency_ms == 12.3
     assert probes[0].api_key == "ephemeral-secret"
     assert probes[0].configuration["model"] == "ephemeral-model"
-    assert not managed_configuration.sources.overlay_path.exists()
+    assert managed_configuration.sources.base_path.read_bytes() == config_before
     assert not managed_configuration.sources.dotenv_path.exists()

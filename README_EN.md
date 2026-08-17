@@ -39,13 +39,14 @@ ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-`CutMasterApplication.direct` is the complete-workflow entry point, while `Analyser`, `Planners`, and `Renderer` are independently callable through the Application Layer. `ASTERTeam` remains the sole coordinator for the five editorial agents.
+CLI and Benchmark complete workflows use the shared local managed entry point. `CutMasterApplication.direct` remains an internal synchronous stage collaborator and an explicit Python compatibility API. `ASTERTeam` remains the sole coordinator for the five editorial agents.
 
 ## Architecture
 
 > The backend now implements `CutMasterApplication`, Direct and Material
 > services, SQLite-managed state, handle-only v2 Workflow contracts, and the
-> Artifact Manifest. CLI and Mashup-Benchmark both call `app.direct` directly.
+> Artifact Manifest. CLI and Mashup-Benchmark now create Web-visible managed
+> Project, Run, Frozen Edit, and Render Variant history.
 > The FastAPI + React/Vite local Web workspace is now implemented alongside
 > the backend foundations. CLI, Web, and Mashup-Benchmark all enter through the
 > Application Layer. Web `Start editing` now runs real ASTER planning in an
@@ -220,7 +221,7 @@ DASHSCOPE_API_KEY=your_dashscope_api_key
 HF_TOKEN=
 ```
 
-For a simpler setup, run the LLM, VLM, and ASR through DashScope: under `[llm]` in `config.toml`, comment out the default DeepSeek `model`, `base_url`, and `api_key_env`, then uncomment the adjacent three-line `qwen3.7-max` alternative. In that case, `.env` only needs:
+The default configuration runs LLM, VLM, and ASR through DashScope, so `.env` only needs:
 
 ```dotenv
 DASHSCOPE_API_KEY=your_dashscope_api_key
@@ -245,9 +246,9 @@ real Application data for Projects, the Material Library, Video/Music Memory
 Explorer, Activity, and Settings. Materials can be preflighted and imported in
 the browser (with an optional SRT for video), then queued for the real Analyser.
 Failed or interrupted work supports Retry/Resume, active work supports Stop,
-and deletion is guarded by references and running state. Video thumbnails and
-music waveforms are bounded previews rather than full source media embedded in
-list responses.
+and deletion is guarded by references and running state. Dedicated,
+annotation-free video JPEG covers and bar-style music energy previews are
+bounded assets rather than full source media embedded in list responses.
 
 A Project has **Project Setup**, **Runs**, and **Outputs** tabs. After saving
 Materials, Editing Intent, and Target Duration, **Start editing** creates an
@@ -273,7 +274,7 @@ after `resync_required`.
 
 Settings and first-run Setup support provider presets or custom
 OpenAI-compatible connections, per-capability connection tests, atomic `.env`
-and local-overlay writes, and guarded Data Root Migration. Deliberately deferred
+and `config.toml` writes, and guarded Data Root Migration. Deliberately deferred
 work includes persistent in-app notifications, an Activity log drawer, Direct
 Bundle bulk cleanup/retention, generated OpenAPI TypeScript drift checks in CI,
 multi-user/cloud deployment, and broader provider/media port injection.
@@ -285,13 +286,17 @@ uv run cutmaster run \
   --video /path/to/source.mp4 \
   --audio /path/to/bgm.mp3 \
   --prompt "Create an energetic cut centered on the protagonist's growth and final victory" \
-  --output-dir /path/to/output \
+  --project-name "Protagonist Growth Montage" \
   --target-duration 60 \
   --target-shot-length 4 \
   --audio-mode bgm_only \
-  --config config.toml \
-  --overwrite
+  --config config.toml
 ```
+
+CLI no longer accepts `--output-dir`. It creates the same Material, Edit
+Project, ASTER Run, Execution Attempt, Frozen Edit, and Render Variant records
+as Web. Canonical artifacts stay under the active Application Data Root and are
+immediately visible in the Web workspace.
 
 The existing `run --video/--audio` form remains supported. For raw paths,
 CutMaster first ensures that the corresponding Materials exist. Names default
@@ -307,7 +312,7 @@ uv run cutmaster run \
   --video-material "feature-film" \
   --music-material "trailer-score" \
   --prompt "Create an energetic cut centered on the protagonist's growth and final victory" \
-  --output-dir /path/to/output \
+  --project-name "Material Reuse Example" \
   --target-duration 60 \
   --config config.toml
 ```
@@ -331,41 +336,37 @@ Common optional arguments:
 | `--video-title` | Source title supplied to material analysis |
 | `--material-name` | Candidate name used by `analyse` / `analyse-music`; defaults to the filename stem |
 | `--video-material-name` | Candidate name used when `run` adds a raw video path |
-| `--music-material-name` | Candidate name used when `plan` / `run` adds a raw music path |
+| `--music-material-name` | Candidate name used when `run` adds a raw music path |
 | `--video-material`, `--music-material` | Select analysed video and music by exact Material Name |
+| `--project-name` | Name of the Web-visible Edit Project created by the command |
 | `--max-clip-duration` | Maximum duration for an individual candidate clip |
 | `--audio-mode` | `bgm_only` or `dialogue` |
-| `--overwrite` | Replace artifacts in the selected output directory; immutable ASTER Run history is not retained |
 
 The three stages are also independently callable:
 
 ```bash
 uv run cutmaster analyse \
   --video source.mp4 \
-  --material-name "feature-film" \
-  --output-dir artifacts/cutmaster/analyser
+  --material-name "feature-film"
 
 uv run cutmaster analyse-music \
   --audio bgm.mp3 \
-  --material-name "trailer-score" \
-  --output-dir artifacts/cutmaster/analyser/music
+  --material-name "trailer-score"
 
 uv run cutmaster plan \
   --video-material "feature-film" \
   --music-material "trailer-score" \
   --prompt "..." \
-  --output-dir artifacts/cutmaster/planners
+  --project-name "Planning Only Example"
 
 uv run cutmaster render \
-  --plan artifacts/cutmaster/planners/render_plan.json \
-  --audio-mode dialogue \
-  --output-dir artifacts/cutmaster/renderer
+  --edit-id edit_00000000-0000-4000-8000-000000000000 \
+  --audio-mode dialogue
 ```
 
-`plan` also accepts explicit analysis-result paths: `--analysis-result` for
-video and `--music-analysis-result` for music. For compatibility, a raw track
-may still be passed with `--audio`; Analyser then builds or reuses its Music
-Memory before the Planners stage starts.
+`plan` accepts only exact names of analysed Materials in the Material Library;
+`render` accepts a Web-visible Frozen Edit ID. Component commands therefore do
+not create directories detached from product history.
 
 ### Python API
 
@@ -373,30 +374,34 @@ Memory before the Planners stage starts.
 from pathlib import Path
 
 from cutmaster import CutMasterApplication
-from cutmaster.contracts import ExecuteWorkflowCommand
+from cutmaster.adapters.local_workflow import LocalManagedWorkflow
+from cutmaster.contracts import ExecuteManagedWorkflowCommand
 
 app = CutMasterApplication.open(Path("config.toml"))
-request = ExecuteWorkflowCommand(
+request = ExecuteManagedWorkflowCommand(
     prompt="Create an energetic cut centered on the protagonist's growth",
     video_path=Path("/path/to/source.mp4"),
     audio_path=Path("/path/to/bgm.mp3"),
-    output_dir=Path("/path/to/output"),
+    project_name="Protagonist Growth Montage",
     target_output_length_sec=60,
     target_shot_length_sec=4,
-    overwrite=True,
 )
 
-result = app.direct.execute_workflow(request)
-print(result.output_video)
+result = LocalManagedWorkflow(app).execute_workflow(request)
+print(result.project_id, result.render_variant_id)
 ```
 
-External integrations use `CutMasterApplication.open(...).direct` for complete
-or component-level execution. The Application Layer resolves Materials and
-issues stage handles; integrations do not reach into agents or tools.
+CLI and the Benchmark adapter use `LocalManagedWorkflow` for synchronous
+managed execution. It drives the same durable Jobs and Application use cases as
+Web; integrations do not reach into agents or tools.
 
 ## Configuration
 
-The default configuration lives in [`config.toml`](config.toml) and follows the ownership boundaries of the architecture:
+The default configuration lives in [`config.toml`](config.toml). It is the only
+non-secret configuration file shared by CLI, Benchmark, WebUI, and managed
+workers; Settings updates it atomically and no additional local TOML is created
+or merged. API keys remain exclusively in `.env` or the process environment.
+The file follows the ownership boundaries of the architecture:
 
 | Section | Owner | Main controls |
 |---|---|---|
@@ -405,31 +410,28 @@ The default configuration lives in [`config.toml`](config.toml) and follows the 
 | `[planners.*]` | Planners | Arrangement, anchor, retrieval, Beam, review, and source-window controls |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
-The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `1800` seconds. Every field and default is documented inline in `config.toml`.
+The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `600` seconds. Every field and default is documented inline in `config.toml`.
 
 All model prices use CNY per million tokens. Every call snapshots the active prices in its usage artifact, so later configuration changes never reprice historical calls. Uncached input, cache-hit input, and output are charged separately; reasoning tokens are already part of output tokens and are not charged twice.
 
 ## Artifacts
 
-Each run keeps auditable intermediate artifacts under `output_dir`:
+CLI, Benchmark, and Web share the canonical managed layout below; complete
+executions no longer create an authoritative caller-selected `output_dir`:
 
-| Artifact | Meaning |
+| Managed path | Meaning |
 |---|---|
-| `result.json` | Final result, timings, and artifact paths |
-| `model_usage.json` | Workflow token and cost totals for `current_run` and `cumulative`, grouped by task and model |
-| `analyser/analysis_result.json` | Formal index of the selected Video Material Memory |
-| `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json` | Source and reconstructed dialogue data |
-| `analyser/music/music_analysis_result.json` | Formal index of the selected Music Memory |
-| `analyser/music/music_memory.json` | Complete-track beats, accents, energy, and section analysis |
-| `planners/planners_result.json` | Planners stage result and ASTER coordination summary |
-| `planners/render_plan.json` | Immutable frame-exact handoff to Renderer |
-| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | Target-duration Music Profile and other ASTER artifacts |
-| `planners/diagnostics/` | Beam diagnostics, ASTER repair history, and model-call traces |
-| `planners/diagnostics/model_usage.json` | Per-call price snapshots and current/cumulative Planners usage |
-| `renderer/montage.mp4` | Reusable silent visual montage |
-| `renderer/output.mp4` | Final rendered video |
-| `renderer/render_request.json`, `render_result.json` | Render request and result |
-| `cutmaster.log` | Structured runtime log |
+| `media/<type>/mat_<uuid>/analysis/` | Reusable Video or Music Material Memory |
+| `projects/project_<uuid>/runs/run_<uuid>/plan.json` | Frame-exact RenderPlan owned by the Frozen Edit |
+| `projects/project_<uuid>/runs/run_<uuid>/review_bundle.json` | Candidate Bundle integrity manifest |
+| `projects/project_<uuid>/runs/run_<uuid>/model_usage.json` | Token and cost totals for the ASTER Run |
+| `projects/project_<uuid>/runs/run_<uuid>/result.json` | Managed CLI/Benchmark receipt and relative artifact manifest |
+| `projects/project_<uuid>/renders/render_<uuid>/master.mp4` | Canonical Render Variant master shared by Web, CLI, and Benchmark |
+
+After completion, Mashup-Benchmark validates the Data-Root-relative receipt and
+copies evaluation artifacts into
+`runs/<run_id>/task_outputs/<task_id>/`. Those are submission copies; the
+CutMaster Project and Render Variant remain authoritative.
 
 The Application Layer always derives `.cutmaster/media/` from the active Application Data Root; the Material Library no longer has an independent storage root:
 
@@ -461,10 +463,10 @@ src/cutmaster/
 │   ├── contracts/                      # handle-only v2
 │   ├── prompting/
 │   └── shared/
-├── adapters/cli/                    # CLI inbound adapter
+├── adapters/                       # CLI, Web, and shared local managed adapter
 ├── infrastructure/                  # SQLite, Material Catalog, models, media, logging
 ├── configuration/                   # Effective Configuration
-└── contracts/                       # stable Direct API
+└── contracts/                       # stable managed and Direct APIs
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for dependency rules and public APIs, and [`docs/adr/`](docs/adr/) for architecture decisions.

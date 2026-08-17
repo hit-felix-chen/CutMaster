@@ -16,11 +16,6 @@ from cutmaster.application.jobs import (
     JobSubmissionView,
     StopAttemptCommand,
 )
-from cutmaster.application.projects import (
-    CreateProjectCommand,
-    DeleteProjectCommand,
-    SetProjectMaterialsCommand,
-)
 from cutmaster.domain.ids import MaterialId
 from cutmaster.domain.materials import MaterialCondition
 from cutmaster.infrastructure.storage.local.material_catalog import (
@@ -80,7 +75,7 @@ def _publish_video_memory(
         (binding.memory_root / "video_description.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "2.0",
+                    "schema_version": "3.0",
                     "source": {
                         "title": material.name,
                         "duration_sec": 12.0,
@@ -100,7 +95,7 @@ def _publish_video_memory(
         (binding.memory_root / "dialogues.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "1.0",
+                    "schema_version": "2.0",
                     "statistics": {"sentence_count": 0},
                     "sentences": [],
                 }
@@ -111,12 +106,18 @@ def _publish_video_memory(
         staged.write_text(
             json.dumps(
                 {
-                    "schema_version": "2.0",
+                    "schema_version": "3.0",
                     "status": "success",
                     "material_id": str(binding.material.material_id),
                     "material_type": "video",
                     "material_name": binding.material.name,
                     "material_fingerprint": str(binding.material.fingerprint),
+                    "memory_schema_version": "3.0",
+                    "elapsed_sec": 0.0,
+                    "material_reused": False,
+                    "analysis_reused": False,
+                    "model_usage_summary": {},
+                    "model_usage_cumulative_summary": {},
                 }
             ),
             encoding="utf-8",
@@ -150,12 +151,16 @@ def _publish_music_memory(
         staged.write_text(
             json.dumps(
                 {
-                    "schema_version": "2.0",
+                    "schema_version": "3.0",
                     "status": "success",
                     "material_id": str(binding.material.material_id),
                     "material_type": "music",
                     "material_name": binding.material.name,
                     "material_fingerprint": str(binding.material.fingerprint),
+                    "memory_schema_version": "2.0",
+                    "elapsed_sec": 0.0,
+                    "material_reused": False,
+                    "analysis_reused": False,
                 }
             ),
             encoding="utf-8",
@@ -509,24 +514,6 @@ def test_interrupted_material_resumes_and_delete_is_guarded_and_idempotent(
             headers={"Idempotency-Key": command_id()},
         )
 
-        project = application.projects.create(
-            CreateProjectCommand(command_id(), "Deletion Blocker")
-        )
-        application.projects.set_materials(
-            SetProjectMaterialsCommand(
-                command_id(),
-                project.project_id,
-                (MaterialId.parse(material_id),),
-                (),
-            )
-        )
-        blocked_reference = client.delete(
-            f"/api/materials/{material_id}",
-            headers={"Idempotency-Key": command_id()},
-        )
-        application.projects.delete(
-            DeleteProjectCommand(command_id(), project.project_id)
-        )
         delete_key = command_id()
         deleted = client.delete(
             f"/api/materials/{material_id}",
@@ -551,18 +538,6 @@ def test_interrupted_material_resumes_and_delete_is_guarded_and_idempotent(
     assert interrupted.json()["latest_execution"]["attempt"]["status"] == "interrupted"
     assert resumed.status_code == 202
     assert resumed.json()["attempt"]["sequence"] == 2
-    assert blocked_reference.status_code == 409
-    blocker = blocked_reference.json()["blockers"][0]
-    assert blocker == {
-        "kind": "project_current",
-        "project_name": "Deletion Blocker",
-        "navigation": {
-            "kind": "project",
-            "project_id": str(project.project_id),
-        },
-    }
-    assert f"project:{project.project_id}:current:video" not in blocked_reference.text
-    assert '"reference"' not in blocked_reference.text
     assert deleted.status_code == replayed.status_code == 204
     assert missing.status_code == 404
     assert (

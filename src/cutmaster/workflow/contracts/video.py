@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from typing import Any
 
@@ -221,7 +221,6 @@ class ShotDescription:
 class SegmentDescription:
     segment_id: str
     time_range: TimeRange
-    clip_path: str
     has_dialogue: bool
     speech_mode: SpeechMode
     content_type: SegmentContentType | None
@@ -313,7 +312,6 @@ class SegmentDescription:
 
 @dataclass(frozen=True)
 class SourceVideoMetadata:
-    path: str
     title: str
     duration_sec: float
     fps: float
@@ -351,3 +349,99 @@ class VideoDescription:
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return asdict(self)
+
+
+VIDEO_MEMORY_SCHEMA_VERSION = "3.0"
+
+
+def _field_names(value_type: type[Any]) -> frozenset[str]:
+    return frozenset(item.name for item in fields(value_type))
+
+
+def _require_fields(
+    value: Any,
+    expected: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError(f"{label} fields do not match Video Memory schema 3.0")
+    return value
+
+
+def validate_video_description_document(value: Any) -> None:
+    """Reject every non-current persisted Video Memory shape."""
+
+    root = _require_fields(value, _field_names(VideoDescription), "Video Memory")
+    if root.get("schema_version") != VIDEO_MEMORY_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported Video Memory schema: {root.get('schema_version')!r}"
+        )
+    _require_fields(root.get("source"), _field_names(SourceVideoMetadata), "source")
+    _require_fields(
+        root.get("scene_detection"),
+        _field_names(SceneDetectionConfig),
+        "scene_detection",
+    )
+    segments = root.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("Video Memory segments must be a non-empty list")
+    for segment in segments:
+        item = _require_fields(
+            segment,
+            _field_names(SegmentDescription),
+            "segment",
+        )
+        _require_fields(item.get("time_range"), _field_names(TimeRange), "time_range")
+        shots = item.get("shots")
+        if not isinstance(shots, list) or not shots:
+            raise ValueError("Video Memory Segment shots must be a non-empty list")
+        for shot in shots:
+            shot_item = _require_fields(
+                shot,
+                _field_names(ShotDescription),
+                "shot",
+            )
+            for range_name in ("time_range", "segment_time_range"):
+                _require_fields(
+                    shot_item.get(range_name),
+                    _field_names(TimeRange),
+                    f"shot.{range_name}",
+                )
+            dialogue = shot_item.get("dialogue")
+            characters = shot_item.get("characters")
+            if not isinstance(dialogue, list) or not isinstance(characters, list):
+                raise ValueError("Video Memory Shot lists are invalid")
+            for occurrence in dialogue:
+                occurrence_item = _require_fields(
+                    occurrence,
+                    _field_names(DialogueOccurrence),
+                    "shot.dialogue",
+                )
+                _require_fields(
+                    occurrence_item.get("time_range"),
+                    _field_names(TimeRange),
+                    "shot.dialogue.time_range",
+                )
+            for character in characters:
+                _require_fields(
+                    character,
+                    _field_names(CharacterAppearance),
+                    "shot.character",
+                )
+            scene = shot_item.get("scene")
+            if scene is not None:
+                _require_fields(scene, _field_names(SceneDescription), "shot.scene")
+        dialogue_items = item.get("dialogue_items")
+        if not isinstance(dialogue_items, list):
+            raise ValueError("Video Memory Segment dialogue_items must be a list")
+        for occurrence in dialogue_items:
+            occurrence_item = _require_fields(
+                occurrence,
+                _field_names(DialogueOccurrence),
+                "segment.dialogue_items",
+            )
+            _require_fields(
+                occurrence_item.get("time_range"),
+                _field_names(TimeRange),
+                "segment.dialogue_items.time_range",
+            )

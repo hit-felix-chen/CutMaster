@@ -25,6 +25,12 @@ class MaterialPreviewUnavailableError(ApplicationError):
     code = "material_preview_unavailable"
 
 
+class ProjectCoverUnavailableError(ApplicationError):
+    """An Edit Project has no safe Material or Render cover projection."""
+
+    code = "project_cover_unavailable"
+
+
 class ReviewArtifactUnavailableError(ApplicationError):
     """A Frozen Edit references an absent or invalid managed artifact."""
 
@@ -99,6 +105,7 @@ __all__ = [
     "MaterialMemoryUnavailableError",
     "MaterialPreviewUnavailableError",
     "ProviderConnectionFailedError",
+    "ProjectCoverUnavailableError",
     "RenderDispatchFailedError",
     "RenderFpsMismatchError",
     "RenderIntegrityMismatchError",

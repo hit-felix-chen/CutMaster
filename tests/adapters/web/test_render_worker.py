@@ -55,19 +55,44 @@ def _ready_edit(application: CutMasterApplication, tmp_path: Path):
             identities[material_type] = binding.material
             if material_type == "music":
                 (binding.memory_root / "music_memory.json").write_text(
-                    json.dumps({"source_duration_sec": 60.0}),
+                    json.dumps(
+                        {
+                            "schema_version": "2.0",
+                            "source_duration_sec": 60.0,
+                            "tempo_bpm": 120.0,
+                            "beats_sec": [],
+                            "accents_sec": [],
+                            "energy_step_sec": 0.5,
+                            "energy_curve": [],
+                            "sections": [],
+                        }
+                    ),
                     encoding="utf-8",
                 )
             staged = tmp_path / f"{material_type}-result.json"
             staged.write_text(
                 json.dumps(
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "status": "success",
                         "material_id": str(binding.material.material_id),
                         "material_type": material_type,
                         "material_name": binding.material.name,
                         "material_fingerprint": str(binding.material.fingerprint),
+                        "memory_schema_version": (
+                            "3.0" if material_type == "video" else "2.0"
+                        ),
+                        "elapsed_sec": 0.0,
+                        "material_reused": False,
+                        "analysis_reused": False,
+                        **(
+                            {
+                                "model_usage_summary": {},
+                                "model_usage_cumulative_summary": {},
+                            }
+                            if material_type == "video"
+                            else {}
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -152,6 +177,14 @@ class FakeRenderer:
         )
 
 
+FAKE_COVER = b"\xff\xd8\xffmanaged-render-cover\xff\xd9"
+
+
+def fake_cover_generator(_source: Path, destination: Path) -> Path:
+    destination.write_bytes(FAKE_COVER)
+    return destination
+
+
 def test_render_worker_executes_real_managed_boundary_and_publishes_atomically(
     application: CutMasterApplication,
     tmp_path: Path,
@@ -165,6 +198,7 @@ def test_render_worker_executes_real_managed_boundary_and_publishes_atomically(
         application,
         submission.job.job_id,
         renderer_factory=FakeRenderer,
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     )
 
@@ -181,6 +215,7 @@ def test_render_worker_executes_real_managed_boundary_and_publishes_atomically(
         / "master.mp4"
     )
     assert master.read_bytes() == b"managed-render-master"
+    assert master.with_name("cover.jpg").read_bytes() == FAKE_COVER
     assert not list(master.parent.glob(".attempt-*"))
 
 
@@ -205,6 +240,7 @@ def test_render_stop_waits_for_media_operation_then_interrupts_before_publish(
             config,
             on_render=request_stop,
         ),
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     )
 
@@ -236,6 +272,7 @@ def test_render_delete_unlinks_owned_directory_symlink_without_following_it(
         application,
         submission.job.job_id,
         renderer_factory=FakeRenderer,
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     ) is AttemptStatus.COMPLETE
 
@@ -273,6 +310,7 @@ def test_render_media_lease_pins_verified_descriptor_across_cascade_unlink(
         application,
         submission.job.job_id,
         renderer_factory=FakeRenderer,
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     ) is AttemptStatus.COMPLETE
 
@@ -300,6 +338,7 @@ def test_render_publication_failure_restores_previous_owned_master(
         application,
         initial.job.job_id,
         renderer_factory=FakeRenderer,
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     ) is AttemptStatus.COMPLETE
     master = (
@@ -312,6 +351,8 @@ def test_render_publication_failure_restores_previous_owned_master(
     )
     previous = b"previous-owned-master"
     master.write_bytes(previous)
+    previous_cover = b"\xff\xd8\xffprevious-owned-cover\xff\xd9"
+    master.with_name("cover.jpg").write_bytes(previous_cover)
     assert application.renders.verify(
         VerifyRenderVariantCommand(
             command_id(),
@@ -333,9 +374,11 @@ def test_render_publication_failure_restores_previous_owned_master(
         application,
         replacement.job.job_id,
         renderer_factory=FakeRenderer,
+        cover_generator=fake_cover_generator,
         heartbeat_interval_sec=0.01,
     ) is AttemptStatus.FAILED
     assert master.read_bytes() == previous
+    assert master.with_name("cover.jpg").read_bytes() == previous_cover
 
 
 def test_run_completion_creates_and_dispatches_one_default_dialogue_preview(
@@ -439,6 +482,7 @@ def test_render_variant_http_contract_lists_verifies_downloads_and_deletes(
             application,
             submission.job.job_id,
             renderer_factory=FakeRenderer,
+            cover_generator=fake_cover_generator,
             heartbeat_interval_sec=0.01,
         ) is AttemptStatus.COMPLETE
 
@@ -551,6 +595,7 @@ def test_render_recovery_http_contract_and_integrity_failure_are_durable(
             application,
             resume_submission.job.job_id,
             renderer_factory=FakeRenderer,
+            cover_generator=fake_cover_generator,
             heartbeat_interval_sec=0.01,
         ) is AttemptStatus.COMPLETE
 
@@ -584,6 +629,7 @@ def test_render_recovery_http_contract_and_integrity_failure_are_durable(
             application,
             again_submission.job.job_id,
             renderer_factory=FakeRenderer,
+            cover_generator=fake_cover_generator,
             heartbeat_interval_sec=0.01,
         ) is AttemptStatus.COMPLETE
         assert application.renders.get(variant.render_variant_id).status is RenderVariantStatus.READY

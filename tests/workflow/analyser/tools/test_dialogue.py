@@ -68,6 +68,8 @@ def test_llm_merge_groups_create_sentences_with_anchors(tmp_path) -> None:
     )
     document = json.loads(dialogue_json.read_text(encoding="utf-8"))
 
+    assert document["schema_version"] == "2.0"
+    assert "source_srt" not in document
     first = document["sentences"][0]
     assert first["start"] == "00:02:29,270"
     assert first["end"] == "00:02:33,350"

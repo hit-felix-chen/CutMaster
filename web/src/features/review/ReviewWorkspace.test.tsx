@@ -506,7 +506,7 @@ describe('Review workspace', () => {
         name: 'Variant 1 · Dialogue Preview · Queued',
       }),
     ).toBeVisible()
-    expect(screen.getByText('Variant 1')).toBeVisible()
+    expect(await screen.findByText('Variant 1')).toBeVisible()
     expect(screen.queryByText('variant_queued_dialogue')).not.toBeInTheDocument()
     expect((await screen.findAllByText('Queued'))[0]).toBeVisible()
     expect(screen.getByRole('button', { name: 'Stop' })).toBeVisible()

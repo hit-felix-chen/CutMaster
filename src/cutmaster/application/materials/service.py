@@ -144,37 +144,45 @@ class MaterialsService:
         if material is None:
             return None
         references = self.references(material_id)
-        with self.read_lease(material_id) as binding:
-            primary_memory, secondary_memory = _projection_documents(
-                binding.memory_root,
-                material.material_type,
-            )
-            duration_sec = _material_duration(
-                binding.memory_root,
-                binding.source_path,
-                material.material_type,
-                primary_memory,
-            )
-            source = _material_source_metadata(
-                binding.memory_root,
-                binding.source_path,
-                material,
-                primary_memory,
-            )
-            memory_summary = _material_memory_summary(
-                binding.memory_root,
-                material.material_type,
-                primary_memory,
-                secondary_memory,
-            )
-            has_preview = bool(
-                material.condition is MaterialCondition.READY
-                and preview_available(
+        try:
+            with self.read_lease(material_id) as binding:
+                if material.condition is MaterialCondition.READY:
+                    primary_memory, secondary_memory = _projection_documents(
+                        binding.memory_root,
+                        material.material_type,
+                    )
+                else:
+                    primary_memory, secondary_memory = {}, {}
+                duration_sec = _material_duration(
                     binding.memory_root,
+                    binding.source_path,
                     material.material_type,
                     primary_memory,
                 )
-            )
+                source = _material_source_metadata(
+                    binding.memory_root,
+                    binding.source_path,
+                    material,
+                    primary_memory,
+                )
+                memory_summary = _material_memory_summary(
+                    binding.memory_root,
+                    material.material_type,
+                    primary_memory,
+                    secondary_memory,
+                )
+                has_preview = bool(
+                    material.condition is MaterialCondition.READY
+                    and preview_available(
+                        binding.memory_root,
+                        material.material_type,
+                        primary_memory,
+                    )
+                )
+        except FileNotFoundError:
+            # Inspection never blocks deletion. If delete wins before the
+            # projection has pinned any bytes, the resource simply disappears.
+            return None
         return MaterialDetailView(
             material=material,
             references=references,
@@ -349,13 +357,22 @@ class MaterialsService:
         self,
         material_id: MaterialId,
     ) -> AbstractContextManager[MaterialBinding]:
-        """Hold a deletion-safe Material binding for browsing and playback.
+        """Inspect Material paths without acquiring the workflow/delete lock.
 
         Unlike the verified Workflow lease, this does not recompute the source
         SHA-256.  It cannot be used to publish analysis results or sidecars.
         """
 
         return self._catalog().read_lease(material_id)
+
+    @root_shared_context
+    def consume_lease(
+        self,
+        material_id: MaterialId,
+    ) -> AbstractContextManager[MaterialBinding]:
+        """Share a verified Material binding with concurrent workflow consumers."""
+
+        return self._catalog().consume_lease(material_id)
 
     def _catalog(self) -> MaterialCatalog:
         with self._catalog_lock:
@@ -413,13 +430,26 @@ def _public_video_source(value: Any) -> dict[str, Any]:
 def _public_segments(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
+    allowed = (
+        "segment_id",
+        "time_range",
+        "has_dialogue",
+        "speech_mode",
+        "content_type",
+        "timeline_role",
+        "shots",
+        "dialogue_items",
+        "segment_summary",
+        "narrative_function",
+        "emotional_tone",
+        "emotional_intensity",
+        "appearing_characters",
+    )
     result: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, Mapping):
             continue
-        result.append(
-            {str(key): child for key, child in item.items() if key != "clip_path"}
-        )
+        result.append({key: item[key] for key in allowed if key in item})
     return result
 
 

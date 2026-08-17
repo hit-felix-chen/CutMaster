@@ -16,7 +16,7 @@ class DataRootMigrationBody(BaseModel):
 class SaveSettingsBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    overlay: dict[str, Any]
+    values: dict[str, Any]
 
 
 class ModelProviderBody(BaseModel):

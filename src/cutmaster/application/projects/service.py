@@ -25,9 +25,12 @@ from cutmaster.application.projects.commands import (
 from cutmaster.application.projects.views import DeletedProjectView, ProjectView
 from cutmaster.configuration.effective import EffectiveConfiguration
 from cutmaster.domain.ids import JobId, MaterialId, ProjectId
-from cutmaster.domain.materials import MaterialType
+from cutmaster.domain.materials import MaterialCondition, MaterialType
 from cutmaster.domain.projects import CreativeBrief
-from cutmaster.infrastructure.persistence.sqlite import SQLiteApplicationStore
+from cutmaster.infrastructure.persistence.sqlite import (
+    ManagedStateConflict,
+    SQLiteApplicationStore,
+)
 
 
 class ProjectsService:
@@ -144,19 +147,25 @@ class ProjectsService:
                     f"Material {material_id} cannot be both video and music"
                 )
 
-        # Material deletion acquires the same per-Material catalog lock before
-        # consulting SQLite references. Holding every lease through the SQLite
-        # commit makes adding a reference and deleting its Material one ordered,
-        # race-free operation. Sorting gives all callers one lock order.
+        # A short shared consumption lease validates Ready immutable bytes and
+        # orders this reference commit against non-blocking deletion. It never
+        # serializes Project saves with Planning or Rendering consumers.
         with ExitStack() as leases:
             for material_id in sorted(expected_types, key=str):
-                binding = leases.enter_context(self._materials.lease(material_id))
+                binding = leases.enter_context(
+                    self._materials.consume_lease(material_id)
+                )
                 expected_type = expected_types[material_id]
                 if binding.material.material_type is not expected_type:
                     raise ValueError(
                         f"Material {material_id} is "
                         f"{binding.material.material_type.value}, expected "
                         f"{expected_type.value}"
+                    )
+                if binding.material.condition is not MaterialCondition.READY:
+                    raise ManagedStateConflict(
+                        "project_material_not_ready",
+                        f"Material {material_id} must be Ready before selection",
                     )
             result = self._store.set_project_materials(
                 command.command_id,
@@ -199,13 +208,20 @@ class ProjectsService:
         )
         with ExitStack() as leases:
             for material_id in sorted(expected_types, key=str):
-                binding = leases.enter_context(self._materials.lease(material_id))
+                binding = leases.enter_context(
+                    self._materials.consume_lease(material_id)
+                )
                 expected_type = expected_types[material_id]
                 if binding.material.material_type is not expected_type:
                     raise ValueError(
                         f"Material {material_id} is "
                         f"{binding.material.material_type.value}, expected "
                         f"{expected_type.value}"
+                    )
+                if binding.material.condition is not MaterialCondition.READY:
+                    raise ManagedStateConflict(
+                        "project_material_not_ready",
+                        f"Material {material_id} must be Ready before selection",
                     )
             result = self._store.save_project_setup(
                 command.command_id,

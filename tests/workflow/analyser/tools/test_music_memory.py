@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from cutmaster.workflow.analyser.tools.music_analysis import (
+    MUSIC_MEMORY_FIELDS,
+    MUSIC_MEMORY_SCHEMA_VERSION,
     _duration_range,
     _normalize,
     _section_boundaries,
@@ -86,17 +88,9 @@ def test_analyze_music_memory_uses_the_complete_source_track(monkeypatch) -> Non
 
     assert inspected_samples
     assert all(value is samples for value in inspected_samples)
-    assert set(memory) == {
-        "schema_version",
-        "audio_path",
-        "source_duration_sec",
-        "tempo_bpm",
-        "beats_sec",
-        "accents_sec",
-        "energy_step_sec",
-        "energy_curve",
-        "sections",
-    }
+    assert set(memory) == MUSIC_MEMORY_FIELDS
+    assert memory["schema_version"] == MUSIC_MEMORY_SCHEMA_VERSION
+    assert "audio_path" not in memory
     assert memory["source_duration_sec"] == 8.0
     assert memory["beats_sec"] == [1.0, 7.0]
     assert memory["accents_sec"] == [7.0]

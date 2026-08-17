@@ -290,6 +290,17 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=4,
+        statements=(
+            """
+            ALTER TABLE runs
+            ADD COLUMN planning_options_json TEXT NOT NULL
+                DEFAULT '{"target_shot_length_sec":4.0,"prompt_type":"event","video_title":"","max_clip_duration_sec":null}'
+                CHECK (json_valid(planning_options_json))
+            """,
+        ),
+    ),
 )
 
 

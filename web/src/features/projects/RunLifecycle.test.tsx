@@ -57,6 +57,10 @@ function execution(status: string) {
       created_at: timestamp,
       updated_at: timestamp,
     },
+    log: {
+      path: '/Users/example/.cutmaster/logs/jobs/job_1.log',
+      exists: true,
+    },
   }
 }
 
@@ -142,6 +146,10 @@ describe('Run lifecycle actions', () => {
     renderRunDetail()
 
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeVisible()
+    expect(
+      screen.getByText('/Users/example/.cutmaster/logs/jobs/job_1.log'),
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: 'View live logs' })).toBeVisible()
     expect(
       screen.getByText(
         'ASTER planning did not complete. Check the project inputs and provider settings, then retry.',

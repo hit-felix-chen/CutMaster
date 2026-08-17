@@ -127,6 +127,14 @@ def _redact_text(value: str) -> str:
     return redacted
 
 
+def redact_log_text(value: str) -> str:
+    """Redact one already-formatted operational log line for local transport."""
+
+    if not isinstance(value, str):
+        raise TypeError("log text must be a string")
+    return _redact_text(value)
+
+
 def error_summary(error: BaseException) -> str:
     """Return a compact, redacted error description suitable for operational logs."""
     text = " ".join(str(error).split())

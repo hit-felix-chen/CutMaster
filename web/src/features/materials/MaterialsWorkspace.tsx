@@ -40,6 +40,7 @@ import { MaterialImportDialog } from '@/features/materials/MaterialImportDialog'
 import { MemoryTabView } from '@/features/materials/memory/MemoryViews'
 import {
   MEMORY_PAGE_SIZE,
+  MUSIC_MEMORY_PAGE_SIZE,
   memoryPagingSummary,
   mergeMemoryPages,
   nextMemoryOffset,
@@ -55,6 +56,7 @@ import {
   type MaterialType,
 } from '@/features/shared/api'
 import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
+import { ExecutionLogAccess } from '@/features/shared/LiveLogDialog'
 import { formatBytes, formatFrameRate, formatNumber } from '@/i18n/formatters'
 
 const videoTabs = ['timeline', 'story', 'dialogue', 'technical'] as const
@@ -761,6 +763,7 @@ function MaterialDrawerContent({
           </p>
         ) : null}
       </section>
+      <ExecutionLogAccess execution={execution} />
     </div>
   )
 }
@@ -780,17 +783,21 @@ function MemoryExplorer({
   const modalRef = useRef<HTMLElement>(null)
   const tabs = type === 'video' ? videoTabs : musicTabs
   const activeTab = tabs.includes(tab as never) ? tab : tabs[0]
+  const loadsCompleteMusicMemory = type === 'music' && activeTab === 'structure'
+  const memoryPageSize = loadsCompleteMusicMemory
+    ? MUSIC_MEMORY_PAGE_SIZE
+    : MEMORY_PAGE_SIZE
   const detail = useQuery({
     queryKey: ['material', materialId],
     queryFn: () => api.materials.detail(materialId),
     staleTime: Number.POSITIVE_INFINITY,
   })
   const memory = useInfiniteQuery({
-    queryKey: ['material-memory', materialId, activeTab, MEMORY_PAGE_SIZE],
+    queryKey: ['material-memory', materialId, activeTab, memoryPageSize],
     initialPageParam: 0,
     queryFn: ({ pageParam }) =>
       api.materials.memory(materialId, activeTab, {
-        limit: MEMORY_PAGE_SIZE,
+        limit: memoryPageSize,
         offset: pageParam,
       }),
     getNextPageParam: (lastPage) => nextMemoryOffset(type, activeTab, lastPage),
@@ -800,6 +807,13 @@ function MemoryExplorer({
     () => mergeMemoryPages(type, activeTab, memory.data?.pages ?? []),
     [activeTab, memory.data?.pages, type],
   )
+  const {
+    fetchNextPage: fetchNextMemoryPage,
+    hasNextPage: hasNextMemoryPage,
+    isFetchingNextPage: isFetchingNextMemoryPage,
+    isFetchNextPageError: isFetchNextMemoryPageError,
+  } = memory
+  const loadedMemoryPageCount = memory.data?.pages.length ?? 0
   const paging = mergedMemory
     ? memoryPagingSummary(type, activeTab, mergedMemory)
     : null
@@ -847,6 +861,25 @@ function MemoryExplorer({
   )
 
   useEffect(() => {
+    if (
+      !loadsCompleteMusicMemory ||
+      !hasNextMemoryPage ||
+      isFetchingNextMemoryPage ||
+      isFetchNextMemoryPageError
+    ) {
+      return
+    }
+    void fetchNextMemoryPage()
+  }, [
+    fetchNextMemoryPage,
+    hasNextMemoryPage,
+    isFetchingNextMemoryPage,
+    isFetchNextMemoryPageError,
+    loadedMemoryPageCount,
+    loadsCompleteMusicMemory,
+  ])
+
+  useEffect(() => {
     if (tab === activeTab) return
     navigate(`${appRoutes.materialMemory(type, materialId, activeTab)}${baseSearch}`, {
       replace: true,
@@ -868,6 +901,13 @@ function MemoryExplorer({
     void memory.fetchNextPage()
   }, [activeTab, memory, mergedMemory, selectedSegmentId])
 
+  const isLoadingCompleteMusicMemory =
+    loadsCompleteMusicMemory &&
+    !memory.isFetchNextPageError &&
+    Boolean(memory.data) &&
+    (memory.hasNextPage || memory.isFetchingNextPage)
+  const hasMemoryError = memory.isError || memory.isFetchNextPageError
+
   useEffect(() => {
     const previouslyFocused = document.activeElement
     modalRef.current?.focus()
@@ -876,7 +916,7 @@ function MemoryExplorer({
       if (event.key !== 'Tab' || !modalRef.current) return
       const focusable = Array.from(
         modalRef.current.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          'a[href]:not([tabindex="-1"]), button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
         ),
       )
       if (!focusable.length) {
@@ -913,7 +953,7 @@ function MemoryExplorer({
         tabIndex={-1}
       >
         <header className="memory-modal__header">
-          <div>
+          <div className="memory-modal__heading">
             <span className="eyebrow">MASTER · M</span>
             <h2
               id="memory-modal-title"
@@ -931,6 +971,50 @@ function MemoryExplorer({
               ) : null}
             </h2>
           </div>
+          <div
+            className="memory-tabs"
+            role="tablist"
+            aria-label={t('materials.memoryExplorer')}
+            aria-orientation="horizontal"
+          >
+            {tabs.map((item, index) => (
+              <Link
+                key={item}
+                id={`memory-tab-${item}`}
+                className={
+                  item === activeTab ? 'memory-tab memory-tab--active' : 'memory-tab'
+                }
+                role="tab"
+                aria-selected={item === activeTab}
+                aria-controls="memory-tab-panel"
+                tabIndex={item === activeTab ? 0 : -1}
+                to={`${appRoutes.materialMemory(type, materialId, item)}${baseSearch}`}
+                state={location.state}
+                replace
+                onKeyDown={(event) => {
+                  let nextIndex: number | null = null
+                  if (event.key === 'ArrowRight') {
+                    nextIndex = (index + 1) % tabs.length
+                  } else if (event.key === 'ArrowLeft') {
+                    nextIndex = (index - 1 + tabs.length) % tabs.length
+                  } else if (event.key === 'Home') {
+                    nextIndex = 0
+                  } else if (event.key === 'End') {
+                    nextIndex = tabs.length - 1
+                  }
+                  if (nextIndex === null) return
+                  event.preventDefault()
+                  const nextTab = event.currentTarget.parentElement
+                    ?.querySelectorAll<HTMLElement>('[role="tab"]')
+                    .item(nextIndex)
+                  nextTab?.focus()
+                  nextTab?.click()
+                }}
+              >
+                {t(`materials.${item}`)}
+              </Link>
+            ))}
+          </div>
           <button
             className="icon-button"
             type="button"
@@ -940,24 +1024,15 @@ function MemoryExplorer({
             <X size={19} aria-hidden="true" />
           </button>
         </header>
-        <nav className="memory-tabs" aria-label={t('materials.memoryExplorer')}>
-          {tabs.map((item) => (
-            <Link
-              key={item}
-              className={
-                item === activeTab ? 'memory-tab memory-tab--active' : 'memory-tab'
-              }
-              to={`${appRoutes.materialMemory(type, materialId, item)}${baseSearch}`}
-              state={location.state}
-              replace
-            >
-              {t(`materials.${item}`)}
-            </Link>
-          ))}
-        </nav>
-        <div className={`memory-modal__body memory-modal__body--${activeTab}`}>
-          {memory.isPending ? <LoadingState /> : null}
-          {memory.isError ? (
+        <div
+          id="memory-tab-panel"
+          className={`memory-modal__body memory-modal__body--${activeTab}`}
+          role="tabpanel"
+          aria-labelledby={`memory-tab-${activeTab}`}
+          tabIndex={0}
+        >
+          {memory.isPending || isLoadingCompleteMusicMemory ? <LoadingState /> : null}
+          {hasMemoryError ? (
             memory.error instanceof ApiError &&
             ([404, 501].includes(memory.error.status) ||
               memory.error.problem?.code === 'material_memory_unavailable') ? (
@@ -967,10 +1042,16 @@ function MemoryExplorer({
                 <p>{t('materials.memoryUnavailable')}</p>
               </div>
             ) : (
-              <ErrorState onRetry={() => void memory.refetch()} />
+              <ErrorState
+                onRetry={() =>
+                  void (memory.isFetchNextPageError
+                    ? memory.fetchNextPage()
+                    : memory.refetch())
+                }
+              />
             )
           ) : null}
-          {mergedMemory ? (
+          {mergedMemory && !isLoadingCompleteMusicMemory && !hasMemoryError ? (
             <MemoryTabView
               type={type}
               tab={activeTab}
@@ -982,7 +1063,7 @@ function MemoryExplorer({
               onOpenTimelineSegment={openTimelineSegment}
             />
           ) : null}
-          {paging ? (
+          {paging && !loadsCompleteMusicMemory ? (
             <footer className="memory-pagination" aria-live="polite">
               <span>
                 {t('materials.loadedCount', {

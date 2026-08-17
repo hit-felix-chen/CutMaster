@@ -37,6 +37,7 @@ def _command_id() -> str:
 class ReviewFixture:
     application: CutMasterApplication
     client: TestClient
+    project_id: str
     edit_id: FrozenEditId
     plan: RenderPlan
     plan_path: Path
@@ -60,21 +61,52 @@ def review_fixture(
     music = application.materials.add(music_source, "music", "Review Music")
     for material in (video, music):
         with application.materials.lease(material.material_id) as binding:
-            if binding.material.material_type.value == "music":
+            if binding.material.material_type.value == "video":
+                (binding.memory_root / "cover.jpg").write_bytes(
+                    b"\xff\xd8\xffmaterial-cover\xff\xd9"
+                )
+            else:
                 (binding.memory_root / "music_memory.json").write_text(
-                    json.dumps({"source_duration_sec": 180.0}),
+                    json.dumps(
+                        {
+                            "schema_version": "2.0",
+                            "source_duration_sec": 180.0,
+                            "tempo_bpm": 120.0,
+                            "beats_sec": [],
+                            "accents_sec": [],
+                            "energy_step_sec": 0.5,
+                            "energy_curve": [],
+                            "sections": [],
+                        }
+                    ),
                     encoding="utf-8",
                 )
             staged = tmp_path / f"{material.material_id}-analysis-result.json"
             staged.write_text(
                 json.dumps(
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "status": "success",
                         "material_id": str(binding.material.material_id),
                         "material_type": binding.material.material_type.value,
                         "material_name": binding.material.name,
                         "material_fingerprint": str(binding.material.fingerprint),
+                        "memory_schema_version": (
+                            "3.0"
+                            if binding.material.material_type.value == "video"
+                            else "2.0"
+                        ),
+                        "elapsed_sec": 0.0,
+                        "material_reused": False,
+                        "analysis_reused": False,
+                        **(
+                            {
+                                "model_usage_summary": {},
+                                "model_usage_cumulative_summary": {},
+                            }
+                            if binding.material.material_type.value == "video"
+                            else {}
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -231,6 +263,7 @@ def review_fixture(
     return ReviewFixture(
         application=application,
         client=client,
+        project_id=str(project.project_id),
         edit_id=completed.frozen_edit.edit_id,
         plan=plan,
         plan_path=plan_path,
@@ -578,6 +611,7 @@ def _complete_render_variant(
     review_fixture: ReviewFixture,
     *,
     master_bytes: bytes = b"0123456789abcdef",
+    cover_bytes: bytes = b"\xff\xd8\xffrender-cover\xff\xd9",
     audio_mode: str = "dialogue",
 ):
     submission = _create_render_variant(review_fixture, audio_mode=audio_mode)
@@ -598,6 +632,7 @@ def _complete_render_variant(
     master_path = review_fixture.application.settings.get().data_root / relative_master
     master_path.parent.mkdir(parents=True, exist_ok=True)
     master_path.write_bytes(master_bytes)
+    master_path.with_name("cover.jpg").write_bytes(cover_bytes)
     completed = review_fixture.application.renders.complete(
         CompleteRenderVariantCommand(
             _command_id(),
@@ -609,6 +644,34 @@ def _complete_render_variant(
         )
     )
     return completed.render_variant, master_path
+
+
+def test_project_cover_prefers_latest_ready_render_over_first_ready_video(
+    review_fixture: ReviewFixture,
+) -> None:
+    url = f"/api/projects/{review_fixture.project_id}/cover"
+
+    material_cover = review_fixture.client.get(url)
+    assert material_cover.status_code == 200
+    assert material_cover.content == b"\xff\xd8\xffmaterial-cover\xff\xd9"
+
+    first_cover = b"\xff\xd8\xfffirst-render-cover\xff\xd9"
+    _complete_render_variant(review_fixture, cover_bytes=first_cover)
+    assert review_fixture.client.get(url).content == first_cover
+
+    latest_cover = b"\xff\xd8\xfflatest-render-cover\xff\xd9"
+    _complete_render_variant(
+        review_fixture,
+        audio_mode="bgm_only",
+        cover_bytes=latest_cover,
+    )
+    selected = review_fixture.client.get(url)
+    listing = review_fixture.client.get("/api/projects").json()["items"]
+
+    assert selected.status_code == 200
+    assert selected.content == latest_cover
+    assert listing[0]["preview_url"] == url
+    assert selected.headers["cache-control"] == "private, no-store"
 
 
 def test_ready_render_variant_media_supports_http_byte_ranges(

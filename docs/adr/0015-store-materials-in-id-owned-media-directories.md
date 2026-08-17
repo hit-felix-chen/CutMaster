@@ -26,24 +26,35 @@ do not pass its raw path into the v2 stage request.
 
 Material lifecycle belongs to the Application `materials` service behind a
 `MaterialCatalog` port. The local infrastructure implementation owns this
-manifest, managed copies, fingerprint verification, and cross-process leases.
+manifest, managed copies, fingerprint verification, and cross-process
+shared/exclusive leases.
 The Workflow Analyser consumes an already resolved Material and produces or
 reuses Material Memory; catalog lookup, naming, import, and deletion are not
 Analyser responsibilities.
 
 The Application maps canonical Material state to a runtime-only
-`MaterialRuntimeHandle` while holding its lease. This handle carries the exact
-identity, fingerprint, and resolved source/memory paths into Analyser but is
-never stored in product records. Analyser independently verifies consistency
-and analysis-cache compatibility, then returns result references for the
-Application to commit through the catalog.
+`MaterialRuntimeHandle` while holding the appropriate lease. This handle
+carries the exact identity, fingerprint, and resolved source/memory paths into
+Analyser but is never stored in product records. Analyser independently
+verifies consistency and analysis-cache compatibility, then returns result
+references for the Application to commit through the catalog.
 
 Planners receives analysed video and music runtime handles that bind Material
 Memory to the same exact identities and fingerprints. It does not resolve raw
-paths or public names, and the Application retains both Material leases until
-planning completes.
+paths or public names, and the Application retains shared consumption leases
+for both Materials until planning completes. Multiple Planning and Rendering
+consumers may share one Ready Material concurrently; global worker capacity
+still limits actual process concurrency.
 
 Renderer receives the same identities through runtime bindings resolved from a
-portable RenderPlan. The Application retains both leases through rendering;
-Renderer verifies the plan's expected IDs and fingerprints but never accesses
-the Material Catalog itself.
+portable RenderPlan. The Application retains both shared consumption leases
+through rendering. Renderer verifies the plan's expected IDs and fingerprints
+but never accesses the Material Catalog itself.
+
+Material Analysis and subtitle publication use the exclusive Material lease,
+so at most one mutation path can run for one Material. User-facing inspection
+is lock-free: list/detail, published Memory, covers, waveform, and source media
+do not acquire a Material consumption lease. Source streaming pins an open
+descriptor before returning. Deletion checks references and active Analysis,
+then attempts the exclusive lease without waiting; active consumers therefore
+produce an immediate conflict rather than stalling the request.

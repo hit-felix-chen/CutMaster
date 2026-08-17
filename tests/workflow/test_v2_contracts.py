@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from math import inf, nan
 from pathlib import Path
 
@@ -16,6 +16,7 @@ from cutmaster.workflow.contracts import (
     AnalysedVideoRuntimeHandle,
     AnalysisWorkspace,
     MaterialRuntimeHandle,
+    MusicAnalysisResult,
     MusicAnalysisOptions,
     PlannersBrief,
     PlannersOptions,
@@ -28,6 +29,12 @@ from cutmaster.workflow.contracts import (
     RenderRequest,
     RenderRuntimeBindings,
     VideoAnalysisOptions,
+    VideoAnalysisResult,
+)
+from cutmaster.workflow.contracts.video import (
+    SegmentDescription,
+    SourceVideoMetadata,
+    validate_video_description_document,
 )
 
 
@@ -71,7 +78,7 @@ def _analysed_video() -> AnalysedVideoRuntimeHandle:
     )
     return AnalysedVideoRuntimeHandle(
         material=material,
-        memory_schema_version="1.0",
+        memory_schema_version="3.0",
         video_description_path=memory_root / "video_description.json",
         video_summary_path=memory_root / "video_summary.json",
         dialogues_path=memory_root / "dialogues.json",
@@ -82,7 +89,7 @@ def _analysed_music() -> AnalysedMusicRuntimeHandle:
     material = _music_handle()
     return AnalysedMusicRuntimeHandle(
         material=material,
-        memory_schema_version="1.0",
+        memory_schema_version="2.0",
         music_memory_path=material.memory_root / "music_memory.json",
     )
 
@@ -106,6 +113,36 @@ def test_runtime_handle_construction_is_frozen_and_performs_no_io(
     assert analysed_music.material.material_type is MaterialType.MUSIC
     with pytest.raises(FrozenInstanceError):
         video.material_name = "changed"  # type: ignore[misc]
+
+
+def test_video_memory_dtos_do_not_persist_runtime_paths() -> None:
+    assert "path" not in {field.name for field in fields(SourceVideoMetadata)}
+    assert "clip_path" not in {field.name for field in fields(SegmentDescription)}
+    with pytest.raises(ValueError, match="source fields"):
+        validate_video_description_document(
+            {
+                "schema_version": "3.0",
+                "source": {
+                    "path": "/private/source.mp4",
+                    "title": "Feature",
+                    "duration_sec": 1.0,
+                    "fps": 24.0,
+                    "width": 1920,
+                    "height": 1080,
+                },
+                "scene_detection": {
+                    "detector": "AdaptiveDetector",
+                    "adaptive_threshold": 2.0,
+                    "adaptive_min_content_val": 15.0,
+                    "adaptive_min_scene_len_sec": 0.25,
+                    "duplicate_frame_threshold": 1.0,
+                },
+                "segments": [],
+                "asr_model": "asr",
+                "scene_boundary_model": "vlm",
+                "visual_description_model": "vlm",
+            }
+        )
 
 
 def test_material_runtime_handle_rejects_invalid_in_memory_values() -> None:
@@ -167,6 +204,77 @@ def test_analysis_requests_require_the_corresponding_material_type() -> None:
         AnalyseVideoRequest(music, VideoAnalysisOptions(), workspace)
     with pytest.raises(ValueError, match="music Material"):
         AnalyseMusicRequest(video, MusicAnalysisOptions(), workspace)
+
+
+def test_analysis_results_persist_identity_without_runtime_paths(
+    tmp_path: Path,
+) -> None:
+    video_root = (tmp_path / "video-memory").resolve()
+    music_root = (tmp_path / "music-memory").resolve()
+    video_root.mkdir()
+    music_root.mkdir()
+    video_material = MaterialRuntimeHandle(
+        material_id=MaterialId.new(),
+        material_type=MaterialType.VIDEO,
+        material_name="feature",
+        expected_fingerprint=FINGERPRINT_A,
+        source_path=(tmp_path / "source.mp4").resolve(),
+        memory_root=video_root,
+    )
+    music_material = MaterialRuntimeHandle(
+        material_id=MaterialId.new(),
+        material_type=MaterialType.MUSIC,
+        material_name="score",
+        expected_fingerprint=FINGERPRINT_B,
+        source_path=(tmp_path / "score.wav").resolve(),
+        memory_root=music_root,
+    )
+    video = VideoAnalysisResult(
+        status="success",
+        video=AnalysedVideoRuntimeHandle(
+            material=video_material,
+            memory_schema_version="3.0",
+            video_description_path=video_root / "video_description.json",
+            video_summary_path=video_root / "video_summary.json",
+            dialogues_path=video_root / "dialogues.json",
+        ),
+        source_srt_path=video_root / "source.srt",
+        processed_subtitle_path=video_root / "dialogue_merged.srt",
+        analysis_history_path=video_root / "analysis_history.json",
+        elapsed_sec=1.0,
+    )
+    music = MusicAnalysisResult(
+        status="success",
+        music=AnalysedMusicRuntimeHandle(
+            material=music_material,
+            memory_schema_version="2.0",
+            music_memory_path=music_root / "music_memory.json",
+        ),
+        elapsed_sec=1.0,
+    )
+
+    video_path = video.write(tmp_path / "video-result.json")
+    music_path = music.write(tmp_path / "music-result.json")
+    video_payload = json.loads(video_path.read_text(encoding="utf-8"))
+    music_payload = json.loads(music_path.read_text(encoding="utf-8"))
+
+    assert video_payload["schema_version"] == "3.0"
+    assert music_payload["schema_version"] == "3.0"
+    assert not any(
+        isinstance(value, str) and value.startswith("/")
+        for payload in (video_payload, music_payload)
+        for value in payload.values()
+    )
+    assert VideoAnalysisResult.read(video_path, video_material).video.material is (
+        video_material
+    )
+    assert MusicAnalysisResult.read(music_path, music_material).music.material is (
+        music_material
+    )
+    legacy_payload = {**music_payload, "source_audio": "/private/score.wav"}
+    music_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="fields do not match schema 3.0"):
+        MusicAnalysisResult.read(music_path, music_material)
 
 
 def test_planners_request_separates_brief_from_advanced_options() -> None:

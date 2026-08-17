@@ -10,7 +10,10 @@ from typing import Any
 from cutmaster.configuration.schema import AppConfig
 from cutmaster.infrastructure.observability.logging import log_event
 from cutmaster.workflow.analyser.material_analyst import MaterialAnalystAgent
-from cutmaster.workflow.analyser.tools.music_analysis import write_music_memory
+from cutmaster.workflow.analyser.tools.music_analysis import (
+    validate_music_memory,
+    write_music_memory,
+)
 from cutmaster.workflow.contracts.analysis import (
     AnalyseMusicRequest,
     AnalyseVideoRequest,
@@ -24,24 +27,14 @@ from cutmaster.workflow.contracts.material import (
 from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
 
 
-def _valid_music_memory(path: Path, source_audio: Path) -> dict[str, Any] | None:
-    """Return a complete Music Memory only when it belongs to this binding."""
+def _valid_music_memory(path: Path) -> dict[str, Any] | None:
+    """Return a complete current-schema Music Memory."""
 
     if not path.is_file() or path.is_symlink():
         return None
     try:
         memory = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(memory, dict) or memory.get("schema_version") != "1.0":
-            return None
-        if Path(str(memory.get("audio_path") or "")).resolve() != source_audio:
-            return None
-        if float(memory.get("source_duration_sec") or 0.0) <= 0.0:
-            return None
-        if not all(
-            isinstance(memory.get(field), list)
-            for field in ("beats_sec", "accents_sec", "energy_curve", "sections")
-        ):
-            return None
+        validate_music_memory(memory)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
     return memory
@@ -108,6 +101,7 @@ class Analyser:
                 source_video,
                 video_title,
                 subtitle_path,
+                source_fingerprint=str(request.material.expected_fingerprint),
                 material_directory=memory_root,
             )
             if cancellation_token is None
@@ -115,6 +109,7 @@ class Analyser:
                 source_video,
                 video_title,
                 subtitle_path,
+                source_fingerprint=str(request.material.expected_fingerprint),
                 material_directory=memory_root,
                 cancellation_token=cancellation_token,
             )
@@ -191,7 +186,7 @@ class Analyser:
             material_id=str(request.material.material_id),
             material_name=request.material.material_name,
         )
-        memory = _valid_music_memory(memory_path, source_audio)
+        memory = _valid_music_memory(memory_path)
         analysis_reused = memory is not None
         if memory is None:
             analyst = MaterialAnalystAgent(self.config)

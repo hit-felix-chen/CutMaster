@@ -13,8 +13,8 @@ Attempt artifacts rather than canonical project references.
 
 A git-ignored `CutMaster/.cutmaster-location` bootstrap file sits outside the
 Data Root and points to a custom root; its absence selects
-`CutMaster/.cutmaster/`. The repository-level `.env`, `config.toml`, and
-git-ignored `config.local.toml` also stay outside migration. The historical
+`CutMaster/.cutmaster/`. The repository-level `.env` and authoritative
+`config.toml` also stay outside migration. The historical
 `.cutmaster/materials-backup/` Material Library and pre-refactor workflow output
 directories are left unchanged and are never scanned, imported, or copied by
 Data Root Migration.

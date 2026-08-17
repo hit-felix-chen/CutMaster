@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import stat
 from collections.abc import Mapping
 from pathlib import Path
@@ -17,9 +16,7 @@ MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 MAX_MUSIC_MEMORY_BYTES = 4 * 1024 * 1024
 MAX_ENERGY_POINTS = 200_000
 MAX_WAVEFORM_POINTS = 320
-
-_FRAME_NAME = re.compile(r"^shot_([0-9]{5})_(01|02|03)\.jpg$")
-_FRAME_PRIORITY = {"02": 0, "01": 1, "03": 2}
+VIDEO_COVER_FILENAME = "cover.jpg"
 
 
 def preview_available(
@@ -30,7 +27,7 @@ def preview_available(
     """Return whether a real bounded preview can be projected cheaply."""
 
     if material_type is MaterialType.VIDEO:
-        return _select_video_frame(memory_root) is not None
+        return _select_video_cover(memory_root) is not None
     memory = (
         memory_document
         if memory_document is not None
@@ -46,12 +43,12 @@ def build_preview(
     """Build one small image without opening the immutable source media."""
 
     if material_type is MaterialType.VIDEO:
-        frame = _select_video_frame(memory_root)
-        if frame is None:
+        cover = _select_video_cover(memory_root)
+        if cover is None:
             return None
         content = _read_bounded_regular_file(
-            frame,
-            expected_parent=frame.parent,
+            cover,
+            expected_parent=cover.parent,
             maximum=MAX_THUMBNAIL_BYTES,
         )
         if (
@@ -66,7 +63,7 @@ def build_preview(
     points = _energy_points(memory)
     if points is None:
         return None
-    return "image/svg+xml", _waveform_svg(points)
+    return "image/svg+xml", _waveform_bar_svg(points)
 
 
 def _safe_directory(path: Path, *, expected_parent: Path | None = None) -> Path | None:
@@ -87,41 +84,20 @@ def _safe_directory(path: Path, *, expected_parent: Path | None = None) -> Path 
     return resolved
 
 
-def _select_video_frame(memory_root: Path) -> Path | None:
+def _select_video_cover(memory_root: Path) -> Path | None:
     root = _safe_directory(memory_root)
     if root is None:
         return None
-    frame_directory = _safe_directory(
-        root / "scene_frames",
-        expected_parent=root,
-    )
-    if frame_directory is None:
-        return None
-
-    candidates: list[tuple[int, int, Path]] = []
-    try:
-        for entry in frame_directory.iterdir():
-            match = _FRAME_NAME.fullmatch(entry.name)
-            if match is None:
-                continue
-            candidates.append(
-                (
-                    int(match.group(1)),
-                    _FRAME_PRIORITY[match.group(2)],
-                    entry,
-                )
-            )
-    except OSError:
-        return None
-
-    for _shot_number, _priority, candidate in sorted(candidates):
+    cover = root / VIDEO_COVER_FILENAME
+    return (
+        cover
         if _regular_file_within(
-            candidate,
-            expected_parent=frame_directory,
+            cover,
+            expected_parent=root,
             maximum=MAX_THUMBNAIL_BYTES,
-        ):
-            return candidate
-    return None
+        )
+        else None
+    )
 
 
 def _regular_file_within(
@@ -263,24 +239,29 @@ def _downsample(
     return selected
 
 
-def _waveform_svg(points: list[tuple[float, float]]) -> bytes:
+def _waveform_bar_svg(points: list[tuple[float, float]]) -> bytes:
     width = 640.0
-    height = 160.0
+    height = 360.0
     centre = height / 2.0
-    amplitude = 62.0
-    top = [
-        (ratio * width, centre - energy * amplitude) for ratio, energy in points
-    ]
-    bottom = [
-        (ratio * width, centre + energy * amplitude)
-        for ratio, energy in reversed(points)
-    ]
-    polygon = " ".join(f"{x:.2f},{y:.2f}" for x, y in (*top, *bottom))
+    amplitude = 132.0
+    slot_width = width / max(1, len(points))
+    bar_width = max(1.0, slot_width * 0.62)
+    radius = min(2.5, bar_width / 2.0)
+    bars: list[str] = []
+    for ratio, energy in points:
+        bar_height = max(4.0, energy * amplitude * 2.0)
+        x = min(width - bar_width, max(0.0, ratio * width - bar_width / 2.0))
+        y = centre - bar_height / 2.0
+        bars.append(
+            f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" '
+            f'height="{bar_height:.2f}" rx="{radius:.2f}"/>'
+        )
     document = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" '
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" '
         'preserveAspectRatio="none">'
-        '<path d="M0 80H640" stroke="#9388d8" stroke-opacity=".24"/>'
-        f'<polygon points="{polygon}" fill="#7768d8" fill-opacity=".88"/>'
+        '<g fill="#7768d8" fill-opacity=".9">'
+        f'{"".join(bars)}'
+        "</g>"
         "</svg>"
     )
     return document.encode("ascii")
@@ -290,6 +271,7 @@ __all__ = [
     "MAX_MUSIC_MEMORY_BYTES",
     "MAX_THUMBNAIL_BYTES",
     "MAX_WAVEFORM_POINTS",
+    "VIDEO_COVER_FILENAME",
     "build_preview",
     "preview_available",
 ]

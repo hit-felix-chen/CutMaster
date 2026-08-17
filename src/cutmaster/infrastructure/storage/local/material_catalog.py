@@ -39,6 +39,37 @@ from cutmaster.domain.materials import (
 
 
 MANIFEST_SCHEMA_VERSION = 2
+ANALYSIS_RESULT_SCHEMA_VERSION = "3.0"
+_VIDEO_ANALYSIS_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "material_id",
+        "material_type",
+        "material_name",
+        "material_fingerprint",
+        "memory_schema_version",
+        "elapsed_sec",
+        "material_reused",
+        "analysis_reused",
+        "model_usage_summary",
+        "model_usage_cumulative_summary",
+    }
+)
+_MUSIC_ANALYSIS_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "material_id",
+        "material_type",
+        "material_name",
+        "material_fingerprint",
+        "memory_schema_version",
+        "elapsed_sec",
+        "material_reused",
+        "analysis_reused",
+    }
+)
 _MANIFEST_NAME = "manifest.json"
 _MANIFEST_LOCK_NAME = ".manifest.lock"
 _SIDECAR_DIRECTORY_NAME = "sidecars"
@@ -86,8 +117,16 @@ class MaterialReferencedError(MaterialCatalogError):
         )
 
 
+class MaterialConsumedError(MaterialCatalogError):
+    """Raised when deletion cannot acquire its exclusive Material lease."""
+
+    def __init__(self, material_id: MaterialId) -> None:
+        self.material_id = material_id
+        super().__init__(f"Material {material_id} has active workflow consumers")
+
+
 class InvalidAnalysisResultError(MaterialCatalogError):
-    """Raised when a staged result is not the leased Material's v2 result."""
+    """Raised when a staged result is not the leased Material's current result."""
 
 
 class MaterialLeaseRequiredError(MaterialCatalogError):
@@ -163,12 +202,29 @@ def _exclusive_file_lock(
 ) -> Iterator[None]:
     """Serialize registry and per-Material mutations across processes."""
 
+    with _file_lock(path, create_parent=create_parent):
+        yield
+
+
+@contextmanager
+def _file_lock(
+    path: Path,
+    *,
+    shared: bool = False,
+    nonblocking: bool = False,
+    create_parent: bool = True,
+) -> Iterator[None]:
+    """Acquire one cross-process shared or exclusive advisory file lock."""
+
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
     elif not path.parent.is_dir() or path.parent.is_symlink():
         raise FileNotFoundError(f"Lock directory is unavailable: {path.parent}")
     with path.open("a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        if nonblocking:
+            operation |= fcntl.LOCK_NB
+        fcntl.flock(stream.fileno(), operation)
         try:
             yield
         finally:
@@ -189,6 +245,7 @@ class MaterialCatalog:
         self._manifest_lock_path = self.root / _MANIFEST_LOCK_NAME
         self._reference_checker = reference_checker or _NoMaterialReferences()
         self._active_bindings: dict[int, MaterialBinding] = {}
+        self._consumption_bindings: dict[int, MaterialBinding] = {}
         self._active_bindings_lock = RLock()
         root_created = not self.root.exists()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -340,7 +397,7 @@ class MaterialCatalog:
 
     @contextmanager
     def lease(self, material_id: MaterialId) -> Iterator[MaterialBinding]:
-        """Yield verified runtime paths while excluding deletion.
+        """Yield verified paths under exclusive analysis/mutation access.
 
         The manifest is checked before and after the per-Material lock is
         acquired. Deletion uses the same per-Material lock, so the binding stays
@@ -379,8 +436,42 @@ class MaterialCatalog:
             stack.close()
 
     @contextmanager
+    def consume_lease(self, material_id: MaterialId) -> Iterator[MaterialBinding]:
+        """Yield verified paths under a shared workflow-consumption lease."""
+
+        material_id = self._require_material_id(material_id)
+        stack = ExitStack()
+        try:
+            with _exclusive_file_lock(self._manifest_lock_path):
+                stored = self._require_stored_unlocked(material_id)
+            stack.enter_context(self._material_lock(stored, shared=True))
+            with _exclusive_file_lock(self._manifest_lock_path):
+                current = self._require_stored_unlocked(material_id)
+            if not self._verify_stored(current):
+                raise MaterialInconsistentError(
+                    f"Material {material_id} is inconsistent"
+                )
+            binding = MaterialBinding(
+                material=current.material,
+                source_path=current.source_path,
+                memory_root=current.memory_root,
+                manifest_path=self.manifest_path,
+            )
+            with self._active_bindings_lock:
+                self._consumption_bindings[id(binding)] = binding
+            try:
+                yield binding
+            finally:
+                with self._active_bindings_lock:
+                    registered = self._consumption_bindings.get(id(binding))
+                    if registered is binding:
+                        del self._consumption_bindings[id(binding)]
+        finally:
+            stack.close()
+
+    @contextmanager
     def read_lease(self, material_id: MaterialId) -> Iterator[MaterialBinding]:
-        """Yield deletion-safe browsing paths without a full content digest.
+        """Yield lock-free inspection paths without a full content digest.
 
         This boundary is for Material cards, Memory inspection, and byte-range
         playback.  It validates the managed path shape and regular-file state,
@@ -389,25 +480,18 @@ class MaterialCatalog:
         """
 
         material_id = self._require_material_id(material_id)
-        stack = ExitStack()
-        try:
-            with _exclusive_file_lock(self._manifest_lock_path):
-                stored = self._require_stored_unlocked(material_id)
-            stack.enter_context(self._material_lock(stored))
-            with _exclusive_file_lock(self._manifest_lock_path):
-                current = self._require_stored_unlocked(material_id)
-            if not self._source_is_regular(current):
-                raise MaterialInconsistentError(
-                    f"Material {material_id} source is unavailable"
-                )
-            yield MaterialBinding(
-                material=current.material,
-                source_path=current.source_path,
-                memory_root=current.memory_root,
-                manifest_path=self.manifest_path,
+        with _exclusive_file_lock(self._manifest_lock_path):
+            current = self._require_stored_unlocked(material_id)
+        if not self._source_is_regular(current):
+            raise MaterialInconsistentError(
+                f"Material {material_id} source is unavailable"
             )
-        finally:
-            stack.close()
+        yield MaterialBinding(
+            material=current.material,
+            source_path=current.source_path,
+            memory_root=current.memory_root,
+            manifest_path=self.manifest_path,
+        )
 
     def publish_analysis_result(
         self,
@@ -559,7 +643,11 @@ class MaterialCatalog:
         if not isinstance(binding, MaterialBinding):
             raise TypeError("binding must be a MaterialBinding")
         with self._active_bindings_lock:
-            if self._active_bindings.get(id(binding)) is not binding:
+            is_mutation = self._active_bindings.get(id(binding)) is binding
+            is_consumption = (
+                self._consumption_bindings.get(id(binding)) is binding
+            )
+            if not (is_mutation or is_consumption):
                 raise MaterialLeaseRequiredError(
                     "Subtitle sidecars can only be resolved through this "
                     "Catalog's active Material lease"
@@ -920,14 +1008,19 @@ class MaterialCatalog:
         if not isinstance(value, dict):
             return False
         expected = {
-            "schema_version": "2.0",
+            "schema_version": ANALYSIS_RESULT_SCHEMA_VERSION,
             "status": "success",
             "material_id": str(material.material_id),
             "material_type": material.material_type.value,
             "material_name": material.name,
             "material_fingerprint": str(material.fingerprint),
         }
-        return all(
+        expected_fields = (
+            _VIDEO_ANALYSIS_RESULT_FIELDS
+            if material.material_type is MaterialType.VIDEO
+            else _MUSIC_ANALYSIS_RESULT_FIELDS
+        )
+        return set(value) == expected_fields and all(
             value.get(name) == expected_value
             for name, expected_value in expected.items()
         )
@@ -969,7 +1062,21 @@ class MaterialCatalog:
         material_id = self._require_material_id(material_id)
         with _exclusive_file_lock(self._manifest_lock_path):
             stored = self._require_stored_unlocked(material_id)
-        with self._material_lock(stored, missing_ok=True):
+        references = tuple(self._reference_checker.references(material_id))
+        if references:
+            raise MaterialReferencedError(material_id, references)
+        try:
+            lease = self._material_lock(
+                stored,
+                missing_ok=True,
+                nonblocking=True,
+            )
+            lease.__enter__()
+        except BlockingIOError as exc:
+            raise MaterialConsumedError(material_id) from exc
+        try:
+            # Recheck after exclusion so a Project reference committed between
+            # the optimistic check and the lock can never be deleted.
             references = tuple(self._reference_checker.references(material_id))
             if references:
                 raise MaterialReferencedError(material_id, references)
@@ -1001,6 +1108,8 @@ class MaterialCatalog:
                     raise
                 if deleting_directory.exists():
                     shutil.rmtree(deleting_directory)
+        finally:
+            lease.__exit__(None, None, None)
 
     @staticmethod
     def _empty_manifest() -> dict[str, Any]:
@@ -1061,6 +1170,8 @@ class MaterialCatalog:
         stored: _StoredMaterial,
         *,
         missing_ok: bool = False,
+        shared: bool = False,
+        nonblocking: bool = False,
     ) -> Iterator[None]:
         material = stored.material
         expected_directory = (
@@ -1080,8 +1191,10 @@ class MaterialCatalog:
                 "directory is missing"
             )
         self._require_contained_directory(material_directory)
-        with _exclusive_file_lock(
+        with _file_lock(
             material_directory / ".analysis.lock",
+            shared=shared,
+            nonblocking=nonblocking,
             create_parent=False,
         ):
             yield

@@ -216,6 +216,7 @@ def test_parallel_optimization_preserves_script_order(
 
     optimized = optimize_script_source_windows(
         tmp_path / "source.mp4",
+        tmp_path / "segments",
         items,
         beat_times=[2.0, 6.0, 10.0],
         video_description=video_description,
@@ -249,6 +250,7 @@ def test_cutless_used_segment_preserves_source_window(
 
     optimized = optimize_script_source_windows(
         tmp_path / "source.mp4",
+        tmp_path / "segments",
         items,
         beat_times=[1.0, 2.0, 3.0],
         video_description=video_description,
@@ -266,17 +268,18 @@ def test_used_segment_detection_skips_anchor_and_unused_segments(
     tmp_path,
 ) -> None:
     segments = []
+    segment_cache_directory = tmp_path / "segments"
+    segment_cache_directory.mkdir()
     for index, (start, end) in enumerate(
         ((0.0, 10.0), (10.0, 20.0), (20.0, 30.0)),
         1,
     ):
-        clip_path = tmp_path / f"segment_{index:04d}.mp4"
+        clip_path = segment_cache_directory / f"segment_{index:04d}.mp4"
         clip_path.write_bytes(b"cached")
         segments.append(
             {
                 "segment_id": f"segment_{index:04d}",
                 "time_range": {"start_sec": start, "end_sec": end},
-                "clip_path": str(clip_path),
             }
         )
     video_description = {
@@ -296,6 +299,7 @@ def test_used_segment_detection_skips_anchor_and_unused_segments(
 
     cuts, frame_rate, source_duration = _detect_used_segment_cuts(
         tmp_path / "source.mp4",
+        segment_cache_directory,
         [
             {
                 "timestamp": "00:00:12,000-00:00:16,000",

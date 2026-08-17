@@ -1,6 +1,7 @@
 import hashlib
 import json
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event, Thread
@@ -23,6 +24,7 @@ from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialNameCollisionError,
     MaterialNotFoundError,
     MaterialReferencedError,
+    MaterialConsumedError,
     SubtitleSidecarConflictError,
     fingerprint_file,
     normalize_material_name,
@@ -41,14 +43,24 @@ def _binding(catalog: MaterialCatalog, record: MaterialRecord):
 
 def _analysis_result(record: MaterialRecord) -> dict[str, object]:
     material = record.material
-    return {
-        "schema_version": "2.0",
+    result: dict[str, object] = {
+        "schema_version": "3.0",
         "status": "success",
         "material_id": str(material.material_id),
         "material_type": material.material_type.value,
         "material_name": material.name,
         "material_fingerprint": str(material.fingerprint),
+        "memory_schema_version": (
+            "3.0" if material.material_type is MaterialType.VIDEO else "2.0"
+        ),
+        "elapsed_sec": 1.0,
+        "material_reused": False,
+        "analysis_reused": False,
     }
+    if material.material_type is MaterialType.VIDEO:
+        result["model_usage_summary"] = {}
+        result["model_usage_cumulative_summary"] = {}
+    return result
 
 
 def test_add_uses_normalized_default_name_and_managed_immutable_copy(
@@ -250,6 +262,73 @@ def test_delete_rejects_referenced_material_then_removes_unreferenced_one(
     assert library.get(record.material.material_id) is None
 
 
+def test_consumption_leases_share_and_delete_rejects_without_waiting(
+    tmp_path: Path,
+) -> None:
+    library = MaterialCatalog(tmp_path / "library")
+    record = library.add(
+        _source(tmp_path / "source.mp4", b"video"), "video", "Clip"
+    )
+    entered = Event()
+    release = Event()
+
+    def consume() -> None:
+        with library.consume_lease(record.material.material_id):
+            entered.set()
+            release.wait(2)
+
+    worker = Thread(target=consume)
+    worker.start()
+    assert entered.wait(1)
+    try:
+        started = time.monotonic()
+        with library.consume_lease(record.material.material_id):
+            pass
+        assert time.monotonic() - started < 0.25
+
+        started = time.monotonic()
+        with pytest.raises(MaterialConsumedError):
+            library.delete(record.material.material_id)
+        assert time.monotonic() - started < 0.25
+    finally:
+        release.set()
+        worker.join(timeout=2)
+
+    library.delete(record.material.material_id)
+
+
+def test_inspection_does_not_wait_for_exclusive_analysis_lease(tmp_path: Path) -> None:
+    library = MaterialCatalog(tmp_path / "library")
+    record = library.add(
+        _source(tmp_path / "source.mp4", b"video"), "video", "Clip"
+    )
+    analysis_entered = Event()
+    release_analysis = Event()
+    inspection_finished = Event()
+
+    def analyse() -> None:
+        with library.lease(record.material.material_id):
+            analysis_entered.set()
+            release_analysis.wait(2)
+
+    def inspect() -> None:
+        with library.read_lease(record.material.material_id) as binding:
+            assert binding.source_path.is_file()
+        inspection_finished.set()
+
+    analysis = Thread(target=analyse)
+    inspection = Thread(target=inspect)
+    analysis.start()
+    assert analysis_entered.wait(1)
+    inspection.start()
+    try:
+        assert inspection_finished.wait(0.25)
+    finally:
+        release_analysis.set()
+        analysis.join(timeout=2)
+        inspection.join(timeout=2)
+
+
 def test_normalization_rejects_empty_reserved_and_control_names() -> None:
     assert normalize_material_name("  Ｍｙ　Film  ") == "My Film"
     for value in ("", " \t ", ".", "..", "bad\x00name"):
@@ -391,10 +470,8 @@ def test_add_rejects_symlinked_type_directory_without_writing_outside(
     assert list(outside.iterdir()) == []
 
 
-@pytest.mark.parametrize("lease_name", ("lease", "read_lease"))
-def test_lease_serializes_work_for_one_material(
+def test_analysis_lease_serializes_work_for_one_material(
     tmp_path: Path,
-    lease_name: str,
 ) -> None:
     library = MaterialCatalog(tmp_path / "library")
     record = library.add(
@@ -404,7 +481,7 @@ def test_lease_serializes_work_for_one_material(
     )
     attempted = Event()
     entered = Event()
-    lease = getattr(library, lease_name)
+    lease = library.lease
 
     def contender() -> None:
         attempted.set()
@@ -688,7 +765,7 @@ def test_failed_atomic_replace_preserves_the_previous_ready_result(
         canonical = binding.memory_root / "analysis_result.json"
 
     second_value = _analysis_result(record)
-    second_value["new_field"] = "new value"
+    second_value["elapsed_sec"] = 2.0
     second = tmp_path / "second.json"
     second.write_text(json.dumps(second_value), encoding="utf-8")
     original_replace = Path.replace

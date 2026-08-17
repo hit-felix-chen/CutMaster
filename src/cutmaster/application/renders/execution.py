@@ -33,6 +33,7 @@ from cutmaster.workflow.contracts.rendering import (
     RenderResult,
 )
 from cutmaster.workflow.renderer import Renderer
+from cutmaster.workflow.shared.video_cover import write_video_cover
 
 if TYPE_CHECKING:
     from cutmaster.application.renders.service import RendersService
@@ -56,6 +57,7 @@ class RenderEngine(Protocol):
 RenderEngineFactory = Callable[[RendererConfig], RenderEngine]
 StopCheck = Callable[[], bool]
 ProgressUpdate = Callable[[Mapping[str, object]], None]
+CoverGenerator = Callable[[Path, Path], Path]
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class ManagedRenderExecutor:
         should_stop: StopCheck,
         report_progress: ProgressUpdate,
         renderer_factory: RenderEngineFactory = Renderer,
+        cover_generator: CoverGenerator | None = None,
     ) -> CompletedRenderView:
         if not isinstance(command.render_variant_id, RenderVariantId):
             raise TypeError("render_variant_id must be a RenderVariantId")
@@ -125,16 +128,19 @@ class ManagedRenderExecutor:
             )
         )
         master = owner / "master.mp4"
+        cover = owner / "cover.jpg"
         backup = staging / ".previous-master.mp4"
+        backup_cover = staging / ".previous-cover.jpg"
         committed = False
-        published = False
+        master_published = False
+        cover_published = False
         try:
             with ExitStack() as stack:
                 video_binding = stack.enter_context(
-                    self._materials.lease(plan.video_material_id)
+                    self._materials.consume_lease(plan.video_material_id)
                 )
                 music_binding = stack.enter_context(
-                    self._materials.lease(plan.music_material_id)
+                    self._materials.consume_lease(plan.music_material_id)
                 )
                 video = _runtime_handle(
                     video_binding,
@@ -165,16 +171,23 @@ class ManagedRenderExecutor:
                 raise ValueError("Renderer did not produce a regular master candidate")
             if output.parent.resolve() != staging.resolve():
                 raise ValueError("Renderer output escaped the managed staging directory")
+            candidate_cover = staging / "cover.jpg"
+            (cover_generator or _write_render_cover)(output, candidate_cover)
             if should_stop():
                 raise RenderExecutionInterrupted(
                     "Render stopped after the media operation and before publication"
                 )
             report_progress(_progress("publishing", "running"))
             _fsync_file(output)
+            _fsync_file(candidate_cover)
             if master.exists() or master.is_symlink():
                 os.replace(master, backup)
+            if cover.exists() or cover.is_symlink():
+                os.replace(cover, backup_cover)
             os.replace(output, master)
-            published = True
+            master_published = True
+            os.replace(candidate_cover, cover)
+            cover_published = True
             _fsync_directory(owner)
             completed = self._renders.complete(
                 CompleteRenderVariantCommand(
@@ -194,11 +207,17 @@ class ManagedRenderExecutor:
         finally:
             if not committed:
                 rolled_back = False
-                if published and (master.exists() or master.is_symlink()):
+                if master_published and (master.exists() or master.is_symlink()):
                     master.unlink()
+                    rolled_back = True
+                if cover_published and (cover.exists() or cover.is_symlink()):
+                    cover.unlink()
                     rolled_back = True
                 if backup.exists() or backup.is_symlink():
                     os.replace(backup, master)
+                    rolled_back = True
+                if backup_cover.exists() or backup_cover.is_symlink():
+                    os.replace(backup_cover, cover)
                     rolled_back = True
                 if rolled_back:
                     _fsync_directory(owner)
@@ -220,6 +239,10 @@ def _runtime_handle(
         memory_root=binding.memory_root,
         subtitle_path=subtitle_path,
     )
+
+
+def _write_render_cover(source_path: Path, destination_path: Path) -> Path:
+    return write_video_cover(source_path, destination_path, (0.0,))
 
 
 def _owned_render_directory(
@@ -275,4 +298,5 @@ __all__ = [
     "RenderEngine",
     "RenderEngineFactory",
     "RenderExecutionInterrupted",
+    "CoverGenerator",
 ]

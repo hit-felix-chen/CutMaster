@@ -5,14 +5,17 @@ from pathlib import Path
 from unittest.mock import PropertyMock, patch
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from cutmaster.adapters.web import create_app
 from cutmaster.adapters.web.run_worker import (
     ASTERJobProgressReporter,
+    _plan_run,
     execute_run_job,
 )
 from cutmaster.application import CutMasterApplication
+from cutmaster.application.direct import DirectService
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     FailAttemptCommand,
@@ -32,11 +35,38 @@ from cutmaster.workflow.contracts.checkpoints import (
     PlannersCheckpoint,
     PlannersCheckpointStage,
 )
+from cutmaster.workflow.planners.tools.music_analysis import project_music_profile
 from cutmaster.workflow.ports import ProgressUpdate
 
 
 def command_id() -> str:
     return str(uuid4())
+
+
+def music_memory(duration_sec: float) -> dict[str, object]:
+    return {
+        "schema_version": "2.0",
+        "source_duration_sec": duration_sec,
+        "tempo_bpm": 120.0,
+        "beats_sec": [0.0, 0.5, 1.0],
+        "accents_sec": [0.0, 1.0],
+        "energy_step_sec": 0.5,
+        "energy_curve": [
+            {"time_sec": 0.0, "energy": 0.25},
+            {"time_sec": 0.5, "energy": 0.75},
+        ],
+        "sections": [
+            {
+                "section_id": "music_01",
+                "start_sec": 0.0,
+                "end_sec": duration_sec,
+                "role": "build",
+                "mean_energy": 0.5,
+                "energy_trend": "rising",
+                "suggested_clip_duration_sec": [2.0, 4.0],
+            }
+        ],
+    }
 
 
 class CapturingDispatcher:
@@ -66,32 +96,57 @@ def prepared_project(
         with application.materials.lease(material.material_id) as binding:
             if material.material_type.value == "music":
                 (binding.memory_root / "music_memory.json").write_text(
-                    json.dumps({"source_duration_sec": music_duration_sec}),
+                    json.dumps(music_memory(music_duration_sec)),
                     encoding="utf-8",
                 )
             staged = tmp_path / f"{material.material_id}-analysis-result.json"
             staged.write_text(
                 json.dumps(
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "status": "success",
                         "material_id": str(binding.material.material_id),
                         "material_type": binding.material.material_type.value,
                         "material_name": binding.material.name,
                         "material_fingerprint": str(binding.material.fingerprint),
+                        "memory_schema_version": (
+                            "3.0"
+                            if binding.material.material_type.value == "video"
+                            else "2.0"
+                        ),
+                        "elapsed_sec": 0.0,
+                        "material_reused": False,
+                        "analysis_reused": False,
+                        **(
+                            {
+                                "model_usage_summary": {},
+                                "model_usage_cumulative_summary": {},
+                            }
+                            if binding.material.material_type.value == "video"
+                            else {}
+                        ),
                     }
                 ),
                 encoding="utf-8",
             )
             application.materials.publish_analysis_result(binding, staged)
-    application.projects.set_materials(
-        SetProjectMaterialsCommand(
-            command_id(),
-            project.project_id,
-            (video.material_id,),
-            (music.material_id,),
-        )
+    selection = SetProjectMaterialsCommand(
+        command_id(),
+        project.project_id,
+        (video.material_id,),
+        (music.material_id,),
     )
+    if ready:
+        application.projects.set_materials(selection)
+    else:
+        # Bypass the public Project boundary to retain defense-in-depth coverage
+        # for an invalid persisted snapshot. Normal Project saves reject this.
+        application.projects._store.set_project_materials(
+            selection.command_id,
+            selection.project_id,
+            selection.video_material_ids,
+            selection.music_material_ids,
+        )
     return application.projects.save_creative_brief(
         SaveCreativeBriefCommand(
             command_id(),
@@ -108,6 +163,36 @@ def fake_planner(_application, run, workspace: Path) -> Path:
     path = workspace / "render_plan.json"
     path.write_bytes(b'{"render_plan":"real-worker-artifact"}\n')
     return path
+
+
+def test_managed_run_passes_snapshotted_video_title_to_direct_plan(
+    application: CutMasterApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = prepared_project(application, tmp_path)
+    submission = application.runs.create(
+        CreateRunCommand(
+            command_id(),
+            project.project_id,
+            video_title="La La Land",
+        )
+    )
+    observed: dict[str, object] = {}
+
+    class PlannerCalled(Exception):
+        pass
+
+    def capture_plan(_service: DirectService, command: object) -> None:
+        observed["command"] = command
+        raise PlannerCalled
+
+    monkeypatch.setattr(DirectService, "plan", capture_plan)
+
+    with pytest.raises(PlannerCalled):
+        _plan_run(application, submission.run, tmp_path / "managed-plan")
+
+    assert getattr(observed["command"], "video_title") == "La La Land"
 
 
 def usage_summary(
@@ -275,7 +360,12 @@ def test_run_worker_persists_current_attempt_usage_and_projects_privately(
     assert compact["total_cost_yuan"] == 0.012
     assert "by_model" not in compact
     assert "by_task" not in compact
-    serialized = json.dumps({"detail": detail.json(), "list": run_list.json()})
+    detail_payload = detail.json()
+    list_payload = run_list.json()
+    assert Path(detail_payload["execution"]["log"]["path"]).is_absolute()
+    detail_payload["execution"].pop("log")
+    list_payload["items"][0]["execution"].pop("log")
+    serialized = json.dumps({"detail": detail_payload, "list": list_payload})
     for private_value in (
         "calls",
         "provider_usage",
@@ -446,6 +536,7 @@ def test_running_run_projections_include_current_execution_and_progress(
     assert {
         "attempt": activity_item["attempt"],
         "job": activity_item["job"],
+        "log": activity_item["log"],
     } == listed["execution"]
     assert activity_item["navigation"] == {
         "type": "run",
@@ -744,24 +835,49 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
         interrupted.run.run_id,
         interrupted.attempt.attempt_id,
     )
-    session.save(
-        PlannersCheckpoint(
-            completed_stage=PlannersCheckpointStage.ARRANGEMENT,
-            aster_attempt=1,
-            music_profile={"planned_duration_sec": 45.0},
-            slots=({"slot_id": "slot_01", "content_description": "setup"},),
-            dialogue_anchors=None,
-            candidate_pool=None,
-            beam_path=None,
-            selection=None,
-            pairwise_scores=None,
-            raw_script=None,
-            planners_feedback=None,
-            stage_timings_sec={"slot_arrangement": 0.1},
-            prior_model_usage=usage_summary(),
-            prior_model_call_count=1,
-        )
+    profile = project_music_profile(music_memory(90.0), 45.0)
+    checkpoint = PlannersCheckpoint(
+        completed_stage=PlannersCheckpointStage.ARRANGEMENT,
+        aster_attempt=1,
+        music_profile=profile,
+        slots=({"slot_id": "slot_01", "content_description": "setup"},),
+        dialogue_anchors=None,
+        candidate_pool=None,
+        beam_path=None,
+        selection=None,
+        pairwise_scores=None,
+        raw_script=None,
+        planners_feedback=None,
+        stage_timings_sec={"slot_arrangement": 0.1},
+        prior_model_usage=usage_summary(),
+        prior_model_call_count=1,
     )
+    session.save(checkpoint)
+    receipt = application.runs._store.get_run_checkpoint(interrupted.run.run_id)
+    assert receipt is not None
+    checkpoint_path = (
+        application.settings.get().data_root / str(receipt["relative_path"])
+    )
+    checkpoint_document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+    def assert_path_free(value) -> None:
+        if isinstance(value, dict):
+            forbidden = {
+                "audio_path",
+                "clip_path",
+                "memory_root",
+                "path",
+                "source_path",
+                "video_path",
+            }
+            assert forbidden.isdisjoint(key.lower() for key in value)
+            for child in value.values():
+                assert_path_free(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_path_free(child)
+
+    assert_path_free(checkpoint_document)
     application.jobs.stop(
         StopAttemptCommand(command_id(), interrupted.attempt.attempt_id)
     )
@@ -788,6 +904,13 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
     )
     assert pinned is not None
     assert pinned["completed_stage"] == "arrangement_architect"
+    resumed_session = application.runs.checkpoint_session(
+        interrupted.run.run_id,
+        dispatcher.submissions[0].attempt.attempt_id,
+    )
+    loaded = resumed_session.load()
+    assert loaded is not None
+    assert loaded.to_dict()["music_profile"] == profile
 
 
 def test_run_again_copies_historical_snapshot_not_current_project_setup(

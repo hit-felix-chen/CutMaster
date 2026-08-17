@@ -40,6 +40,7 @@ from cutmaster.workflow.contracts.planners import (
 from cutmaster.workflow.contracts.render_plan import RenderPlan
 from cutmaster.workflow.planners import Planners
 from cutmaster.workflow.planners.tools.errors import NoFeasiblePathError
+from cutmaster.workflow.planners.tools.music_analysis import project_music_profile
 from cutmaster.workflow.ports import WorkflowCancelledError
 
 
@@ -78,12 +79,108 @@ def _request(tmp_path: Path) -> PlannersRequest:
     dialogues = video_memory / "dialogues.json"
     music_profile = music_memory / "music_memory.json"
     video_description.write_text(
-        json.dumps({"source": {}, "segments": []}),
+        json.dumps(
+            {
+                "schema_version": "3.0",
+                "source": {
+                    "title": "Video",
+                    "duration_sec": 1.0,
+                    "fps": 30.0,
+                    "width": 1920,
+                    "height": 1080,
+                },
+                "scene_detection": {
+                    "detector": "AdaptiveDetector",
+                    "adaptive_threshold": 2.0,
+                    "adaptive_min_content_val": 15.0,
+                    "adaptive_min_scene_len_sec": 0.25,
+                    "duplicate_frame_threshold": 1.0,
+                },
+                "segments": [
+                    {
+                        "segment_id": "segment_0001",
+                        "time_range": {"start_sec": 0.0, "end_sec": 1.0},
+                        "has_dialogue": False,
+                        "speech_mode": "none",
+                        "content_type": None,
+                        "timeline_role": "opening",
+                        "shots": [
+                            {
+                                "shot_id": "shot_0001",
+                                "time_range": {
+                                    "start_sec": 0.0,
+                                    "end_sec": 1.0,
+                                },
+                                "segment_time_range": {
+                                    "start_sec": 0.0,
+                                    "end_sec": 1.0,
+                                },
+                                "start_boundary": "video_start",
+                                "end_boundary": "video_end",
+                                "visual_description": None,
+                                "dominant_action": None,
+                                "content_type": None,
+                                "narrative_function": None,
+                                "emotional_tone": None,
+                                "emotional_intensity": None,
+                                "scene": None,
+                                "characters": [],
+                                "dialogue": [],
+                                "shot_scale": None,
+                                "camera_angle": None,
+                                "camera_movement": None,
+                                "composition": None,
+                                "sampled_frame_times_sec": [],
+                                "visual_evidence": None,
+                                "visual_annotation_status": "provider_rejected",
+                                "visual_annotation_failure": "data_inspection_failed",
+                            }
+                        ],
+                        "dialogue_items": [],
+                        "segment_summary": None,
+                        "narrative_function": None,
+                        "emotional_tone": None,
+                        "emotional_intensity": None,
+                        "appearing_characters": [],
+                    }
+                ],
+                "asr_model": "test-asr",
+                "scene_boundary_model": "test-vlm",
+                "visual_description_model": "test-vlm",
+            }
+        ),
         encoding="utf-8",
     )
     video_summary.write_text(json.dumps({"summary": "story"}), encoding="utf-8")
     dialogues.write_text("{}", encoding="utf-8")
-    music_profile.write_text("{}", encoding="utf-8")
+    music_profile.write_text(
+        json.dumps(
+            {
+                "schema_version": "2.0",
+                "source_duration_sec": 60.0,
+                "tempo_bpm": 120.0,
+                "beats_sec": [0.0, 0.5, 1.0],
+                "accents_sec": [0.0, 1.0],
+                "energy_step_sec": 0.5,
+                "energy_curve": [
+                    {"time_sec": 0.0, "energy": 0.25},
+                    {"time_sec": 0.5, "energy": 0.75},
+                ],
+                "sections": [
+                    {
+                        "section_id": "music_01",
+                        "start_sec": 0.0,
+                        "end_sec": 60.0,
+                        "role": "build",
+                        "mean_energy": 0.5,
+                        "energy_trend": "rising",
+                        "suggested_clip_duration_sec": [2.0, 4.0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     video_material = MaterialRuntimeHandle(
         material_id=MaterialId.new(),
         material_type=MaterialType.VIDEO,
@@ -103,14 +200,14 @@ def _request(tmp_path: Path) -> PlannersRequest:
     return PlannersRequest(
         video=AnalysedVideoRuntimeHandle(
             material=video_material,
-            memory_schema_version="2.0",
+            memory_schema_version="3.0",
             video_description_path=video_description,
             video_summary_path=video_summary,
             dialogues_path=dialogues,
         ),
         music=AnalysedMusicRuntimeHandle(
             material=music_material,
-            memory_schema_version="1.0",
+            memory_schema_version="2.0",
             music_memory_path=music_profile,
         ),
         brief=PlannersBrief("Create a coherent montage", 30.0),
@@ -164,16 +261,20 @@ def _install_fake_workflow(
     fail_first_composition: bool = False,
 ) -> None:
     class _Team:
-        def __init__(self, _video, _config, context) -> None:
+        def __init__(
+            self,
+            _video,
+            _segment_cache_directory,
+            _config,
+            context,
+        ) -> None:
             self.context = context
 
-        def profile_music(self, *_args):
+        def profile_music(self, music_memory, target_duration_sec, output_path):
             calls.append("profile_music")
-            return {
-                "planned_duration_sec": 30.0,
-                "tempo_bpm": 120.0,
-                "sections": [],
-            }
+            profile = project_music_profile(music_memory, target_duration_sec)
+            output_path.write_text(json.dumps(profile), encoding="utf-8")
+            return profile
 
         def arrange(self, *_args):
             calls.append("arrangement_architect")

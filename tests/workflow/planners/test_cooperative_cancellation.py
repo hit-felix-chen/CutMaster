@@ -168,6 +168,13 @@ def test_aster_checks_cancellation_after_each_agent_boundary(
             return script, {}
 
     monkeypatch.setattr(planners_module, "ASTERTeam", _Team)
+    # This test isolates cancellation checkpoints; persisted Video Memory
+    # schema validation is covered by the contract suite.
+    monkeypatch.setattr(
+        planners_module,
+        "validate_video_description_document",
+        lambda _value: None,
+    )
 
     with pytest.raises(WorkflowCancelledError, match="stopped in test"):
         Planners(_config(tmp_path)).plan(

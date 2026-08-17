@@ -77,7 +77,6 @@ function settings(
   return {
     values: {},
     base_path: '/workspace/config.toml',
-    overlay_path: '/workspace/config.local.toml',
     data_root: '/workspace/.cutmaster',
     secrets: {
       llm_configured: configured.llm,

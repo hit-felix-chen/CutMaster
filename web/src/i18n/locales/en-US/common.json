@@ -40,6 +40,17 @@
     "none": "None",
     "unknown": "Unknown"
   },
+  "executionLogs": {
+    "eyebrow": "EXECUTION LOG",
+    "title": "Live logs",
+    "path": "Log path",
+    "open": "View live logs",
+    "live": "Receiving live log output",
+    "waiting": "Waiting for the Worker to create the log file",
+    "ended": "This Attempt log has ended",
+    "empty": "There is no log output yet.",
+    "loadFailed": "The log for this Attempt could not be loaded."
+  },
   "shell": {
     "narrowTitle": "Make the window wider",
     "narrowBody": "The CutMaster editing workspace requires a viewport at least 1280 pixels wide."
@@ -254,6 +265,12 @@
     "intentHelp": "Describe the story, emotion, and moments to emphasize.",
     "durationHelp": "Cannot exceed the full duration of the selected music.",
     "requiresMusic": "Select a music material before setting a target duration.",
+    "customDuration": "Custom duration",
+    "useMusicDuration": "Use audio duration",
+    "minutes": "Minutes",
+    "seconds": "Seconds",
+    "selectedMusicDuration": "Selected audio duration",
+    "durationLimit": "Custom duration limit: {{duration}}",
     "saveChanges": "Save changes",
     "savedNotice": "Creative Brief saved.",
     "leaveTitle": "You have unsaved changes",
@@ -344,6 +361,7 @@
     "energy": "Energy",
     "sections": "Sections",
     "musicTimeline": "Music timeline",
+    "musicTimelineViewport": "Music timeline tracks",
     "seekSection": "Seek to {{section}} at {{time}}",
     "seekBeat": "Seek to beat at {{time}}",
     "seekAccent": "Seek to accent at {{time}}",

@@ -5,8 +5,8 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import stat
 import tempfile
-from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
@@ -21,7 +21,10 @@ from fastapi import (
     UploadFile,
     status,
 )
+import anyio
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.datastructures import MutableHeaders
+from starlette.types import Receive, Scope, Send
 
 from cutmaster.adapters.web.dependencies import (
     ApplicationDependency,
@@ -53,6 +56,7 @@ from cutmaster.infrastructure.persistence.sqlite import (
 )
 from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialNameCollisionError,
+    MaterialReferencedError,
     SubtitleSidecarConflictError,
     normalize_material_name,
 )
@@ -60,18 +64,137 @@ from cutmaster.infrastructure.storage.local.material_catalog import (
 router = APIRouter(prefix="/materials", tags=["materials"])
 
 
-class _LeasedFileResponse(FileResponse):
-    """Release a Material lease on success, Range errors, or disconnects."""
+class _PinnedFileResponse(FileResponse):
+    """Stream an already-open Material source descriptor without a lease."""
 
-    def __init__(self, *args, release: Callable[[], None], **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._release = release
+    def __init__(self, *args, stream, stat_result, **kwargs) -> None:
+        kwargs["stat_result"] = stat_result
+        try:
+            super().__init__(*args, **kwargs)
+        except Exception:
+            stream.close()
+            raise
+        self._stream = anyio.wrap_file(stream)
 
-    async def __call__(self, scope, receive, send) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            self._release()
+            await self._stream.aclose()
+
+    async def _handle_simple(
+        self,
+        send: Send,
+        send_header_only: bool,
+        _send_pathsend: bool,
+    ) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await self._stream.seek(0)
+        while True:
+            chunk = await self._stream.read(self.chunk_size)
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": chunk,
+                    "more_body": len(chunk) == self.chunk_size,
+                }
+            )
+            if len(chunk) != self.chunk_size:
+                return
+
+    async def _handle_single_range(
+        self,
+        send: Send,
+        start: int,
+        end: int,
+        file_size: int,
+        send_header_only: bool,
+    ) -> None:
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
+        headers["content-length"] = str(end - start)
+        await send(
+            {"type": "http.response.start", "status": 206, "headers": headers.raw}
+        )
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await self._stream.seek(start)
+        while start < end:
+            chunk = await self._stream.read(min(self.chunk_size, end - start))
+            start += len(chunk)
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": chunk,
+                    "more_body": start < end,
+                }
+            )
+
+    async def _handle_multiple_ranges(
+        self,
+        send: Send,
+        ranges: list[tuple[int, int]],
+        file_size: int,
+        send_header_only: bool,
+    ) -> None:
+        boundary = os.urandom(13).hex()
+        content_length, header = self.generate_multipart(
+            ranges,
+            boundary,
+            file_size,
+            self.headers["content-type"],
+        )
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-type"] = f"multipart/byteranges; boundary={boundary}"
+        headers["content-length"] = str(content_length)
+        await send(
+            {"type": "http.response.start", "status": 206, "headers": headers.raw}
+        )
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b""})
+            return
+        for start, end in ranges:
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": header(start, end),
+                    "more_body": True,
+                }
+            )
+            await self._stream.seek(start)
+            while start < end:
+                chunk = await self._stream.read(min(self.chunk_size, end - start))
+                start += len(chunk)
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": chunk,
+                        "more_body": True,
+                    }
+                )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"\r\n",
+                    "more_body": True,
+                }
+            )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": f"--{boundary}--".encode("latin-1"),
+            }
+        )
 
 
 class MaterialSort(StrEnum):
@@ -324,6 +447,9 @@ def delete_material(
     material = application.materials.get(identifier)
     if material is None and not replayed:
         raise HTTPException(status_code=404, detail="Material not found")
+    references = application.materials.references(identifier)
+    if references:
+        raise MaterialReferencedError(identifier, references)
     active = application.jobs.active_material_attempt_ids(identifier)
     if active:
         raise ActiveAttemptBlocker(
@@ -368,29 +494,35 @@ def get_material_source(
     material_id: str,
     application: ApplicationDependency,
 ) -> FileResponse:
-    """Stream managed source bytes while retaining deletion exclusion."""
+    """Pin and stream source bytes without holding a Material workflow lock."""
 
     identifier = MaterialId.parse(material_id)
     material = application.materials.get(identifier)
     if material is None:
         raise HTTPException(status_code=404, detail="Material not found")
-    lease = application.materials.read_lease(identifier)
-    entered = False
     try:
-        binding = lease.__enter__()
-        entered = True
-        path = binding.source_path
-        metadata = path.stat()
+        with application.materials.read_lease(identifier) as binding:
+            path = binding.source_path
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        stream = os.fdopen(descriptor, "rb")
+        metadata = os.fstat(stream.fileno())
+        current = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or current.st_ino != metadata.st_ino
+            or current.st_dev != metadata.st_dev
+        ):
+            stream.close()
+            raise FileNotFoundError(path)
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         filename = _inline_filename(material.name, path.suffix)
-    except Exception:
-        if entered:
-            lease.__exit__(None, None, None)
-        raise
+    except (FileNotFoundError, OSError) as exc:
+        raise HTTPException(status_code=404, detail="Material source unavailable") from exc
 
-    return _LeasedFileResponse(
+    return _PinnedFileResponse(
         path,
-        release=lambda: lease.__exit__(None, None, None),
+        stream=stream,
         stat_result=metadata,
         media_type=media_type,
         filename=filename,

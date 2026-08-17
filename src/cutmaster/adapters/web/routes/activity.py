@@ -17,9 +17,9 @@ from cutmaster.adapters.web.event_stream import (
 )
 from cutmaster.adapters.web.presenters import (
     attempt_view,
-    execution_view,
     job_view,
 )
+from cutmaster.adapters.web.routes._execution import execution_with_log
 from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import StopAttemptCommand
 from cutmaster.application.jobs.views import AttemptView
@@ -77,7 +77,8 @@ def _activity_item(
     application: CutMasterApplication,
     attempt: AttemptView,
 ) -> dict[str, object]:
-    result = execution_view(
+    result = execution_with_log(
+        application,
         attempt,
         application.jobs.get_job_for_attempt(attempt.attempt_id),
     )

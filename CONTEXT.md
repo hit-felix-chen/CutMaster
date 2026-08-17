@@ -9,12 +9,14 @@ CutMaster turns long-form footage into a finished montage through a three-stage
 The backend implements the three-stage **Analyser → Planners → Renderer**
 workflow, reusable video and music Materials, name-based selection, Material
 Fingerprint verification, and single-video/single-music editing. A real
-`CutMasterApplication` now exposes seven Application service groups. Its Direct
-service owns raw-path and Material-Name resolution, calls all three stages
-through handle-only v2 contracts, publishes a versioned Direct Artifact
-Manifest, and is the shared execution boundary used by the CLI and
-Mashup-Benchmark. The earlier monolithic complete-workflow facade and raw-path
-stage DTOs have been removed.
+`CutMasterApplication` exposes seven Application service groups. CLI and
+Mashup-Benchmark complete executions now use shared local managed orchestration:
+they create the same Material, Edit Project, ASTER Run, Execution Attempt,
+Frozen Edit, and Render Variant history as Web and accept no custom output
+directory. The Direct service remains the internal synchronous stage boundary;
+it is no longer the authoritative complete-execution storage path for those
+adapters. The earlier monolithic complete-workflow facade and raw-path stage
+DTOs have been removed.
 
 The backend also implements SQLite-backed managed identity and history for
 **Edit Projects**, **Material References**, **ASTER Runs**, **Execution
@@ -28,8 +30,9 @@ managed Web slice are implemented over the same Application Layer. Projects,
 the combined Project Setup, Materials and Memory, Activity, Settings, source-
 media Range streams, and SPA packaging are active code. Web Material import
 preflights names and files, accepts an optional video subtitle, runs the real
-Analyser in a managed subprocess, publishes bounded thumbnail/waveform previews,
-and supports Retry, Resume, Stop, and guarded deletion. Start editing creates a
+Analyser in a managed subprocess, publishes bounded annotation-free video covers
+and bar-style music energy previews, and supports Retry, Resume, Stop, and
+guarded deletion. Start editing creates a
 durable ASTER Run; real Planners work commits its RenderPlan and Candidate
 Bundle, supports Retry, Run again, deletion and persisted usage, and resumes an
 Interrupted Attempt only from a validated complete A/S/T/E/R boundary or the
@@ -44,9 +47,11 @@ durable FIFO queue, concurrency capacity, per-owner serialization, heartbeat
 leases, cooperative cancellation, and orphan recovery. One global SSE stream
 projects durable events with `Last-Event-ID` replay and `resync_required` REST
 recovery. Provider presets/custom connections, first-run Setup, per-capability
-connection tests, atomic local overlay/`.env` writes, structured Activity
+connection tests, atomic `config.toml`/`.env` writes, structured Activity
 navigation with paginated recent work, and guarded **Data Root Migration** are
-also implemented. Still deferred are persistent application notifications, the
+also implemented. Material and ASTER Run detail expose each current Attempt's
+absolute managed Job Log path plus an on-demand viewer backed by the retained
+file. Still deferred are persistent application notifications, the richer
 Activity log drawer, Direct Bundle bulk cleanup/retention, generated OpenAPI
 TypeScript drift checks in CI, multi-user/cloud operation, and broader provider
 and media port injection.
@@ -91,8 +96,9 @@ _Avoid_: monolithic service, complete-workflow facade, Web server
 
 **Peer Adapter** *(CLI, FastAPI Web, and Benchmark implemented)*:
 One transport-specific caller of the Application Layer. CLI, FastAPI Web, and
-Mashup-Benchmark are peers: none invokes another adapter, and all map their own
-inputs and outputs to the same Application use cases.
+Mashup-Benchmark are peers and map their own inputs and outputs to the same
+managed Application use cases. CLI and Benchmark synchronously drive the local
+managed Job executors; Web schedules those executors through its supervisor.
 _Avoid_: CLI wrapper around HTTP, Benchmark wrapper around CLI, Application Layer
 
 **Material Runtime Handle** *(Implemented)*:
@@ -220,8 +226,37 @@ _Avoid_: Updated Material, stale cache, replacement
 **Material Analysis**:
 The work performed by the **Material Analyst** to produce or reuse Material
 Memory for one Material. Retrying unchanged inputs creates another Execution
-Attempt for the same Material Analysis rather than another Material.
+Attempt for the same Material Analysis rather than another Material. A Ready
+Material is never analysed again. A Failed Attempt may be retried and an
+Interrupted Attempt may be resumed, while at most one Material Analysis Attempt
+may be active for a Material at a time. Valid completed checkpoints may be
+reused by that recovery Attempt. During Analysis, the immutable source,
+lifecycle state, progress, and Job Log remain inspectable, but intermediate
+checkpoints and partial Material Memory are never product data. Material Memory
+and its derived previews become visible together only after complete successful
+publication. Replaying the same command resolves to its original Attempt, while
+a distinct duplicate command resolves to the one active Attempt rather than
+creating another.
 _Avoid_: Analyser, Material Memory, ASTER Run
+
+**Material Consumption**:
+Read-only use of one exact Ready Material by ASTER planning or rendering.
+Any number of consumers may use the same Material concurrently; consumption
+never changes its source or Material Memory and consumers never serialize one
+another merely because they share a Material. A consumer holds its shared
+consumption lease until its Execution Attempt reaches a terminal state. Material
+inspection is not consumption and never blocks deletion. Deletion is rejected
+immediately rather than waiting whenever the Material is referenced, has an
+active Material Analysis Attempt, or has an active consumer.
+_Avoid_: Material Analysis, Material inspection, Material replacement
+
+**Material Inspection**:
+User-facing browsing of Material identity, Memory, covers, waveform, or source
+media. Inspection never acquires a Material Consumption lease and never blocks
+planning, rendering, analysis, or deletion. An inspection that has already
+obtained a stable view may finish after deletion; a new inspection after the
+delete commits returns Not Found rather than waiting.
+_Avoid_: Material Consumption, Material Analysis, Material Reference
 
 **Material Reference** *(Implemented in managed backend state)*:
 A dependency held by an **Edit Project** or **ASTER Run** on one exact Material
@@ -274,7 +309,7 @@ _Avoid_: Managed Artifact Reference, ASTER Run, external output directory
 **Artifact Manifest** *(Implemented)*:
 The versioned logical index embedded in a successful Direct Workflow
 `result.json`. It maps stable dotted artifact keys to normalized POSIX file paths
-relative to that Direct Workflow Bundle, allowing CLI and Benchmark consumers
+relative to that Direct Workflow Bundle, allowing explicit Direct API consumers
 to locate outputs without reconstructing internal directory names. It never
 contains an absolute path, parent traversal, directory entry, Material Catalog
 path, or Managed Artifact Reference.
@@ -300,6 +335,9 @@ _Avoid_: editing the path in place, partial move, separate Material migration
 The type-specific collection of video or music **Material References** owned by
 an **Edit Project**. The first release permits one video and one music Material
 while preserving the collection boundary for future multi-source editing.
+Saving this set validates that each Material still exists, is Ready, has the
+expected type, and is not being deleted. It does not wait for or conflict with
+Material Consumers because adding a reference does not change the Material.
 _Avoid_: Material Library, single source path, Frozen Edit
 
 **ASTER Run** *(Managed Web planning lifecycle implemented)*:
@@ -332,8 +370,20 @@ The single local scheduler for managed Material Analysis, ASTER Run, and Render
 Variant Attempts. It claims the durable FIFO queue subject to configured
 capacity and per-owner serialization, launches isolated workers, records
 heartbeats, cooperatively stops work, and recovers orphaned jobs after process
-loss.
+loss. Shared Material Consumption never serializes otherwise eligible jobs;
+actual simultaneous execution remains bounded by supervisor capacity and each
+owner still has at most one active Attempt.
 _Avoid_: ASTER-only dispatcher, browser task runner, distributed queue
+
+**Job Log** *(Implemented for managed Execution Attempts)*:
+The append-only UTF-8 log file owned by one durable Job and therefore one
+Execution Attempt. Its absolute path is displayed in Material and ASTER Run
+detail. Opening the viewer reads only the latest 50 complete lines and then
+tails sanitized structured entries over an Attempt-scoped SSE connection;
+closing the viewer closes that connection. The retained file, rather than a
+worker process pipe, is the authoritative source so completed and restarted
+Attempts remain inspectable.
+_Avoid_: global event stream, browser-owned process output, Activity history
 
 **ASTER Stage Checkpoint** *(Implemented)*:
 A secret- and path-free durable receipt written only after a complete

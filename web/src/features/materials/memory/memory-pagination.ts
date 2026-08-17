@@ -3,6 +3,7 @@ import type { MaterialMemoryResponse, MaterialType } from '@/features/shared/api
 type DataRecord = Record<string, unknown>
 
 export const MEMORY_PAGE_SIZE = 100
+export const MUSIC_MEMORY_PAGE_SIZE = 500
 
 function record(value: unknown): DataRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

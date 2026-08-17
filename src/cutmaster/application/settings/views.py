@@ -41,7 +41,6 @@ class ProviderSettingsView:
 class SettingsView:
     values: Mapping[str, Any]
     base_path: Path
-    overlay_path: Path
     data_root: Path
     secrets: SecretConfigurationView
     connections: ProviderSettingsView

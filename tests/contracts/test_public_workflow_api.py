@@ -8,6 +8,10 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
+from cutmaster.contracts import ExecuteManagedWorkflowCommand
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src"
@@ -73,6 +77,26 @@ def test_console_script_uses_cli_adapter() -> None:
         project["project"]["scripts"]["cutmaster"]
         == "cutmaster.adapters.cli.main:main"
     )
+
+
+def test_managed_workflow_contract_has_no_caller_selected_output() -> None:
+    command = ExecuteManagedWorkflowCommand(
+        prompt="A story",
+        video_path=Path("source.mp4"),
+        audio_path=Path("score.mp3"),
+        project_name="Managed Project",
+    )
+
+    assert not hasattr(command, "output_dir")
+    assert not hasattr(command, "overwrite")
+    with pytest.raises(TypeError):
+        ExecuteManagedWorkflowCommand(  # type: ignore[call-arg]
+            prompt="A story",
+            video_path=Path("source.mp4"),
+            audio_path=Path("score.mp3"),
+            project_name="Managed Project",
+            output_dir=Path("external"),
+        )
 
 
 def test_removed_legacy_workflow_modules_are_not_importable() -> None:

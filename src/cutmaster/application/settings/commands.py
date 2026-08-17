@@ -15,7 +15,7 @@ from cutmaster.application.settings.providers import (
 @dataclass(frozen=True)
 class SaveSettingsCommand:
     command_id: str
-    overlay: Mapping[str, Any]
+    values: Mapping[str, Any]
 
 
 @dataclass(frozen=True)

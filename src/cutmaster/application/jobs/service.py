@@ -19,6 +19,7 @@ from cutmaster.application.jobs.commands import (
     StopAttemptCommand,
 )
 from cutmaster.application.jobs.views import (
+    AttemptLogPageView,
     AttemptView,
     EventBoundsView,
     EventPageView,
@@ -278,6 +279,31 @@ class JobsService:
         return job_view(self._store.get_job_for_attempt(attempt_id))
 
     @root_shared_operation
+    def attempt_log(self, attempt_id: AttemptId, *, tail: int = 50) -> AttemptLogPageView:
+        _require_attempt_id(attempt_id)
+        job = self.get_job_for_attempt(attempt_id)
+        return self._log_reader().tail(job.job_id, limit=tail)
+
+    @root_shared_operation
+    def attempt_log_after(
+        self,
+        attempt_id: AttemptId,
+        *,
+        cursor: int,
+        limit: int = 200,
+    ) -> AttemptLogPageView:
+        _require_attempt_id(attempt_id)
+        job = self.get_job_for_attempt(attempt_id)
+        return self._log_reader().after(job.job_id, cursor=cursor, limit=limit)
+
+    @root_shared_operation
+    def attempt_log_info(self, attempt_id: AttemptId) -> tuple[str, bool]:
+        _require_attempt_id(attempt_id)
+        job = self.get_job_for_attempt(attempt_id)
+        path, exists = self._log_reader().info(job.job_id)
+        return str(path), exists
+
+    @root_shared_operation
     def activity(
         self,
         *,
@@ -297,6 +323,11 @@ class JobsService:
                 offset=offset,
             )
         )
+
+    def _log_reader(self):
+        from cutmaster.infrastructure.observability.job_logs import JobLogReader
+
+        return JobLogReader(self._effective_configuration.data_root)
 
     @root_shared_operation
     def events(

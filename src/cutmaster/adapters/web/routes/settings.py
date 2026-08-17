@@ -42,7 +42,7 @@ def save_settings(
     application: ApplicationDependency,
     command_id: IdempotencyKey,
 ) -> dict[str, object]:
-    result = application.settings.save(SaveSettingsCommand(command_id, body.overlay))
+    result = application.settings.save(SaveSettingsCommand(command_id, body.values))
     return {
         "settings": settings_view(result.settings),
         "restart_required": result.restart_required,

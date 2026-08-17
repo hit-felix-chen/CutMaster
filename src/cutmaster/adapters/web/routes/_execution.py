@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from cutmaster.adapters.web.presenters import execution_view
 from cutmaster.application import CutMasterApplication
+from cutmaster.application.jobs import AttemptView, JobView
 from cutmaster.domain.ids import MaterialId, RenderVariantId, RunId
+
+
+def execution_with_log(
+    application: CutMasterApplication,
+    attempt: AttemptView,
+    job: JobView,
+) -> dict[str, object]:
+    result = execution_view(attempt, job)
+    path, exists = application.jobs.attempt_log_info(attempt.attempt_id)
+    result["log"] = {"path": path, "exists": exists}
+    return result
 
 
 def latest_run_execution(
@@ -22,7 +34,7 @@ def latest_run_execution(
         return None
     attempt = max(attempts, key=lambda item: item.sequence)
     job = application.jobs.get_job_for_attempt(attempt.attempt_id)
-    return execution_view(attempt, job)
+    return execution_with_log(application, attempt, job)
 
 
 def latest_material_execution(
@@ -40,7 +52,7 @@ def latest_material_execution(
         return None
     attempt = max(attempts, key=lambda item: item.sequence)
     job = application.jobs.get_job_for_attempt(attempt.attempt_id)
-    return execution_view(attempt, job)
+    return execution_with_log(application, attempt, job)
 
 
 def latest_render_execution(
@@ -58,10 +70,11 @@ def latest_render_execution(
         return None
     attempt = max(attempts, key=lambda item: item.sequence)
     job = application.jobs.get_job_for_attempt(attempt.attempt_id)
-    return execution_view(attempt, job)
+    return execution_with_log(application, attempt, job)
 
 
 __all__ = [
+    "execution_with_log",
     "latest_material_execution",
     "latest_render_execution",
     "latest_run_execution",

@@ -59,9 +59,11 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _handle(tmp_path: Path, material_type: MaterialType) -> MaterialRuntimeHandle:
     suffix = ".mp4" if material_type is MaterialType.VIDEO else ".wav"
-    source = (tmp_path / f"source{suffix}").resolve()
+    material_root = (tmp_path / "material").resolve()
+    material_root.mkdir()
+    source = material_root / f"source{suffix}"
     source.write_bytes(b"media")
-    memory = (tmp_path / "analysis").resolve()
+    memory = material_root / "analysis"
     memory.mkdir()
     return MaterialRuntimeHandle(
         material_id=MaterialId.new(),
@@ -86,8 +88,10 @@ class _FakeMaterialAnalyst:
         _video_title: str,
         _subtitle_path: Path | None,
         *,
+        source_fingerprint: str,
         material_directory: Path,
     ) -> SimpleNamespace:
+        assert source_fingerprint == "a" * 64
         paths = {
             "source_srt": material_directory / "source.srt",
             "processed_subtitle": material_directory / "dialogue_merged.srt",
@@ -126,13 +130,24 @@ class _FakeMaterialAnalyst:
     def analyse_music(self, audio_path: Path) -> dict[str, object]:
         type(self).music_builds += 1
         return {
-            "schema_version": "1.0",
-            "audio_path": str(audio_path.resolve()),
+            "schema_version": "2.0",
             "source_duration_sec": 120.0,
+            "tempo_bpm": 120.0,
             "beats_sec": [0.0, 1.0],
             "accents_sec": [0.0],
+            "energy_step_sec": 0.5,
             "energy_curve": [{"time_sec": 0.0, "energy": 0.5}],
-            "sections": [{"start_sec": 0.0, "end_sec": 120.0}],
+            "sections": [
+                {
+                    "section_id": "music_01",
+                    "start_sec": 0.0,
+                    "end_sec": 120.0,
+                    "role": "build",
+                    "mean_energy": 0.5,
+                    "energy_trend": "stable",
+                    "suggested_clip_duration_sec": [2.0, 4.0],
+                }
+            ],
         }
 
 
@@ -223,11 +238,33 @@ def test_music_stage_uses_handle_and_reuses_music_memory(
     analyser = Analyser(_config(tmp_path))
 
     first = analyser.analyse_music(request)
-    second = analyser.analyse_music(request)
+    relocated_root = (tmp_path / "relocated-material").resolve()
+    handle.source_path.parent.rename(relocated_root)
+    relocated = MaterialRuntimeHandle(
+        material_id=handle.material_id,
+        material_type=handle.material_type,
+        material_name=handle.material_name,
+        expected_fingerprint=handle.expected_fingerprint,
+        source_path=relocated_root / handle.source_path.name,
+        memory_root=relocated_root / handle.memory_root.name,
+    )
+    second = analyser.analyse_music(
+        AnalyseMusicRequest(
+            material=relocated,
+            options=MusicAnalysisOptions(),
+            workspace=AnalysisWorkspace(
+                (tmp_path / "relocated-workspace").resolve()
+            ),
+        )
+    )
 
     assert first.analysis_reused is False
     assert second.analysis_reused is True
     assert _FakeMaterialAnalyst.music_builds == 1
-    payload = json.loads(first.music.music_memory_path.read_text(encoding="utf-8"))
-    assert Path(payload["audio_path"]) == handle.source_path
-    assert (request.workspace.root / "music_analysis_result.json").is_file()
+    assert second.music.material is relocated
+    payload = json.loads(second.music.music_memory_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "2.0"
+    assert "audio_path" not in payload
+    assert (
+        tmp_path / "relocated-workspace" / "music_analysis_result.json"
+    ).is_file()

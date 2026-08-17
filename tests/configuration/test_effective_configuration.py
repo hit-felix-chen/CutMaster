@@ -6,7 +6,6 @@ import pytest
 
 from cutmaster.configuration.effective import load_effective_configuration
 
-
 BASE_CONFIG = """
 [llm]
 model = "test-llm"
@@ -33,7 +32,7 @@ def _write_base(directory: Path, name: str = "config.toml") -> Path:
     return path
 
 
-def test_effective_configuration_deep_merges_exact_sibling_overlay(
+def test_effective_configuration_uses_only_the_selected_config_file(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path)
@@ -53,15 +52,15 @@ width = 1280
     values = effective.to_dict()
 
     assert values["llm"]["model"] == "test-llm"
-    assert values["llm"]["max_tokens"] == 321
-    assert values["renderer"]["width"] == 1280
+    assert values["llm"]["max_tokens"] == 100
+    assert values["renderer"]["width"] == 1920
     assert values["renderer"]["height"] == 1080
     assert values["renderer"]["fps"] == 30
     assert values["renderer"]["encoder"] == "auto"
-    assert effective.sources.overlay_path == tmp_path / "config.local.toml"
+    assert effective.sources.base_path == base_path
 
 
-def test_effective_configuration_never_uses_another_base_overlay(
+def test_effective_configuration_uses_an_explicit_alternate_config_directly(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path, "eval.toml")
@@ -77,7 +76,7 @@ max_tokens = 999
     effective = load_effective_configuration(base_path)
 
     assert effective.to_dict()["llm"]["max_tokens"] == 100
-    assert effective.sources.overlay_path == tmp_path / "eval.local.toml"
+    assert effective.sources.base_path == base_path
 
 
 def test_effective_configuration_never_exposes_secret_values(tmp_path: Path) -> None:
@@ -93,12 +92,11 @@ def test_effective_configuration_never_exposes_secret_values(tmp_path: Path) -> 
 
 def test_effective_configuration_rejects_inline_api_keys(tmp_path: Path) -> None:
     base_path = _write_base(tmp_path)
-    (tmp_path / "config.local.toml").write_text(
-        """
-[llm]
-api_key = "secret-value"
-""".strip()
-        + "\n",
+    base_path.write_text(
+        base_path.read_text(encoding="utf-8").replace(
+            'api_key_env = "CUTMASTER_TEST_LLM_KEY"',
+            'api_key = "secret-value"',
+        ),
         encoding="utf-8",
     )
 
@@ -119,12 +117,11 @@ def test_effective_configuration_validates_complete_merged_values(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path)
-    (tmp_path / "config.local.toml").write_text(
-        """
-[renderer]
-original_volume = 0.5
-""".strip()
-        + "\n",
+    base_path.write_text(
+        base_path.read_text(encoding="utf-8").replace(
+            "fps = 30",
+            "fps = 30\noriginal_volume = 0.5",
+        ),
         encoding="utf-8",
     )
 
@@ -133,37 +130,44 @@ original_volume = 0.5
 
 
 @pytest.mark.parametrize(
-    ("overlay", "field_name"),
+    ("old", "new", "field_name"),
     [
-        ('[llm]\nmodel = 123\n', "llm.model"),
-        ('[llm]\nmax_tokens = "4000"\n', "llm.max_tokens"),
-        ('[analyser.asr]\ntimeout_sec = "600"\n', "analyser.asr.timeout_sec"),
-        ('[renderer]\nfps = true\n', "renderer.fps"),
-        ('[renderer]\nbgm_volume = nan\n', "renderer.bgm_volume"),
+        ('model = "test-llm"', "model = 123", "llm.model"),
+        ("max_tokens = 100", 'max_tokens = "4000"', "llm.max_tokens"),
+        (
+            'api_key_env = "CUTMASTER_TEST_ASR_KEY"',
+            'api_key_env = "CUTMASTER_TEST_ASR_KEY"\ntimeout_sec = "600"',
+            "analyser.asr.timeout_sec",
+        ),
+        ("fps = 30", "fps = true", "renderer.fps"),
+        ("fps = 30", "fps = 30\nbgm_volume = nan", "renderer.bgm_volume"),
     ],
 )
 def test_effective_configuration_rejects_coercible_or_non_finite_types(
     tmp_path: Path,
-    overlay: str,
+    old: str,
+    new: str,
     field_name: str,
 ) -> None:
     base_path = _write_base(tmp_path)
-    (tmp_path / "config.local.toml").write_text(overlay, encoding="utf-8")
+    base_path.write_text(
+        base_path.read_text(encoding="utf-8").replace(old, new),
+        encoding="utf-8",
+    )
 
     with pytest.raises(TypeError, match=field_name):
         load_effective_configuration(base_path)
 
 
-def test_effective_configuration_rejects_unknown_overlay_keys(
+def test_effective_configuration_rejects_unknown_config_keys(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path)
-    (tmp_path / "config.local.toml").write_text(
-        """
-[llm]
-max_toknes = 321
-""".strip()
-        + "\n",
+    base_path.write_text(
+        base_path.read_text(encoding="utf-8").replace(
+            "max_tokens = 100",
+            "max_tokens = 100\nmax_toknes = 321",
+        ),
         encoding="utf-8",
     )
 
@@ -171,7 +175,7 @@ max_toknes = 321
         load_effective_configuration(base_path)
 
 
-def test_effective_configuration_rejects_legacy_storage_overlay(
+def test_effective_configuration_ignores_legacy_local_overlay(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path)
@@ -184,20 +188,21 @@ material_library_dir = "another-library"
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="legacy-only"):
-        load_effective_configuration(base_path)
+    effective = load_effective_configuration(base_path)
+
+    assert effective.data_root == tmp_path / ".cutmaster"
+    assert "material_analysis" not in effective.to_dict()["analyser"]
 
 
 def test_effective_configuration_rejects_invalid_secret_reference(
     tmp_path: Path,
 ) -> None:
     base_path = _write_base(tmp_path)
-    (tmp_path / "config.local.toml").write_text(
-        """
-[llm]
-api_key_env = "invalid-name"
-""".strip()
-        + "\n",
+    base_path.write_text(
+        base_path.read_text(encoding="utf-8").replace(
+            'api_key_env = "CUTMASTER_TEST_LLM_KEY"',
+            'api_key_env = "invalid-name"',
+        ),
         encoding="utf-8",
     )
 
@@ -246,7 +251,7 @@ def test_data_root_rejects_an_existing_regular_file(tmp_path: Path) -> None:
 def test_data_root_defaults_beside_the_selected_base(tmp_path: Path) -> None:
     effective = load_effective_configuration(_write_base(tmp_path, "eval.toml"))
 
-    assert effective.sources.overlay_path == tmp_path / "eval.local.toml"
+    assert effective.sources.base_path == tmp_path / "eval.toml"
     assert effective.data_root == tmp_path / ".cutmaster"
     assert not effective.data_root.exists()
 

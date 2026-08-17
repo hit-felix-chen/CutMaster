@@ -8,11 +8,11 @@ import math
 import re
 import stat
 import tomllib
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
-
+from typing import Any
 
 _SECRET_KEYS = {"api_key"}
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -29,27 +29,6 @@ def _read_toml(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Config root must be a table: {path}")
     return value
-
-
-def _read_optional_toml(path: Path) -> dict[str, Any]:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return {}
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"Local configuration overlay must be a regular file: {path}")
-    return _read_toml(path)
-
-
-def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
-    merged = copy.deepcopy(base)
-    for key, value in overlay.items():
-        current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, Mapping):
-            merged[key] = _deep_merge(current, value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    return merged
 
 
 def _strip_secrets(value: Any) -> Any:
@@ -82,26 +61,15 @@ def _thaw(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def sibling_overlay_path(base_path: Path) -> Path:
-    """Return the one local overlay belonging to *base_path*."""
-
-    resolved = base_path.expanduser().resolve()
-    if resolved.suffix.lower() != ".toml":
-        raise ValueError("CutMaster configuration files must use the .toml suffix")
-    return resolved.with_name(f"{resolved.stem}.local{resolved.suffix}")
-
-
 @dataclass(frozen=True)
 class ConfigurationSources:
     base_path: Path
-    overlay_path: Path
     dotenv_path: Path
     data_root_pointer_path: Path
 
     def __post_init__(self) -> None:
         for field_name in (
             "base_path",
-            "overlay_path",
             "dotenv_path",
             "data_root_pointer_path",
         ):
@@ -231,20 +199,6 @@ def _reject_inline_secrets(
             _reject_inline_secrets(item, source, path)
 
 
-def _reject_legacy_storage_overlay(overlay: Mapping[str, Any], source: Path) -> None:
-    analyser = overlay.get("analyser", {})
-    if not isinstance(analyser, Mapping):
-        return
-    material_analysis = analyser.get("material_analysis", {})
-    if not isinstance(material_analysis, Mapping):
-        return
-    if "material_library_dir" in material_analysis:
-        raise ValueError(
-            "analyser.material_analysis.material_library_dir is legacy-only and "
-            f"cannot be set in the Application overlay: {source}"
-        )
-
-
 def _secret_reference(
     data: Mapping[str, Any],
     *section_names: str,
@@ -337,16 +291,13 @@ def _canonical_values(
 
 
 def load_effective_configuration(path: Path | str) -> EffectiveConfiguration:
-    """Merge a base and its sparse sibling overlay without resolving API keys."""
+    """Load one authoritative TOML configuration without resolving API keys."""
 
     base_path = Path(path).expanduser().resolve()
-    overlay_path = sibling_overlay_path(base_path)
-    base = _read_toml(base_path)
-    overlay = _read_optional_toml(overlay_path)
-    _reject_inline_secrets(base, base_path)
-    _reject_inline_secrets(overlay, overlay_path)
-    _reject_legacy_storage_overlay(overlay, overlay_path)
-    merged = _deep_merge(base, overlay)
+    if base_path.suffix.lower() != ".toml":
+        raise ValueError("CutMaster configuration files must use the .toml suffix")
+    merged = _read_toml(base_path)
+    _reject_inline_secrets(merged, base_path)
     references = SecretReferences(
         llm_api_key_env=_secret_reference(merged, "llm"),
         vlm_api_key_env=_secret_reference(merged, "vlm"),
@@ -357,7 +308,6 @@ def load_effective_configuration(path: Path | str) -> EffectiveConfiguration:
     pointer_path = base_directory / ".cutmaster-location"
     sources = ConfigurationSources(
         base_path=base_path,
-        overlay_path=overlay_path,
         dotenv_path=base_directory / ".env",
         data_root_pointer_path=pointer_path,
     )
@@ -374,5 +324,4 @@ __all__ = [
     "EffectiveConfiguration",
     "SecretReferences",
     "load_effective_configuration",
-    "sibling_overlay_path",
 ]

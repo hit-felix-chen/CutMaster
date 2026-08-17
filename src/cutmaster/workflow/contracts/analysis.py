@@ -8,12 +8,98 @@ from pathlib import Path
 from typing import Any
 
 from cutmaster.domain.ids import MaterialId
-from cutmaster.domain.materials import MaterialFingerprint, MaterialType
+from cutmaster.domain.materials import MaterialType
 from cutmaster.workflow.contracts.material import (
     AnalysedMusicRuntimeHandle,
     AnalysedVideoRuntimeHandle,
     MaterialRuntimeHandle,
 )
+
+
+ANALYSIS_RESULT_SCHEMA_VERSION = "3.0"
+_VIDEO_ANALYSIS_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "material_id",
+        "material_type",
+        "material_name",
+        "material_fingerprint",
+        "memory_schema_version",
+        "elapsed_sec",
+        "material_reused",
+        "analysis_reused",
+        "model_usage_summary",
+        "model_usage_cumulative_summary",
+    }
+)
+_MUSIC_ANALYSIS_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "material_id",
+        "material_type",
+        "material_name",
+        "material_fingerprint",
+        "memory_schema_version",
+        "elapsed_sec",
+        "material_reused",
+        "analysis_reused",
+    }
+)
+
+
+def _read_result_document(
+    path: Path,
+    label: str,
+    expected_fields: frozenset[str],
+) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must contain one JSON object")
+    if value.get("schema_version") != ANALYSIS_RESULT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported {label.lower()} schema: "
+            f"{value.get('schema_version')!r}"
+        )
+    if set(value) != expected_fields:
+        raise ValueError(f"{label} fields do not match schema 3.0")
+    return value
+
+
+def _require_result_material(
+    value: dict[str, Any],
+    material: MaterialRuntimeHandle,
+    expected_type: MaterialType,
+) -> None:
+    expected = {
+        "material_id": str(material.material_id),
+        "material_type": expected_type.value,
+        "material_name": material.material_name,
+        "material_fingerprint": str(material.expected_fingerprint),
+    }
+    if material.material_type is not expected_type or any(
+        value.get(key) != expected_value
+        for key, expected_value in expected.items()
+    ):
+        raise ValueError("Analysis result does not match its active Material")
+
+
+def _result_material_id(
+    path: Path,
+    expected_type: MaterialType,
+    expected_fields: frozenset[str],
+) -> MaterialId:
+    value = _read_result_document(
+        path,
+        f"{expected_type.value} analysis result",
+        expected_fields,
+    )
+    if value.get("material_type") != expected_type.value:
+        raise ValueError(
+            f"Analysis result is not for a {expected_type.value} Material"
+        )
+    return MaterialId.parse(value["material_id"])
 
 
 @dataclass(frozen=True)
@@ -100,27 +186,16 @@ class VideoAnalysisResult:
     def to_dict(self) -> dict[str, Any]:
         material = self.video.material
         return {
-            "schema_version": "2.0",
+            "schema_version": ANALYSIS_RESULT_SCHEMA_VERSION,
             "status": self.status,
             "material_id": str(material.material_id),
             "material_type": material.material_type.value,
             "material_name": material.material_name,
             "material_fingerprint": str(material.expected_fingerprint),
-            "source_video": str(material.source_path),
-            "material_directory": str(material.memory_root),
             "memory_schema_version": self.video.memory_schema_version,
-            "source_srt": str(self.source_srt_path),
-            "processed_subtitle": str(self.processed_subtitle_path),
-            "dialogues_json": str(self.video.dialogues_path),
-            "video_description": str(self.video.video_description_path),
-            "video_summary": str(self.video.video_summary_path),
-            "analysis_history": str(self.analysis_history_path),
             "elapsed_sec": self.elapsed_sec,
             "material_reused": self.material_reused,
             "analysis_reused": self.analysis_reused,
-            "model_usage": (
-                str(self.model_usage_path) if self.model_usage_path else None
-            ),
             "model_usage_summary": self.model_usage_summary,
             "model_usage_cumulative_summary": (
                 self.model_usage_cumulative_summary
@@ -136,39 +211,44 @@ class VideoAnalysisResult:
         return path
 
     @classmethod
-    def read(cls, path: Path) -> "VideoAnalysisResult":
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("schema_version") != "2.0":
-            raise ValueError(
-                f"Unsupported video analysis schema: {value.get('schema_version')!r}"
-            )
-        material = MaterialRuntimeHandle(
-            material_id=MaterialId.parse(value["material_id"]),
-            material_type=MaterialType(value["material_type"]),
-            material_name=value["material_name"],
-            expected_fingerprint=MaterialFingerprint(
-                value["material_fingerprint"]
-            ),
-            source_path=Path(value["source_video"]),
-            memory_root=Path(value["material_directory"]),
+    def material_id(cls, path: Path) -> MaterialId:
+        return _result_material_id(
+            path,
+            MaterialType.VIDEO,
+            _VIDEO_ANALYSIS_RESULT_FIELDS,
         )
+
+    @classmethod
+    def read(
+        cls,
+        path: Path,
+        material: MaterialRuntimeHandle,
+    ) -> "VideoAnalysisResult":
+        value = _read_result_document(
+            path,
+            "Video analysis result",
+            _VIDEO_ANALYSIS_RESULT_FIELDS,
+        )
+        _require_result_material(value, material, MaterialType.VIDEO)
+        memory_root = material.memory_root
+        model_usage_path = memory_root / "model_usage.json"
         return cls(
             status=value["status"],
             video=AnalysedVideoRuntimeHandle(
                 material=material,
                 memory_schema_version=value["memory_schema_version"],
-                video_description_path=Path(value["video_description"]),
-                video_summary_path=Path(value["video_summary"]),
-                dialogues_path=Path(value["dialogues_json"]),
+                video_description_path=memory_root / "video_description.json",
+                video_summary_path=memory_root / "video_summary.json",
+                dialogues_path=memory_root / "dialogues.json",
             ),
-            source_srt_path=Path(value["source_srt"]),
-            processed_subtitle_path=Path(value["processed_subtitle"]),
-            analysis_history_path=Path(value["analysis_history"]),
+            source_srt_path=memory_root / "source.srt",
+            processed_subtitle_path=memory_root / "dialogue_merged.srt",
+            analysis_history_path=memory_root / "analysis_history.json",
             elapsed_sec=float(value["elapsed_sec"]),
             material_reused=bool(value.get("material_reused")),
             analysis_reused=bool(value.get("analysis_reused")),
             model_usage_path=(
-                Path(value["model_usage"]) if value.get("model_usage") else None
+                model_usage_path if model_usage_path.is_file() else None
             ),
             model_usage_summary=dict(value.get("model_usage_summary") or {}),
             model_usage_cumulative_summary=dict(
@@ -194,16 +274,13 @@ class MusicAnalysisResult:
     def to_dict(self) -> dict[str, Any]:
         material = self.music.material
         return {
-            "schema_version": "2.0",
+            "schema_version": ANALYSIS_RESULT_SCHEMA_VERSION,
             "status": self.status,
             "material_id": str(material.material_id),
             "material_type": material.material_type.value,
             "material_name": material.material_name,
             "material_fingerprint": str(material.expected_fingerprint),
-            "source_audio": str(material.source_path),
-            "material_directory": str(material.memory_root),
             "memory_schema_version": self.music.memory_schema_version,
-            "music_memory": str(self.music.music_memory_path),
             "elapsed_sec": self.elapsed_sec,
             "material_reused": self.material_reused,
             "analysis_reused": self.analysis_reused,
@@ -218,28 +295,31 @@ class MusicAnalysisResult:
         return path
 
     @classmethod
-    def read(cls, path: Path) -> "MusicAnalysisResult":
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("schema_version") != "2.0":
-            raise ValueError(
-                f"Unsupported music analysis schema: {value.get('schema_version')!r}"
-            )
-        material = MaterialRuntimeHandle(
-            material_id=MaterialId.parse(value["material_id"]),
-            material_type=MaterialType(value["material_type"]),
-            material_name=value["material_name"],
-            expected_fingerprint=MaterialFingerprint(
-                value["material_fingerprint"]
-            ),
-            source_path=Path(value["source_audio"]),
-            memory_root=Path(value["material_directory"]),
+    def material_id(cls, path: Path) -> MaterialId:
+        return _result_material_id(
+            path,
+            MaterialType.MUSIC,
+            _MUSIC_ANALYSIS_RESULT_FIELDS,
         )
+
+    @classmethod
+    def read(
+        cls,
+        path: Path,
+        material: MaterialRuntimeHandle,
+    ) -> "MusicAnalysisResult":
+        value = _read_result_document(
+            path,
+            "Music analysis result",
+            _MUSIC_ANALYSIS_RESULT_FIELDS,
+        )
+        _require_result_material(value, material, MaterialType.MUSIC)
         return cls(
             status=value["status"],
             music=AnalysedMusicRuntimeHandle(
                 material=material,
                 memory_schema_version=value["memory_schema_version"],
-                music_memory_path=Path(value["music_memory"]),
+                music_memory_path=material.memory_root / "music_memory.json",
             ),
             elapsed_sec=float(value["elapsed_sec"]),
             material_reused=bool(value.get("material_reused")),
@@ -248,6 +328,7 @@ class MusicAnalysisResult:
 
 
 __all__ = [
+    "ANALYSIS_RESULT_SCHEMA_VERSION",
     "AnalyseMusicRequest",
     "AnalyseVideoRequest",
     "AnalysisWorkspace",

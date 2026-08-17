@@ -10,20 +10,12 @@
 # max_concurrency: LLM 请求的最大并发数，供台词、编排、检索和复核阶段共用。
 # *_price_yuan_per_million_tokens: 未缓存输入、缓存命中输入、输出的计费单价，单位均为元/百万 token；请在供应商调价或账号折扣变化后同步更新。
 [llm]
-model = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-input_price_yuan_per_million_tokens = 1.0
-cached_input_price_yuan_per_million_tokens = 0.02
-output_price_yuan_per_million_tokens = 2.0
-
-# 省事方案：让 LLM 也走 DashScope。启用时注释上面的 DeepSeek
-# model = "qwen3.7-max"
-# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-# api_key_env = "DASHSCOPE_API_KEY"
-# input_price_yuan_per_million_tokens = 6.0
-# cached_input_price_yuan_per_million_tokens = 1.2
-# output_price_yuan_per_million_tokens = 18.0
+model = "qwen3.7-max"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+input_price_yuan_per_million_tokens = 6.0
+cached_input_price_yuan_per_million_tokens = 1.2
+output_price_yuan_per_million_tokens = 18.0
 
 enable_thinking = true
 temperature = 0.1

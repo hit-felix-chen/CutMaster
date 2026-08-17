@@ -50,6 +50,27 @@ class JobSubmissionView:
 
 
 @dataclass(frozen=True)
+class AttemptLogEntryView:
+    cursor: int
+    timestamp: str | None
+    level: str
+    component: str | None
+    event: str | None
+    fields: str
+    message: str
+
+
+@dataclass(frozen=True)
+class AttemptLogPageView:
+    path: str
+    exists: bool
+    entries: tuple[AttemptLogEntryView, ...]
+    start_cursor: int
+    end_cursor: int
+    has_more_before: bool
+
+
+@dataclass(frozen=True)
 class EventView:
     event_id: int
     event_type: str
@@ -151,6 +172,8 @@ def job_view(value: Mapping[str, Any]) -> JobView:
 
 
 __all__ = [
+    "AttemptLogEntryView",
+    "AttemptLogPageView",
     "AttemptView",
     "EventBoundsView",
     "EventPageView",

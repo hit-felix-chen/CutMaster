@@ -155,12 +155,19 @@ class RunsService:
         if not isinstance(command.project_id, ProjectId):
             raise TypeError("project_id must be a ProjectId")
         configuration = self._effective_configuration.to_dict()
+        planning_options = {
+            "target_shot_length_sec": float(command.target_shot_length_sec),
+            "prompt_type": command.prompt_type,
+            "video_title": command.video_title,
+            "max_clip_duration_sec": command.max_clip_duration_sec,
+        }
         replay = self._store.replay_idempotent(
             command.command_id,
             "runs.create",
             {
                 "project_id": str(command.project_id),
                 "configuration": configuration,
+                "planning_options": planning_options,
             },
         )
         if replay is not None:
@@ -182,6 +189,7 @@ class RunsService:
                 command.command_id,
                 command.project_id,
                 configuration,
+                planning_options,
                 validated_video_material_id=validated.video_id,
                 validated_music_material_id=validated.music_id,
                 music_duration_sec=validated.music_duration_sec,
@@ -521,13 +529,18 @@ class RunsService:
         run: RunView,
         snapshot: _ReadyRunSnapshot,
     ) -> RunCheckpointIdentity:
+        options = run.planning_options
         return RunCheckpointIdentity.create(
             run,
             snapshot.video_binding,
             snapshot.music_binding,
-            target_shot_length_sec=4.0,
-            prompt_type="event",
-            max_clip_duration_sec=None,
+            target_shot_length_sec=float(options.get("target_shot_length_sec", 4.0)),
+            prompt_type=str(options.get("prompt_type") or "event"),
+            max_clip_duration_sec=(
+                None
+                if options.get("max_clip_duration_sec") is None
+                else float(options["max_clip_duration_sec"])
+            ),
         )
 
     @root_shared_operation
@@ -556,7 +569,9 @@ class RunsService:
         music_id = music_ids[0]
         with ExitStack() as leases:
             bindings = {
-                material_id: leases.enter_context(self._materials.lease(material_id))
+                material_id: leases.enter_context(
+                    self._materials.consume_lease(material_id)
+                )
                 for material_id in sorted((video_id, music_id), key=str)
             }
             for material_id, expected_type in (

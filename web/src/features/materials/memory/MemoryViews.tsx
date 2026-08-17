@@ -114,6 +114,14 @@ function timelineTicks(duration: number) {
   return ticks
 }
 
+function musicTimelineTicks(duration: number) {
+  if (duration <= 0) return [0]
+  const ticks = [0]
+  for (let value = 60; value < duration; value += 60) ticks.push(value)
+  ticks.push(duration)
+  return ticks
+}
+
 function positionedTimelineSegments(segments: DataRecord[], duration: number) {
   return segments
     .map((segment, sourceIndex) => {
@@ -901,6 +909,7 @@ export function TechnicalMemoryView({ payload }: { payload: DataRecord }) {
   )
 }
 
+/* eslint-disable jsx-a11y/no-noninteractive-tabindex -- The horizontal timeline needs a keyboard scroll target. */
 export function MusicStructureView({
   materialId,
   payload,
@@ -909,13 +918,32 @@ export function MusicStructureView({
   payload: DataRecord
 }) {
   const { t, i18n } = useTranslation('common')
-  const duration = numberValue(payload.source_duration_sec) ?? 1
+  const sourceDuration = numberValue(payload.source_duration_sec) ?? 0
+  const duration = sourceDuration > 0 ? sourceDuration : 0
+  const coordinateDuration = duration || 1
   const sections = recordsPage(payload.sections)
   const energy = recordsPage(payload.energy_curve)
   const beats = numericItems(payload.beats_sec)
+    .filter((beat) => beat >= 0 && beat <= duration)
+    .sort((left, right) => left - right)
   const accents = numericItems(payload.accents_sec)
+    .filter((accent) => accent >= 0 && accent <= duration)
+    .sort((left, right) => left - right)
+  const ticks = musicTimelineTicks(duration)
+  const previousTick = ticks.at(-2) ?? 0
+  const staggerEndTick =
+    ticks.length > 2 && (duration - previousTick) / Math.min(duration, 600) < 1 / 20
+  const isScrollable = duration > 600
+  const canvasWidth = isScrollable ? `${(duration / 600) * 100}%` : '100%'
   const [playhead, setPlayhead] = useState(0)
+  const [activeBeatIndex, setActiveBeatIndex] = useState(0)
+  const [activeAccentIndex, setActiveAccentIndex] = useState(0)
   const player = useRef<HTMLAudioElement>(null)
+  const labelBaseId = useId()
+  const sectionsLabelId = `${labelBaseId}-sections`
+  const beatsLabelId = `${labelBaseId}-beats`
+  const accentsLabelId = `${labelBaseId}-accents`
+  const axisLabelId = `${labelBaseId}-axis`
   const seek = (time: number) => {
     const bounded = Math.max(0, Math.min(duration, time))
     if (player.current) player.current.currentTime = bounded
@@ -931,7 +959,9 @@ export function MusicStructureView({
         controls
         preload="metadata"
         src={`/api/materials/${encodeURIComponent(materialId)}/source`}
-        onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}
+        onTimeUpdate={(event) =>
+          setPlayhead(Math.max(0, Math.min(duration, event.currentTarget.currentTime)))
+        }
       />
       <div className="music-metrics">
         <article>
@@ -950,90 +980,201 @@ export function MusicStructureView({
           <strong>{pageTotal(payload.beats_sec)}</strong>
         </article>
       </div>
-      <section className="music-timeline" aria-label={t('materials.musicTimeline')}>
+      <section
+        className={`music-timeline${isScrollable ? ' music-timeline--scrollable' : ''}`}
+        aria-label={t('materials.musicTimeline')}
+      >
         <header>
           <h3>{t('materials.musicTimeline')}</h3>
           <time>{clock(playhead)}</time>
         </header>
-        <div className="music-timeline__canvas">
-          <i
-            className="music-timeline__playhead"
-            style={{ left: `${(playhead / duration) * 100}%` }}
-            aria-hidden="true"
-          />
-          <div className="music-timeline__row music-timeline__row--sections">
-            <span>{t('materials.sections')}</span>
-            <div>
-              {sections.map((section, index) => {
-                const start = numberValue(section.start_sec) ?? 0
-                const end = numberValue(section.end_sec) ?? start
-                return (
-                  <button
-                    type="button"
-                    key={text(section.section_id) || index}
-                    style={{
-                      left: `${(start / duration) * 100}%`,
-                      width: `${Math.max(0.4, ((end - start) / duration) * 100)}%`,
-                    }}
-                    onClick={() => seek(start)}
-                    aria-label={t('materials.seekSection', {
-                      section: text(section.role) || text(section.section_id),
-                      time: clock(start),
-                    })}
+        <div className="music-timeline__grid">
+          <div className="music-timeline__labels">
+            <div id={sectionsLabelId} data-testid="music-timeline-label">
+              <span>{t('materials.sections')}</span>
+            </div>
+            <div id={beatsLabelId} data-testid="music-timeline-label">
+              <span>{t('materials.beats')}</span>
+              <small>
+                {beats.length} / {pageTotal(payload.beats_sec)}
+              </small>
+            </div>
+            <div id={accentsLabelId} data-testid="music-timeline-label">
+              <span>{t('materials.accents')}</span>
+              <small>
+                {accents.length} / {pageTotal(payload.accents_sec)}
+              </small>
+            </div>
+            <div id={axisLabelId} data-testid="music-timeline-label">
+              <span>{t('materials.timeline')}</span>
+            </div>
+          </div>
+          <div
+            className="music-timeline__scroll"
+            role="region"
+            aria-label={t('materials.musicTimelineViewport')}
+            tabIndex={0}
+          >
+            <div className="music-timeline__canvas" style={{ width: canvasWidth }}>
+              <i
+                className="music-timeline__playhead"
+                style={{ left: `${(playhead / coordinateDuration) * 100}%` }}
+                aria-hidden="true"
+              />
+              <div
+                className="music-timeline__row music-timeline__row--sections"
+                role="group"
+                aria-labelledby={sectionsLabelId}
+              >
+                <div>
+                  {sections.map((section, index) => {
+                    const rawStart = numberValue(section.start_sec) ?? 0
+                    const rawEnd = numberValue(section.end_sec) ?? rawStart
+                    const start = Math.max(0, Math.min(duration, rawStart))
+                    const end = Math.max(start, Math.min(duration, rawEnd))
+                    return (
+                      <button
+                        type="button"
+                        key={text(section.section_id) || index}
+                        style={{
+                          left: `${(start / coordinateDuration) * 100}%`,
+                          width: `${Math.max(
+                            0.4,
+                            ((end - start) / coordinateDuration) * 100,
+                          )}%`,
+                        }}
+                        onClick={() => seek(start)}
+                        aria-label={t('materials.seekSection', {
+                          section: text(section.role) || text(section.section_id),
+                          time: clock(start),
+                        })}
+                      >
+                        {text(section.role) || text(section.section_id)}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+              <div
+                className="music-timeline__row music-timeline__row--beats"
+                role="group"
+                aria-labelledby={beatsLabelId}
+              >
+                <div>
+                  {beats.map((beat, index) => {
+                    const position = Math.max(0, Math.min(duration, beat))
+                    return (
+                      <button
+                        type="button"
+                        key={`${beat}-${index}`}
+                        tabIndex={index === activeBeatIndex ? 0 : -1}
+                        style={{
+                          left: `${(position / coordinateDuration) * 100}%`,
+                        }}
+                        onClick={() => {
+                          setActiveBeatIndex(index)
+                          seek(beat)
+                        }}
+                        onKeyDown={(event) => {
+                          let nextIndex: number | null = null
+                          if (event.key === 'ArrowRight') {
+                            nextIndex = Math.min(index + 1, beats.length - 1)
+                          } else if (event.key === 'ArrowLeft') {
+                            nextIndex = Math.max(index - 1, 0)
+                          } else if (event.key === 'Home') {
+                            nextIndex = 0
+                          } else if (event.key === 'End') {
+                            nextIndex = beats.length - 1
+                          }
+                          if (nextIndex === null || nextIndex < 0) return
+                          event.preventDefault()
+                          setActiveBeatIndex(nextIndex)
+                          seek(beats[nextIndex])
+                          event.currentTarget.parentElement
+                            ?.querySelectorAll<HTMLButtonElement>('button')
+                            .item(nextIndex)
+                            .focus()
+                        }}
+                        aria-label={t('materials.seekBeat', { time: clock(beat) })}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+              <div
+                className="music-timeline__row music-timeline__row--accents"
+                role="group"
+                aria-labelledby={accentsLabelId}
+              >
+                <div>
+                  {accents.map((accent, index) => {
+                    const position = Math.max(0, Math.min(duration, accent))
+                    return (
+                      <button
+                        type="button"
+                        key={`${accent}-${index}`}
+                        tabIndex={index === activeAccentIndex ? 0 : -1}
+                        style={{
+                          left: `${(position / coordinateDuration) * 100}%`,
+                        }}
+                        onClick={() => {
+                          setActiveAccentIndex(index)
+                          seek(accent)
+                        }}
+                        onKeyDown={(event) => {
+                          let nextIndex: number | null = null
+                          if (event.key === 'ArrowRight') {
+                            nextIndex = Math.min(index + 1, accents.length - 1)
+                          } else if (event.key === 'ArrowLeft') {
+                            nextIndex = Math.max(index - 1, 0)
+                          } else if (event.key === 'Home') {
+                            nextIndex = 0
+                          } else if (event.key === 'End') {
+                            nextIndex = accents.length - 1
+                          }
+                          if (nextIndex === null || nextIndex < 0) return
+                          event.preventDefault()
+                          setActiveAccentIndex(nextIndex)
+                          seek(accents[nextIndex])
+                          event.currentTarget.parentElement
+                            ?.querySelectorAll<HTMLButtonElement>('button')
+                            .item(nextIndex)
+                            .focus()
+                        }}
+                        aria-label={t('materials.seekAccent', {
+                          time: clock(accent),
+                        })}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+              <div
+                className="music-timeline__axis"
+                role="group"
+                aria-labelledby={axisLabelId}
+              >
+                {ticks.map((tick, index) => (
+                  <time
+                    key={`${tick}-${index}`}
+                    className={
+                      index === 0
+                        ? 'music-timeline__tick music-timeline__tick--start'
+                        : index === ticks.length - 1
+                          ? `music-timeline__tick music-timeline__tick--end${
+                              staggerEndTick ? ' music-timeline__tick--staggered' : ''
+                            }`
+                          : 'music-timeline__tick'
+                    }
+                    style={{ left: `${(tick / coordinateDuration) * 100}%` }}
                   >
-                    {text(section.role) || text(section.section_id)}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-          <div className="music-timeline__row music-timeline__row--beats">
-            <span>{t('materials.beats')}</span>
-            <div>
-              {beats.map((beat, index) => (
-                <button
-                  type="button"
-                  key={`${beat}-${index}`}
-                  style={{ left: `${(beat / duration) * 100}%` }}
-                  onClick={() => seek(beat)}
-                  aria-label={t('materials.seekBeat', { time: clock(beat) })}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="music-timeline__row music-timeline__row--accents">
-            <span>{t('materials.accents')}</span>
-            <div>
-              {accents.map((accent, index) => (
-                <button
-                  type="button"
-                  key={`${accent}-${index}`}
-                  style={{ left: `${(accent / duration) * 100}%` }}
-                  onClick={() => seek(accent)}
-                  aria-label={t('materials.seekAccent', { time: clock(accent) })}
-                />
-              ))}
+                    {timelineClock(tick)}
+                  </time>
+                ))}
+              </div>
             </div>
           </div>
         </div>
-        <footer>
-          <span>00:00</span>
-          <span>
-            {t('materials.loadedLayerCount', {
-              loaded: beats.length,
-              total: pageTotal(payload.beats_sec),
-              layer: t('materials.beats'),
-            })}
-          </span>
-          <span>
-            {t('materials.loadedLayerCount', {
-              loaded: accents.length,
-              total: pageTotal(payload.accents_sec),
-              layer: t('materials.accents'),
-            })}
-          </span>
-          <span>{clock(duration)}</span>
-        </footer>
       </section>
       <section className="energy-panel">
         <header>
@@ -1104,6 +1245,7 @@ export function MusicStructureView({
     </div>
   )
 }
+/* eslint-enable jsx-a11y/no-noninteractive-tabindex */
 
 export function MemoryTabView({
   type,

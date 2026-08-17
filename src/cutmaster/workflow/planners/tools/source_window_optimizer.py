@@ -44,6 +44,7 @@ def _merge_intervals(
 
 def _detect_used_segment_cuts(
     source_video: Path,
+    segment_cache_directory: Path,
     items: list[dict[str, Any]],
     video_description: dict[str, Any],
     detection_config: ShotDetectionConfig,
@@ -57,7 +58,11 @@ def _detect_used_segment_cuts(
     if frame_rate <= 0.0:
         raise ValueError("Cached video description has an invalid source frame rate")
 
-    media = SegmentMediaReader(source_video, video_description)
+    media = SegmentMediaReader(
+        source_video,
+        segment_cache_directory,
+        video_description,
+    )
     requested_by_segment: dict[
         str,
         tuple[dict[str, Any], Path, list[tuple[float, float]]],
@@ -374,6 +379,7 @@ def _optimize_item(
 
 def optimize_script_source_windows(
     source_video: Path,
+    segment_cache_directory: Path,
     items: list[dict[str, Any]],
     beat_times: list[float],
     video_description: dict[str, Any],
@@ -387,6 +393,7 @@ def optimize_script_source_windows(
 
     source_cuts, frame_rate, source_duration_sec = _detect_used_segment_cuts(
         source_video,
+        segment_cache_directory,
         items,
         video_description,
         detection_config,

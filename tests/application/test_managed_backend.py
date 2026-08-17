@@ -52,6 +52,7 @@ from cutmaster.infrastructure.persistence.sqlite import (
 )
 from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialCatalog,
+    MaterialConsumedError,
     MaterialNotFoundError,
     MaterialReferencedError,
 )
@@ -128,19 +129,46 @@ def create_ready_project(
         with materials.lease(material_id) as binding:
             if binding.material.material_type.value == "music":
                 (binding.memory_root / "music_memory.json").write_text(
-                    json.dumps({"source_duration_sec": 120.0}),
+                    json.dumps(
+                        {
+                            "schema_version": "2.0",
+                            "source_duration_sec": 120.0,
+                            "tempo_bpm": 120.0,
+                            "beats_sec": [],
+                            "accents_sec": [],
+                            "energy_step_sec": 0.5,
+                            "energy_curve": [],
+                            "sections": [],
+                        }
+                    ),
                     encoding="utf-8",
                 )
             staged = source_root / f"{material_id}-analysis-result.json"
             staged.write_text(
                 json.dumps(
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "status": "success",
                         "material_id": str(binding.material.material_id),
                         "material_type": binding.material.material_type.value,
                         "material_name": binding.material.name,
                         "material_fingerprint": str(binding.material.fingerprint),
+                        "memory_schema_version": (
+                            "3.0"
+                            if binding.material.material_type.value == "video"
+                            else "2.0"
+                        ),
+                        "elapsed_sec": 0.0,
+                        "material_reused": False,
+                        "analysis_reused": False,
+                        **(
+                            {
+                                "model_usage_summary": {},
+                                "model_usage_cumulative_summary": {},
+                            }
+                            if binding.material.material_type.value == "video"
+                            else {}
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -163,6 +191,39 @@ def create_ready_project(
         )
     )
     return projects, project, video, music
+
+
+def publish_ready_material(
+    materials: MaterialsService,
+    material_id: MaterialId,
+    directory: Path,
+) -> None:
+    with materials.lease(material_id) as binding:
+        if binding.material.material_type.value == "music":
+            (binding.memory_root / "music_memory.json").write_text(
+                json.dumps({"schema_version": "2.0", "source_duration_sec": 120.0}),
+                encoding="utf-8",
+            )
+        payload = {
+            "schema_version": "3.0",
+            "status": "success",
+            "material_id": str(binding.material.material_id),
+            "material_type": binding.material.material_type.value,
+            "material_name": binding.material.name,
+            "material_fingerprint": str(binding.material.fingerprint),
+            "memory_schema_version": (
+                "3.0" if binding.material.material_type.value == "video" else "2.0"
+            ),
+            "elapsed_sec": 0.0,
+            "material_reused": False,
+            "analysis_reused": False,
+        }
+        if binding.material.material_type.value == "video":
+            payload["model_usage_summary"] = {}
+            payload["model_usage_cumulative_summary"] = {}
+        staged = directory / f"{binding.material.material_id}-ready.json"
+        staged.write_text(json.dumps(payload), encoding="utf-8")
+        materials.publish_analysis_result(binding, staged)
 
 
 def test_project_material_assignment_requires_real_type_correct_materials(
@@ -202,6 +263,16 @@ def test_project_material_assignment_requires_real_type_correct_materials(
                 (),
             )
         )
+    with pytest.raises(ManagedStateConflict) as not_ready:
+        projects.set_materials(
+            SetProjectMaterialsCommand(
+                command_id(),
+                project.project_id,
+                (),
+                (music.material_id,),
+            )
+        )
+    assert not_ready.value.code == "project_material_not_ready"
     assert projects.get(project.project_id).video_material_ids == ()
 
 
@@ -213,6 +284,11 @@ def test_application_composition_never_skips_project_material_validation(
     source = managed_configuration.data_root.parent / "composed.mp3"
     source.write_bytes(b"music")
     music = app.materials.add(source, "music", "Composed Music")
+    publish_ready_material(
+        app.materials,
+        music.material_id,
+        managed_configuration.data_root.parent,
+    )
 
     with pytest.raises(ValueError, match="music, expected video"):
         app.projects.set_materials(
@@ -262,6 +338,11 @@ def test_material_reference_commit_and_delete_are_serialized(
     source = managed_configuration.data_root.parent / "race.mp4"
     source.write_bytes(b"video")
     video = materials.add(source, "video", "Race Video")
+    publish_ready_material(
+        materials,
+        video.material_id,
+        managed_configuration.data_root.parent,
+    )
     assignment_errors: list[BaseException] = []
     deletion_errors: list[BaseException] = []
 
@@ -289,8 +370,10 @@ def test_material_reference_commit_and_delete_are_serialized(
     assert entered_store.wait(timeout=5)
     deletion = Thread(target=delete)
     deletion.start()
-    deletion.join(timeout=0.1)
-    assert deletion.is_alive(), "delete bypassed the active Project Material lease"
+    deletion.join(timeout=1)
+    assert not deletion.is_alive(), "delete waited for an active shared consumer"
+    assert len(deletion_errors) == 1
+    assert isinstance(deletion_errors[0], MaterialConsumedError)
 
     release_store.set()
     assignment.join(timeout=5)
@@ -299,8 +382,6 @@ def test_material_reference_commit_and_delete_are_serialized(
     assert not assignment.is_alive()
     assert not deletion.is_alive()
     assert assignment_errors == []
-    assert len(deletion_errors) == 1
-    assert isinstance(deletion_errors[0], MaterialReferencedError)
     assert projects.get(project.project_id).video_material_ids == (video.material_id,)
     assert materials.get(video.material_id) is not None
 
@@ -320,15 +401,15 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
     assert projects.list() == (first,)
     with pytest.raises(IdempotencyConflict):
         projects.create(CreateProjectCommand(create_id, "Different"))
-    assert store.schema_version == 3
+    assert store.schema_version == 4
     assert store.integrity_check() == "ok"
     with sqlite3.connect(store.database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         connection.execute("PRAGMA foreign_keys = ON")
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "run_00000000-0000-4000-8000-000000000001",
                     "project_00000000-0000-4000-8000-000000000099",
@@ -340,6 +421,7 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
                     None,
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
+                    '{"target_shot_length_sec":4.0,"prompt_type":"event"}',
                 ),
             )
 
@@ -360,7 +442,7 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
 
     store = SQLiteApplicationStore(data_root)
 
-    assert store.schema_version == 3
+    assert store.schema_version == 4
     with sqlite3.connect(database_path) as connection:
         columns = {
             row[1]: row for row in connection.execute("PRAGMA table_info(attempts)")
@@ -374,6 +456,40 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
             ("run_checkpoints",),
         ).fetchone()
         assert checkpoint_table == ("run_checkpoints",)
+        run_columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info(runs)")
+        }
+        assert run_columns["planning_options_json"][3] == 1
+
+
+def test_run_snapshots_adapter_planning_options_separately_from_configuration(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    store = SQLiteApplicationStore(managed_configuration.data_root)
+    _projects, project, _video, _music = create_ready_project(
+        managed_configuration,
+        store,
+    )
+    runs = RunsService(managed_configuration, store)
+
+    submission = runs.create(
+        CreateRunCommand(
+            command_id(),
+            project.project_id,
+            target_shot_length_sec=2.5,
+            prompt_type="narrative",
+            video_title="Feature",
+            max_clip_duration_sec=7.0,
+        )
+    )
+
+    assert dict(submission.run.planning_options) == {
+        "target_shot_length_sec": 2.5,
+        "prompt_type": "narrative",
+        "video_title": "Feature",
+        "max_clip_duration_sec": 7.0,
+    }
+    assert "managed_request" not in submission.run.configuration["planners"]
 
 
 def test_attempt_usage_is_strict_private_idempotent_and_aggregated_per_retry(

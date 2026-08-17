@@ -39,7 +39,7 @@ ASTER   = Planners team
 M + ASTER = MASTER
 ```
 
-`CutMasterApplication.direct` 是完整工作流入口；`Analyser`、`Planners` 和 `Renderer` 也可以通过 Application Layer 独立调用。`ASTERTeam` 是五个剪辑智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
+CLI 与 Benchmark 的完整工作流通过共享本地托管入口执行；`CutMasterApplication.direct` 保留为内部同步阶段协作者和显式 Python 兼容接口。`ASTERTeam` 是五个剪辑智能体的唯一编排器。智能体之间不直接互相调用，所有前向协作与反馈修复都由团队编排器管理。
 
 ## 架构
 
@@ -213,7 +213,7 @@ DASHSCOPE_API_KEY=your_dashscope_api_key
 HF_TOKEN=
 ```
 
-如果更希望配置简单，可以让 LLM、VLM 和 ASR 全部使用 DashScope：在 `config.toml` 的 `[llm]` 中注释默认的 DeepSeek `model`、`base_url` 和 `api_key_env`，再解除紧随其后的 `qwen3.7-max` 三行备选配置。此时 `.env` 只需填写：
+默认配置让 LLM、VLM 和 ASR 全部使用 DashScope，因此 `.env` 只需填写：
 
 ```dotenv
 DASHSCOPE_API_KEY=your_dashscope_api_key
@@ -237,7 +237,8 @@ uv run cutmaster serve --config config.toml
 提供 Projects、Material Library、Video/Music Memory Explorer、Activity 和
 Settings。素材可以通过 Web 预检、导入（视频可携带可选 SRT）并排入真实
 Analyser；失败或中断后可 Retry/Resume，活动工作可 Stop，删除受引用与运行
-状态保护。视频缩略图与音乐波形是有界预览，不会把完整源媒体嵌入列表响应。
+状态保护。独立生成且无标注的视频 JPEG 封面与柱状音乐能量预览都是有界
+资源，不会读取 Shot 帧缓存，也不会把完整源媒体嵌入列表响应。
 
 项目内部使用 **Project Setup / Runs / Outputs** 三个标签。保存素材、剪辑
 意图与目标时长后，**Start editing** 创建不可变 ASTER Run，并由本地子进程
@@ -256,7 +257,7 @@ Variant、播放、Range 下载、Finder、完整性验证、Render again 和安
 必要时触发 `resync_required` 后的 REST 重同步。
 
 Settings/首次 Setup 支持 Provider 预设或自定义 OpenAI-compatible 连接、分能力
-连接测试、原子 `.env`/本地 overlay 写入和受保护的 Data Root Migration。当前
+连接测试、原子 `.env`/`config.toml` 写入和受保护的 Data Root Migration。当前
 仍有意保留为后续工作的范围包括持久化应用内通知、Activity 日志抽屉、Direct
 Bundle 批量清理/保留策略、OpenAPI 生成的 TypeScript 漂移 CI、多用户/云部署，
 以及更完整的 provider/media port 注入。
@@ -268,13 +269,17 @@ uv run cutmaster run \
   --video /path/to/source.mp4 \
   --audio /path/to/bgm.mp3 \
   --prompt "剪出一支突出主角成长与最终胜利的高燃短片" \
-  --output-dir /path/to/output \
+  --project-name "主角成长混剪" \
   --target-duration 60 \
   --target-shot-length 4 \
   --audio-mode bgm_only \
-  --config config.toml \
-  --overwrite
+  --config config.toml
 ```
+
+CLI 不再接受 `--output-dir`。命令会创建与 WebUI 完全相同的 Material、Edit
+Project、ASTER Run、Execution Attempt、Frozen Edit 和 Render Variant；规范产物
+统一存入当前 Application Data Root，并可直接在 WebUI 的 Projects、Runs 和
+Outputs 中查看。
 
 `run --video/--audio` 保持兼容：传入原始路径时，CutMaster 会先确保对应 Material 存在。默认 Material Name 是文件名 stem，也可以分别用 `--video-material-name` 和 `--music-material-name` 指定。名称不会被自动修改；同名但指纹不同会直接报冲突。命令输出中的 `video_material_name` 与 `music_material_name` 是通过校验后保留的公开名称；后续可按该名称精确复用已完成分析的素材：
 
@@ -283,7 +288,7 @@ uv run cutmaster run \
   --video-material "feature-film" \
   --music-material "trailer-score" \
   --prompt "剪出一支突出主角成长与最终胜利的高燃短片" \
-  --output-dir /path/to/output \
+  --project-name "素材复用示例" \
   --target-duration 60 \
   --config config.toml
 ```
@@ -305,35 +310,36 @@ uv run python -m cutmaster run --help
 | `--video-title`                          | 提供给素材分析的片名                                                           |
 | `--material-name`                        | `analyse` / `analyse-music` 添加素材时使用的候选名称；默认取 filename stem |
 | `--video-material-name`                  | `run` 通过原始视频路径添加素材时使用的候选名称                               |
-| `--music-material-name`                  | `plan` / `run` 通过原始音乐路径添加素材时使用的候选名称                    |
+| `--music-material-name`                  | `run` 通过原始音乐路径添加素材时使用的候选名称                             |
 | `--video-material`, `--music-material` | 按精确 Material Name 选择已完成分析的视频和音乐素材                            |
+| `--project-name`                        | 新建的 WebUI 可见 Edit Project 名称                                           |
 | `--max-clip-duration`                    | 限制单个候选片段的最长时长                                                     |
 | `--audio-mode`                           | `bgm_only` 或 `dialogue`                                                   |
-| `--overwrite`                            | 覆盖所选输出目录中的已有产物；不保留不可变 ASTER Run 历史                      |
 
 三个阶段也可以独立运行：
 
 ```bash
 uv run cutmaster analyse \
   --video source.mp4 \
-  --material-name "feature-film" \
-  --output-dir artifacts/cutmaster/analyser
+  --material-name "feature-film"
 
 uv run cutmaster analyse-music \
   --audio bgm.mp3 \
-  --material-name "trailer-score" \
-  --output-dir artifacts/cutmaster/analyser/music
+  --material-name "trailer-score"
 
 uv run cutmaster plan \
   --video-material "feature-film" \
   --music-material "trailer-score" \
   --prompt "..." \
-  --output-dir artifacts/cutmaster/planners
+  --project-name "仅规划示例"
 
-uv run cutmaster render --plan artifacts/cutmaster/planners/render_plan.json --audio-mode dialogue --output-dir artifacts/cutmaster/renderer
+uv run cutmaster render \
+  --edit-id edit_00000000-0000-4000-8000-000000000000 \
+  --audio-mode dialogue
 ```
 
-`plan` 也接受显式分析结果路径：视频使用 `--analysis-result`，音乐使用 `--music-analysis-result`。为兼容原有调用，音乐还可以直接通过 `--audio` 传入；此时 Analyser 会先建立或复用对应的 Music Memory，再进入 Planners。
+`plan` 只接受已进入 Material Library 且完成分析的精确 Material Name；`render`
+只接受 WebUI 可见的 Frozen Edit ID。这样独立阶段也不会产生脱离产品历史的目录。
 
 ### Python API
 
@@ -341,31 +347,34 @@ uv run cutmaster render --plan artifacts/cutmaster/planners/render_plan.json --a
 from pathlib import Path
 
 from cutmaster import CutMasterApplication
-from cutmaster.contracts import ExecuteWorkflowCommand
+from cutmaster.adapters.local_workflow import LocalManagedWorkflow
+from cutmaster.contracts import ExecuteManagedWorkflowCommand
 
 app = CutMasterApplication.open(Path("config.toml"))
-request = ExecuteWorkflowCommand(
+request = ExecuteManagedWorkflowCommand(
     prompt="剪出一支突出主角成长与最终胜利的高燃短片",
     video_path=Path("/path/to/source.mp4"),
     audio_path=Path("/path/to/bgm.mp3"),
-    output_dir=Path("/path/to/output"),
+    project_name="主角成长混剪",
     target_output_length_sec=60,
     target_shot_length_sec=4,
     audio_mode="bgm_only",
-    overwrite=True,
 )
 
-result = app.direct.execute_workflow(request)
-print(result.output_video)
+result = LocalManagedWorkflow(app).execute_workflow(request)
+print(result.project_id, result.render_variant_id)
 ```
 
-外部调用方和 Benchmark Adapter 通过 `CutMasterApplication.open(...).direct`
-使用完整入口；单独阶段也由 `app.direct` 负责解析素材并签发运行时 Handle，
-不应绕过 Application Layer 依赖内部 Agent 或 Tool。
+CLI 和 Benchmark Adapter 使用 `LocalManagedWorkflow` 完成同步托管执行；它驱动
+与 Web 相同的 durable Job 和 Application use case，不绕过 Application Layer
+依赖内部 Agent 或 Tool。
 
 ## 配置
 
-默认配置位于 [`config.toml`](config.toml)。配置按职责边界组织：
+默认配置位于 [`config.toml`](config.toml)。它是 CLI、Benchmark、WebUI 和
+managed worker 共同使用的唯一非敏感配置文件；Settings 也会直接原子更新该
+文件，不再创建或合并额外的 local TOML。API Key 仍只保存在 `.env` 或进程环境
+中。配置按职责边界组织：
 
 | 配置段                                        | 所有者                    | 主要内容                                                        |
 | --------------------------------------------- | ------------------------- | --------------------------------------------------------------- |
@@ -379,31 +388,27 @@ print(result.output_video)
 | `[planners.source_window_optimization]`     | Plan Compiler             | 源区间切点搜索                                                  |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer                  | 画布、编码、人声分离和混音                                      |
 
-默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `1800` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
+默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `600` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
 
 模型单价统一使用“元/百万 token”。每次模型调用都会把当时的单价快照写入 usage artifact；因此修改配置只影响之后的新调用，不会用新价格重算历史费用。缓存命中输入、未缓存输入和输出分别计费，reasoning token 已包含在输出 token 中，不会重复计费。
 
 ## 输出产物
 
-一次运行按阶段保存产物：
+CLI、Benchmark 与 WebUI 运行共享下面的规范托管布局；不再围绕调用方指定的
+`output_dir` 建立独立 Bundle：
 
-| 产物                                                                                                                         | 含义                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `result.json`                                                                                                              | 完整运行结果、耗时和产物路径                                                             |
-| `model_usage.json`                                                                                                         | 工作流级 token 与费用汇总，分别包含`current_run` 和 `cumulative`，并按任务、模型拆分 |
-| `analyser/analysis_result.json`                                                                                            | 本次使用的 Video Material Memory 正式索引                                                |
-| `analyser/source.srt`, `dialogue_merged.srt`, `dialogues.json`                                                         | 原始与重建后的台词数据                                                                   |
-| `analyser/music/music_analysis_result.json`                                                                                | 本次使用的 Music Memory 正式索引                                                         |
-| `analyser/music/music_memory.json`                                                                                         | 完整源曲目的节拍、重音、能量与段落分析                                                   |
-| `planners/planners_result.json`                                                                                            | Planners 阶段结果与 ASTER 协作摘要                                                       |
-| `planners/render_plan.json`                                                                                                | Planners 交付给 Renderer 的不可变、帧精确计划                                            |
-| `planners/music_profile.json`, `edit_plan.json`, `dialogue_anchors.json`, `candidate_pool.json`, `script_raw.json` | 本次目标时长的 Music Profile 与其他 ASTER 中间产物                                       |
-| `planners/diagnostics/`                                                                                                    | Beam 诊断、ASTER 修复历史和模型调用树                                                    |
-| `planners/diagnostics/model_usage.json`                                                                                    | Planners 的逐调用价格快照、本次运行与累计 usage                                          |
-| `renderer/montage.mp4`                                                                                                     | 可跨音频版本复用的无声蒙太奇                                                             |
-| `renderer/output.mp4`                                                                                                      | 当前 Render 的最终视频                                                                   |
-| `renderer/render_request.json`, `render_result.json`                                                                     | 渲染请求与结果                                                                           |
-| `cutmaster.log`                                                                                                            | 结构化运行日志                                                                           |
+| 托管路径 | 含义 |
+|---|---|
+| `media/<type>/mat_<uuid>/analysis/` | 可复用的 Video/Music Material Memory |
+| `projects/project_<uuid>/runs/run_<uuid>/plan.json` | Frozen Edit 使用的帧精确 RenderPlan |
+| `projects/project_<uuid>/runs/run_<uuid>/review_bundle.json` | Candidate Bundle 完整性清单 |
+| `projects/project_<uuid>/runs/run_<uuid>/model_usage.json` | 本次 ASTER Run 的 token 与费用汇总 |
+| `projects/project_<uuid>/runs/run_<uuid>/result.json` | CLI/Benchmark 托管执行回执与相对产物清单 |
+| `projects/project_<uuid>/renders/render_<uuid>/master.mp4` | WebUI、CLI 与 Benchmark 共用的规范 Render Variant master |
+
+Benchmark 完成后会校验回执中的 Data-Root-relative 路径，并把评测需要的文件复制到
+Benchmark 自己的 `runs/<run_id>/task_outputs/<task_id>/`；这些只是提交副本，
+CutMaster 中的 Project 与 Render Variant 仍是权威记录。
 
 Application Layer 始终从当前 Application Data Root 派生 `.cutmaster/media/`；Material Library 不再使用独立的存储根：
 
@@ -435,10 +440,10 @@ src/cutmaster/
 │   ├── contracts/                      # handle-only v2
 │   ├── prompting/
 │   └── shared/
-├── adapters/cli/                    # CLI 入站适配器
+├── adapters/                       # CLI、Web 与共享本地托管执行适配器
 ├── infrastructure/                  # SQLite、Material Catalog、模型、媒体与日志
 ├── configuration/                   # Effective Configuration
-└── contracts/                       # 稳定 Direct API
+└── contracts/                       # 稳定托管与 Direct API
 ```
 
 详细的依赖边界和公共 API 参见 [`docs/architecture.md`](docs/architecture.md)，架构决策参见 [`docs/adr/`](docs/adr/)。

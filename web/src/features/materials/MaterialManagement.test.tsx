@@ -148,7 +148,14 @@ describe('Material import and lifecycle actions', () => {
             analysis_available: false,
             references: [],
             attempts: [attempt],
-            latest_execution: { attempt, job },
+            latest_execution: {
+              attempt,
+              job,
+              log: {
+                path: '/Users/example/.cutmaster/logs/jobs/job_1.log',
+                exists: true,
+              },
+            },
           })
         }
         return new Response(null, { status: 404 })
@@ -178,6 +185,10 @@ describe('Material import and lifecycle actions', () => {
       expect(router.state.location.pathname).toBe('/materials/video/material_1'),
     )
     expect(await screen.findByText('Execution Attempt #1')).toBeVisible()
+    expect(
+      screen.getByText('/Users/example/.cutmaster/logs/jobs/job_1.log'),
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: 'View live logs' })).toBeVisible()
     expect(screen.getAllByText('Queued').length).toBeGreaterThan(0)
     expect(upload?.body).toBeInstanceOf(FormData)
     const form = upload?.body as FormData

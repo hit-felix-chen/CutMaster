@@ -22,7 +22,6 @@ web/test-results/
 .env.*
 !.env.example
 
-# local Application bootstrap and non-secret settings
+# local Application state
 .cutmaster-location
 .cutmaster-control/
-*.local.toml

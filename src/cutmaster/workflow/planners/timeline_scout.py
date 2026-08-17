@@ -535,11 +535,7 @@ def _retrieval_segment_context(
             )
         result[slot["slot_id"]] = [
             {
-                **{
-                    key: value
-                    for key, value in segments[position].items()
-                    if key != "clip_path"
-                },
+                **segments[position],
                 "shots": [
                     {
                         key: value

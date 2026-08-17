@@ -230,8 +230,11 @@ yielding roughly three columns at 1280 px, four at 1440 px, and five at 1728 px.
 Sorting determines position; a live analysis-state update never causes a card
 to jump elsewhere unexpectedly.
 
-Video and music cards share one footprint. Video uses a 16:9 thumbnail, while
-music uses a waveform in the same preview region. Each card shows a two-line
+Video and music cards share one footprint. Video uses a dedicated, annotation-free
+JPEG cover generated from the earliest Shot's preferred middle/early/late sample;
+the card never reads the Scene-VLM frame cache directly. Music uses a bar-style
+energy waveform generated from the existing analysis sampling cadence in the same
+preview region. Each card shows a two-line
 Material Name followed by duration, analysis state, and reference count.
 Search and sorting sit above the grid; Import remains at the upper right. The
 first release has no bulk selection or bulk deletion.
@@ -254,7 +257,9 @@ the drawer. Its four tab names are nested URL segments, so refresh restores the
 same tab without relying on temporary browser state. The modal header is always
 **Material Memory Explorer · `Material.name`**: the name comes from the
 canonical Material detail projection, not an analyser-authored source title,
-and the Timeline does not repeat a filename or analysis title.
+and the Timeline does not repeat a filename or analysis title. The canonical
+title, a compact rectangular segmented tab control, and Close action share the
+same top header row.
 
 The read-only modal has four tabs:
 
@@ -269,14 +274,16 @@ The read-only modal has four tabs:
    character appearances, camera grammar, composition, visual evidence, and
    stored or on-demand sampled frames; a
    visible **Back to Segment** action restores the Segment-level detail and
-   start position. Long detail text scrolls independently and cannot resize or
-   crop the player. A full-source timeline spans the bottom: sources up to one
-   hour fill the available width, while longer sources use one hour per viewport
-   width and scroll horizontally. It shows source start, source end, and
-   ten-minute ticks, keeps Segment intervals non-overlapping, and contains no
-   filename or analyser-authored title. A provider-rejected visual annotation
-   is shown as unavailable for that Shot; it does not mark the whole Material
-   as Failed.
+   start position. The right compound preview keeps the video bounded while its
+   Segment/Shot heading, Back action, and long detail content scroll together;
+   detail length cannot resize or crop the player. A fixed-height full-source
+   timeline remains the second row across the bottom rather than expanding with
+   the preview: sources up to one hour fill the available width, while longer
+   sources use one hour per viewport width and scroll horizontally. It shows
+   source start, source end, and ten-minute ticks, keeps Segment intervals
+   non-overlapping, and contains no filename or analyser-authored title. A
+   provider-rejected visual annotation is shown as unavailable for that Shot;
+   it does not mark the whole Material as Failed.
 2. **Story** — title, logline, synopsis, chronological Story Beats, Character
    Arcs, themes, and ending. Beat and arc evidence links select the cited
    Segments in Timeline.
@@ -295,11 +302,18 @@ The music summary drawer uses the same **View full analysis** entry and
 near-full-screen modal pattern, but exposes only the structure present in Music
 Memory. It has two read-only tabs:
 
-1. **Structure** (default) — a synchronized audio player and waveform overlaid
-   with the normalized energy curve, Beat markers, stronger Accent markers, and
-   labelled Section intervals. Selecting a Section seeks playback and shows its
-   role (`intro`, `build`, `development`, `climax`, `release`, or `outro`), mean
-   energy, energy trend, and suggested clip-duration range.
+1. **Structure** (default) — a synchronized audio player, normalized energy
+   curve, Beat markers, stronger Accent markers, and labelled Section intervals.
+   The music timeline keeps a fixed left label column for Sections, Beats,
+   Accents, and the time axis; Beat and Accent loaded/total counts sit below
+   their labels. The tracks, playhead, and one-minute time ticks share one
+   coordinate plane. Sources up to ten minutes fill the available width, while
+   longer sources use ten minutes per viewport width and scroll horizontally;
+   the start and exact end timestamps are always present. Selecting a Section
+   seeks playback and shows its role (`intro`, `build`, `development`, `climax`,
+   `release`, or `outro`), mean energy, energy trend, and suggested clip-duration
+   range. The Structure tab automatically retrieves all bounded Memory pages
+   before rendering and does not expose a manual **Load more** action.
 2. **Technical** — source duration, tempo in BPM, Beat, Accent, and Section
    counts, energy sampling interval, schema version, and analysis state.
 
@@ -347,8 +361,8 @@ and cannot later replace dialogue in a completed Material Memory. Correcting it
 requires deleting an unreferenced Material and importing it again. Music import
 has no subtitle control.
 
-Ready video cards request a bounded analyser-produced JPEG thumbnail and Ready
-music cards request an SVG waveform derived from the stored energy curve. List
+Ready video cards request a bounded analyser-produced `cover.jpg` and Ready
+music cards request an SVG bar waveform derived from the stored energy curve. List
 and card projections never inline or eagerly download the complete source
 video/audio. Missing or invalid preview artifacts degrade to the card fallback
 without making the Material itself unusable.
@@ -356,8 +370,11 @@ without making the Material itself unusable.
 ## Projects landing page
 
 Projects appear as a wider card grid, with three columns at the primary 1440 px
-target. A card's preview uses its latest completed output frame, falls back to
-the selected Video Material thumbnail, and otherwise shows a clear empty state.
+target. A card's project-scoped cover endpoint uses the first frame of the latest
+Ready Render Variant, falls back to the dedicated cover of the first selected
+Ready Video Material, and otherwise shows a clear empty state. Render completion
+publishes its first-frame `cover.jpg` beside `master.mp4`; neither branch reads a
+Shot cache at card-request time.
 It also shows Project Name, a short Editing Intent excerpt, selected video and
 music names, latest ASTER Run state, and last-updated time. These fields make
 projects with equal display names distinguishable.
@@ -402,16 +419,17 @@ Overview dashboard and no editable duplicate of either input.
 Project Setup presents separate **Selected Video** and **Selected Music**
 collections. The first release shows at most one item in each collection, but
 the component and API boundary remain plural for future multi-source editing.
-The selectors draw from the corresponding global Material Type, and an
-Inconsistent Material is not selectable. The UI avoids **Replace Material**,
-which could imply changing an immutable source file.
+The selectors draw from the corresponding global Material Type. Only Ready
+Materials are selectable and savable; Queued, Analysing, Failed, and
+Inconsistent Materials remain visible with their real state but cannot enter
+the Project Material Set. The UI avoids **Replace Material**, which could imply
+changing an immutable source file.
 
 Changing the current Project Material Set never mutates or deletes an existing
 ASTER Run. A running Run keeps its snapshotted Material References, and the page
 states that the changed selection applies only to the next Run. Queued or
-Analysing Materials may be selected, but Start editing remains unavailable
-until they are Ready. Failed Materials expose Retry Analysis, while
-Inconsistent Materials cannot be selected.
+Analysing Materials must become Ready before selection. Failed Materials expose
+Retry Analysis.
 
 #### Creative Brief
 
@@ -426,19 +444,21 @@ Creative Brief field marks the page **Unsaved changes** and enables a dedicated
 mutable Project Material Set and Creative Brief and does not create an ASTER
 Run.
 
-Target Duration uses a whole-second `mm:ss` control. A plain integer such as
-`90` is accepted and normalized to `01:30`; `30s`, `60s`, `90s`, and `3min`
-shortcuts only fill the same field. The value must be positive and must not
-exceed the selected Music Material's complete source duration. Both the form
-and backend application layer enforce that upper bound even though lower-level
-music projection tools can repeat a short track.
+Target Duration has two explicit modes. **Custom duration** uses separate
+whole-number **Minutes** and **Seconds** inputs; Seconds is limited to `0..59`,
+and the selected Music Material dynamically limits the maximum minute/second
+combination. **Use audio duration** takes the selected Music Material's exact
+source duration without rounding it for persistence. Both modes still map to
+the existing `target_duration_sec` Creative Brief contract; the interaction
+mode is not a second persisted domain field. The value must be positive, and
+both the form and backend application layer enforce the Music Material upper
+bound even though lower-level music projection tools can repeat a short track.
 
 Until a Music Material is selected, Target Duration is unavailable and points
-the user to the Material section above. Changing to a shorter track revalidates
-the last saved value. If it now exceeds the new source duration, CutMaster
-preserves the value, marks the Creative Brief **Needs update**, and disables
-Start editing until the user corrects and saves it. It never silently clamps
-the duration.
+the user to the Material section above. Changing to a shorter track constrains
+an existing Custom duration to the new track's whole-second maximum; Use audio
+duration follows the newly selected track exactly. Either change marks Project
+Setup as unsaved and must be explicitly saved before Start editing.
 Changing to a longer track leaves an otherwise valid Brief unchanged.
 
 While the form is dirty, project-tab navigation, Back, page exit, and **Start
@@ -674,6 +694,15 @@ Material Analyst operation and bounded counts when available; Render Variants
 show Renderer as a separate lifecycle. Run detail and Activity observe the same
 Attempt/Job projection through global SSE with a polling fallback.
 
+The current Material Analysis Attempt in the Material drawer and the current
+ASTER planning Attempt in Run detail show the full absolute managed Job Log
+path. **View live logs** opens a coloured modal whose top bar repeats that path.
+Opening reads only the latest 50 complete retained lines, then creates one
+Attempt-scoped SSE tail from the returned byte cursor. Closing the modal always
+closes that connection. The retained file is authoritative—including after the
+worker exits—while the UI renders structured, sanitized text and never consumes
+a child-process pipe or injects log text as HTML.
+
 Each milestone has one of `Queued`, `Running`, `Retrying`, `Stopping`,
 `Interrupted`, `Complete`, `Failed`, or `Reused`. It shows the current operation
 and elapsed time, and may show a real bounded count such as annotated Shots
@@ -854,20 +883,15 @@ when managed user data moves. A local, git-ignored `.cutmaster-location` file in
 that same directory contains only the absolute location of a custom Data Root;
 when it is absent, CutMaster resolves the default `CutMaster/.cutmaster/`.
 
-Settings never rewrites the version-controlled `config.toml`. Editable
-non-secret model, endpoint, timeout, concurrency, rendering, and execution
-values are stored as a sparse, git-ignored `config.local.toml` overlay beside
-the base file. API keys remain in the git-ignored `.env`. Before either local
-file is atomically replaced, the Application validates the complete effective
-configuration produced by merging the base and overlay. CLI, Benchmark, Web,
-and workers all load that same effective result through
-`CutMasterApplication.open(config_path)`.
-
-For an explicitly selected base such as `/path/eval.toml`, the local overlay is
-only `/path/eval.local.toml`; absence of that file means base-only configuration.
-CutMaster never applies the repository `config.local.toml` to another selected
-base. Settings reads and writes the sibling of the base used to launch the Web
-application, keeping evaluation and interactive configuration scopes isolated.
+Settings directly updates the TOML file selected when the Application starts.
+For the repository setup that file is `config.toml`; an explicitly selected
+`/path/eval.toml` is instead the complete authority for that Application
+instance. There is no sibling local TOML overlay. Editable non-secret model,
+endpoint, timeout, concurrency, rendering, and execution values remain in the
+selected file, while API keys remain in the git-ignored `.env`. Before either
+file is atomically replaced, the Application validates the complete candidate
+configuration. CLI, Benchmark, Web, and workers all load that same result
+through `CutMasterApplication.open(config_path)`.
 
 Model names, endpoints, timeouts, and concurrency are editable global settings.
 Research controls such as agent retry counts, candidate counts, Beam width,
@@ -914,7 +938,7 @@ handlers follow the same rule and never construct Workflow stages or
 infrastructure independently.
 
 The implemented `settings` service owns Effective Configuration reads,
-validated local-overlay saves, and storage reporting. Model-connection UI,
+validated single-file saves, and storage reporting. Model-connection UI,
 credential writes, per-capability connection tests, and the macOS Data Root
 Finder action are implemented. Direct Bundle bulk cleanup/retention are
 proposed additions; Data Root Migration is implemented. Locale and

@@ -32,7 +32,6 @@ from cutmaster.workflow.analyser.tools.scene_segmenter import (
     build_segments_from_scene_boundaries,
     detect_scene_boundaries,
 )
-from cutmaster.workflow.analyser.tools.cache import reuse_compatible_stage_checkpoints
 from cutmaster.workflow.analyser.tools.scene_segmenter import SCENE_SEGMENTATION_VERSION
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
 from cutmaster.workflow.prompting.analyser import (
@@ -387,11 +386,13 @@ def test_scene_boundary_windows_are_checkpointed_independently(
     tmp_path,
 ) -> None:
     shots = _shots(21)
-    stub = tmp_path / "frame.jpg"
+    frame_directory = tmp_path / "frames"
+    frame_directory.mkdir()
+    stub = frame_directory / "frame.jpg"
     stub.write_bytes(b"jpeg")
     frame_map = {
         shot["shot_id"]: [
-            {"path": str(stub), "time_sec": float(index)}
+            {"file": stub.name, "time_sec": float(index)}
             for index in range(3)
         ]
         for shot in shots
@@ -435,7 +436,7 @@ def test_scene_boundary_windows_are_checkpointed_independently(
             max_concurrency=2,
         ),
         SceneSegmentationConfig(),
-        tmp_path / "frames",
+        frame_directory,
         tmp_path / "windows",
     )
     assert context.calls == 2
@@ -454,7 +455,7 @@ def test_scene_boundary_windows_are_checkpointed_independently(
         UnexpectedContext(),
         VLMConfig(model="test", base_url="", api_key="test"),
         SceneSegmentationConfig(),
-        tmp_path / "frames",
+        frame_directory,
         tmp_path / "windows",
     )
     assert cached == decisions
@@ -893,6 +894,7 @@ def test_analyser_reuses_shot_checkpoint_after_later_stage_failure(
     kwargs = {
         "video_path": video_path,
         "video_title": "Source",
+        "source_fingerprint": "a" * 64,
         "provided_subtitle": None,
         "material_directory": tmp_path / "analysis",
         "detection_config": ShotDetectionConfig(),
@@ -918,13 +920,69 @@ def test_complete_analysis_cache_requires_exact_signature(tmp_path) -> None:
     segment_clip.parent.mkdir(parents=True)
     segment_clip.write_bytes(b"clip")
     description = {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
+        "source": {
+            "title": "Test",
+            "duration_sec": 1.0,
+            "fps": 24.0,
+            "width": 1920,
+            "height": 1080,
+        },
+        "scene_detection": {
+            "detector": "AdaptiveDetector",
+            "adaptive_threshold": 2.0,
+            "adaptive_min_content_val": 15.0,
+            "adaptive_min_scene_len_sec": 0.25,
+            "duplicate_frame_threshold": 1.0,
+        },
         "segments": [
             {
                 "segment_id": "segment_0001",
-                "clip_path": str(segment_clip.resolve()),
+                "time_range": {"start_sec": 0.0, "end_sec": 1.0},
+                "has_dialogue": False,
+                "speech_mode": "none",
+                "content_type": None,
+                "timeline_role": "opening",
+                "shots": [
+                    {
+                        "shot_id": "shot_0001",
+                        "time_range": {"start_sec": 0.0, "end_sec": 1.0},
+                        "segment_time_range": {
+                            "start_sec": 0.0,
+                            "end_sec": 1.0,
+                        },
+                        "start_boundary": "video_start",
+                        "end_boundary": "video_end",
+                        "visual_description": None,
+                        "dominant_action": None,
+                        "content_type": None,
+                        "narrative_function": None,
+                        "emotional_tone": None,
+                        "emotional_intensity": None,
+                        "scene": None,
+                        "characters": [],
+                        "dialogue": [],
+                        "shot_scale": None,
+                        "camera_angle": None,
+                        "camera_movement": None,
+                        "composition": None,
+                        "sampled_frame_times_sec": [],
+                        "visual_evidence": None,
+                        "visual_annotation_status": "provider_rejected",
+                        "visual_annotation_failure": "data_inspection_failed",
+                    }
+                ],
+                "dialogue_items": [],
+                "segment_summary": None,
+                "narrative_function": None,
+                "emotional_tone": None,
+                "emotional_intensity": None,
+                "appearing_characters": [],
             }
         ],
+        "asr_model": "test-asr",
+        "scene_boundary_model": "test-vlm",
+        "visual_description_model": "test-vlm",
     }
     summary = {
         "schema_version": "1.0",
@@ -944,101 +1002,48 @@ def test_complete_analysis_cache_requires_exact_signature(tmp_path) -> None:
         "ending": "The test ends.",
     }
     expected_signature = {
-        "schema_version": "2.0",
-        "source": {"path": "/source.mp4", "size": 1, "mtime_ns": 2},
+        "schema_version": "3.0",
+        "source": {"sha256": "a" * 64},
         "subtitle": {"backend": "bailian"},
         "llm": {"model": "current"},
     }
     manifest = {
         **expected_signature,
+        "scene_segmentation_method": "scene_vlm",
         "scene_segmentation_version": SCENE_SEGMENTATION_VERSION,
+        "scene_boundaries": "scene_boundaries.json",
         "segment_summary_prompt_version": "2.0",
+        "video_description": "video_description.json",
+        "video_summary": "video_summary.json",
     }
     for name, value in (
         ("analysis_manifest.json", manifest),
         ("video_description.json", description),
         ("video_summary.json", summary),
-        ("dialogues.json", {}),
+        (
+            "dialogues.json",
+            {
+                "schema_version": "2.0",
+                "postprocessor": {
+                    "type": "llm_boundary_selection",
+                    "model": "test",
+                },
+                "statistics": {
+                    "source_cue_count": 0,
+                    "sentence_count": 0,
+                    "merge_count": 0,
+                },
+                "sentences": [],
+                "merge_operations": [],
+            },
+        ),
         ("analysis_history.json", {}),
     ):
         (memory / name).write_text(json.dumps(value), encoding="utf-8")
     (memory / "source.srt").write_text("source", encoding="utf-8")
     (memory / "dialogue_merged.srt").write_text("merged", encoding="utf-8")
+    (memory / "cover.jpg").write_bytes(b"\xff\xd8\xffcover\xff\xd9")
 
     assert _cache_result(memory, expected_signature) is not None
     changed = {**expected_signature, "llm": {"model": "changed"}}
     assert _cache_result(memory, changed) is None
-
-
-def test_new_analysis_schema_reuses_compatible_upstream_stages(tmp_path) -> None:
-    asset_directory = tmp_path / "asset"
-    previous = asset_directory / "analysis-old"
-    current = asset_directory / "analysis-new"
-    previous.mkdir(parents=True)
-    current.mkdir(parents=True)
-    signature = {
-        "source": {"path": "/source.mp4", "size": 1, "mtime_ns": 2},
-        "scene_detection": {"adaptive_threshold": 2.0},
-        "subtitle": {"backend": "bailian"},
-        "llm": {"model": "test"},
-    }
-    (previous / "analysis_manifest.json").write_text(
-        json.dumps(signature),
-        encoding="utf-8",
-    )
-    (previous / "shots.json").write_text(
-        json.dumps(_shots(2)),
-        encoding="utf-8",
-    )
-    (previous / "source.srt").write_text("source", encoding="utf-8")
-    (previous / "dialogue_merged.srt").write_text("merged", encoding="utf-8")
-    (previous / "dialogues.json").write_text(
-        json.dumps({"sentences": []}),
-        encoding="utf-8",
-    )
-
-    reuse_compatible_stage_checkpoints(current, signature, 2.0)
-
-    assert (current / "shots.json").is_file()
-    assert (current / "source.srt").read_text(encoding="utf-8") == "source"
-    assert (current / "dialogue_merged.srt").read_text(encoding="utf-8") == "merged"
-
-
-def test_llm_change_reuses_raw_asr_but_not_dialogue_reconstruction(tmp_path) -> None:
-    asset_directory = tmp_path / "asset"
-    previous = asset_directory / "analysis-old"
-    current = asset_directory / "analysis-new"
-    previous.mkdir(parents=True)
-    current.mkdir(parents=True)
-    source_signature = {"path": "/source.mp4", "size": 1, "mtime_ns": 2}
-    subtitle_signature = {"backend": "bailian"}
-    (previous / "analysis_manifest.json").write_text(
-        json.dumps(
-            {
-                "source": source_signature,
-                "subtitle": subtitle_signature,
-                "llm": {"model": "old"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (previous / "source.srt").write_text("raw ASR", encoding="utf-8")
-    (previous / "dialogue_merged.srt").write_text("old merge", encoding="utf-8")
-    (previous / "dialogues.json").write_text(
-        json.dumps({"sentences": []}),
-        encoding="utf-8",
-    )
-
-    reuse_compatible_stage_checkpoints(
-        current,
-        {
-            "source": source_signature,
-            "subtitle": subtitle_signature,
-            "llm": {"model": "new"},
-        },
-        2.0,
-    )
-
-    assert (current / "source.srt").read_text(encoding="utf-8") == "raw ASR"
-    assert not (current / "dialogue_merged.srt").exists()
-    assert not (current / "dialogues.json").exists()

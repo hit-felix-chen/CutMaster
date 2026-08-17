@@ -75,7 +75,8 @@ describe('TimelineMemoryView layout', () => {
       'minmax(260px, 65%) minmax(160px, 1fr)',
     )
     expect(getComputedStyle(player!).placeContent).not.toBe('center')
-    expect(getComputedStyle(details!).overflowY).toBe('auto')
+    expect(getComputedStyle(inspector!).overflowY).toBe('auto')
+    expect(getComputedStyle(details!).overflowY).toBe('visible')
     expect(getComputedStyle(video!).objectFit).toBe('contain')
     stylesheet.remove()
   })
@@ -120,10 +121,74 @@ describe('TimelineMemoryView layout', () => {
     expect(chooser?.parentElement).toBe(detail)
     expect(details?.parentElement).toBe(inspector)
     expect(chooser).not.toContainElement(details)
-    expect(getComputedStyle(inspector!).overflowY).toBe('hidden')
-    expect(getComputedStyle(details!).overflowY).toBe('auto')
+    expect(getComputedStyle(inspector!).overflowY).toBe('auto')
+    expect(getComputedStyle(details!).overflowY).toBe('visible')
     expect(getComputedStyle(chooser!).flexDirection).toBe('column')
     expect(getComputedStyle(chooser!).overflowY).toBe('auto')
+    stylesheet.remove()
+  })
+
+  it('keeps the source timeline in row two while the selection heading shares detail scrolling', () => {
+    const stylesheet = document.createElement('style')
+    stylesheet.textContent = workspaceCss
+    document.head.append(stylesheet)
+    const { container } = render(
+      <div className="memory-modal__body" style={{ height: 720 }}>
+        <TimelineMemoryView
+          materialId="mat_video"
+          payload={{
+            source: { duration_sec: 120, title: 'Source' },
+            segments: {
+              items: [
+                {
+                  segment_id: 'segment_0010',
+                  time_range: { start_sec: 10, end_sec: 20 },
+                  shots: [
+                    {
+                      shot_id: 'shot_00001',
+                      time_range: { start_sec: 10, end_sec: 14 },
+                    },
+                  ],
+                },
+              ],
+            },
+          }}
+        />
+      </div>,
+    )
+
+    const body = container.querySelector<HTMLElement>('.memory-modal__body')
+    const explorer = container.querySelector<HTMLElement>('.timeline-explorer')
+    const segmentPane = container.querySelector<HTMLElement>(
+      '.timeline-explorer__inspector',
+    )
+    const shotPane = container.querySelector<HTMLElement>('.shot-strip')
+    const composite = container.querySelector<HTMLElement>('.timeline-explorer__detail')
+    const selection = container.querySelector<HTMLElement>('.selection-inspector')
+    const selectionHeading = container.querySelector<HTMLElement>(
+      '.selection-inspector__header',
+    )
+    const selectionDetails = container.querySelector<HTMLElement>(
+      '.selection-inspector__details',
+    )
+    const track = container.querySelector<HTMLElement>('.timeline-explorer__track')
+    expect(getComputedStyle(body!).overflow).toBe('auto')
+    expect(getComputedStyle(explorer!).height).toBe('100%')
+    expect(getComputedStyle(explorer!).minHeight).toBe('620px')
+    expect(getComputedStyle(explorer!).gridTemplateRows).toBe('minmax(0, 1fr) 150px')
+    expect(Array.from(explorer!.children)).toEqual([segmentPane, composite, track])
+    expect(track?.parentElement).toBe(explorer)
+    expect(getComputedStyle(track!).gridColumn).toBe('1/-1')
+    expect(getComputedStyle(segmentPane!).overflow).toBe('auto')
+    expect(getComputedStyle(shotPane!).overflowY).toBe('auto')
+    expect(Array.from(selection!.children)).toEqual([
+      selectionHeading,
+      selectionDetails,
+    ])
+    expect(getComputedStyle(selection!).display).toBe('block')
+    expect(getComputedStyle(selection!).overflowY).toBe('auto')
+    expect(getComputedStyle(selectionHeading!).position).not.toBe('sticky')
+    expect(getComputedStyle(selectionDetails!).overflowY).toBe('visible')
     stylesheet.remove()
   })
 

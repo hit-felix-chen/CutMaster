@@ -27,11 +27,13 @@ class MaterialRecord:
 
 @dataclass(frozen=True)
 class MaterialBinding:
-    """Deletion-safe runtime paths exposed only while a lease is held.
+    """Runtime paths exposed only while the producing context is active.
 
     The lease that produced a binding defines its verification strength.  A
-    Workflow lease verifies the complete source digest; a browsing lease only
-    validates that the immutable managed source is still a regular file.
+    mutation or consumption lease verifies the complete source digest; an
+    inspection context only validates the managed path shape.  Inspection is
+    deliberately not deletion-safe, so callers that stream bytes must pin an
+    open descriptor before leaving the context.
     """
 
     material: Material
@@ -100,13 +102,19 @@ class MaterialCatalog(Protocol):
         self,
         material_id: MaterialId,
     ) -> AbstractContextManager[MaterialBinding]:
-        """Hold deletion exclusion and yield verified runtime paths."""
+        """Hold exclusive analysis/mutation access and yield verified paths."""
+
+    def consume_lease(
+        self,
+        material_id: MaterialId,
+    ) -> AbstractContextManager[MaterialBinding]:
+        """Share verified runtime paths with concurrent workflow consumers."""
 
     def read_lease(
         self,
         material_id: MaterialId,
     ) -> AbstractContextManager[MaterialBinding]:
-        """Hold deletion exclusion for browsing without hashing source bytes."""
+        """Inspect runtime paths without hashing or Material lock acquisition."""
 
     def ensure_subtitle(
         self,

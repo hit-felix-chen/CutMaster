@@ -17,7 +17,7 @@ const project = {
     target_duration_sec: 60,
   },
   latest_run_state: 'running',
-  preview_url: '/api/materials/mat_video/thumbnail',
+  preview_url: '/api/projects/project_1/cover',
   selected_materials: {
     video: [
       {
@@ -109,7 +109,7 @@ describe('Project landing management', () => {
       '.project-card__preview img',
     )
     expect(preview).not.toBeNull()
-    expect(preview).toHaveAttribute('src', '/api/materials/mat_video/thumbnail')
+    expect(preview).toHaveAttribute('src', '/api/projects/project_1/cover')
     fireEvent.error(preview!)
     expect(preview).not.toBeVisible()
 

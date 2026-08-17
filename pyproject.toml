@@ -18,6 +18,7 @@ dependencies = [
     "requests>=2.32.0",
     "scenedetect==0.7.0",
     "torch>=2.13,<3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tomlkit>=0.13,<1",
     "tqdm>=4.67.0",
     "uvicorn>=0.34,<1",
 ]

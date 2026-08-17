@@ -143,7 +143,6 @@ def _join_text(cues: list[Cue]) -> str:
 def build_dialogue_document(
     cues: list[Cue],
     merge_groups: list[list[int]],
-    source_srt: Path,
     model: str,
 ) -> dict[str, object]:
     by_start = {group[0]: set(group) for group in merge_groups}
@@ -186,8 +185,7 @@ def build_dialogue_document(
         if sentence["was_merged"]
     ]
     return {
-        "schema_version": "1.0",
-        "source_srt": str(source_srt),
+        "schema_version": "2.0",
         "postprocessor": {"type": "llm_boundary_selection", "model": model},
         "statistics": {
             "source_cue_count": len(cues),
@@ -319,7 +317,7 @@ def postprocess_dialogues(
     merge_groups = [
         group for batch in decisions if batch is not None for group in batch
     ]
-    document = build_dialogue_document(cues, merge_groups, source_srt, config.model)
+    document = build_dialogue_document(cues, merge_groups, config.model)
     dialogue_path = output_dir / "dialogues.json"
     merged_srt_path = output_dir / "dialogue_merged.srt"
     dialogue_path.write_text(

@@ -49,6 +49,7 @@ class PlanCommand:
     target_output_length_sec: float = 60.0
     target_shot_length_sec: float = 4.0
     prompt_type: str = "event"
+    video_title: str = ""
     max_clip_duration_sec: float | None = None
     overwrite: bool = False
     progress_reporter: ProgressReporter | None = None

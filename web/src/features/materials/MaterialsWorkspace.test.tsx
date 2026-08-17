@@ -229,9 +229,165 @@ describe('Material Memory deep links', () => {
     )
 
     expect(await screen.findByText('A real story')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Timeline' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Timeline' })).toHaveAttribute(
       'href',
       '/materials/video/mat_video/memory/timeline?search=La&sort=name_desc',
+    )
+  })
+
+  it('keeps Memory navigation in the header with accessible keyboard tabs', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/memory/story')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: material.material_id,
+              material_type: 'video',
+              tab: 'story',
+              payload: {
+                title: 'A real story',
+                chronological_story_beats: [],
+                character_arcs: [],
+                themes: [],
+              },
+            }),
+          )
+        }
+        if (url.includes('/memory/dialogue')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: material.material_id,
+              material_type: 'video',
+              tab: 'dialogue',
+              payload: { sentences: { items: [], total: 0 } },
+            }),
+          )
+        }
+        if (url === '/api/materials/mat_video') {
+          return Promise.resolve(jsonResponse(material))
+        }
+        return Promise.resolve(new Response(null, { status: 404 }))
+      }),
+    )
+
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/materials/:type/:materialId/memory/:tab',
+          element: <MaterialsWorkspace />,
+        },
+      ],
+      {
+        initialEntries: [
+          '/materials/video/mat_video/memory/story?search=La&sort=name_desc',
+        ],
+      },
+    )
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+
+    const dialog = await screen.findByRole('dialog')
+    const header = dialog.querySelector('.memory-modal__header')
+    const tablist = within(dialog).getByRole('tablist', {
+      name: 'Material Memory Explorer',
+    })
+    expect(tablist.parentElement).toBe(header)
+
+    const storyTab = within(tablist).getByRole('tab', { name: 'Story' })
+    const timelineTab = within(tablist).getByRole('tab', { name: 'Timeline' })
+    expect(storyTab).toHaveAttribute('aria-selected', 'true')
+    expect(storyTab).toHaveAttribute('tabindex', '0')
+    expect(timelineTab).toHaveAttribute('aria-selected', 'false')
+    expect(timelineTab).toHaveAttribute('tabindex', '-1')
+    expect(within(dialog).getByRole('tabpanel')).toHaveAttribute(
+      'aria-labelledby',
+      storyTab.id,
+    )
+
+    fireEvent.keyDown(storyTab, { key: 'ArrowRight' })
+    await waitFor(() =>
+      expect(router.state.location).toMatchObject({
+        pathname: '/materials/video/mat_video/memory/dialogue',
+        search: '?search=La&sort=name_desc',
+      }),
+    )
+    await waitFor(() =>
+      expect(within(tablist).getByRole('tab', { name: 'Dialogue' })).toHaveFocus(),
+    )
+  })
+
+  it('uses the compact Structure and Technical tabs for music Memory', async () => {
+    const music = {
+      ...material,
+      material_id: 'mat_music',
+      material_type: 'music',
+      name: 'Main Score',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/memory/structure')) {
+          return Promise.resolve(
+            jsonResponse({
+              material_id: music.material_id,
+              material_type: 'music',
+              tab: 'structure',
+              payload: {
+                beats_sec: { items: [], total: 0 },
+                accents_sec: { items: [], total: 0 },
+                energy_curve: { items: [], total: 0 },
+                sections: { items: [], total: 0 },
+              },
+            }),
+          )
+        }
+        if (url === '/api/materials/mat_music') {
+          return Promise.resolve(jsonResponse(music))
+        }
+        return Promise.resolve(new Response(null, { status: 404 }))
+      }),
+    )
+
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/materials/:type/:materialId/memory/:tab',
+          element: <MaterialsWorkspace />,
+        },
+      ],
+      { initialEntries: ['/materials/music/mat_music/memory/structure'] },
+    )
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+
+    const dialog = await screen.findByRole('dialog')
+    const tablist = within(dialog).getByRole('tablist', {
+      name: 'Material Memory Explorer',
+    })
+    expect(tablist.parentElement).toBe(dialog.querySelector('.memory-modal__header'))
+    expect(
+      within(tablist)
+        .getAllByRole('tab')
+        .map((item) => item.textContent),
+    ).toEqual(['Structure', 'Technical'])
+    expect(within(tablist).getByRole('tab', { name: 'Structure' })).toHaveAttribute(
+      'aria-selected',
+      'true',
     )
   })
 
@@ -374,7 +530,7 @@ describe('Material Memory deep links', () => {
     )
 
     expect(await screen.findByText('A real story')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('link', { name: 'Timeline' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Timeline' }))
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
         '/materials/video/mat_video/memory/timeline',

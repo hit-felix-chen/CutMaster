@@ -18,6 +18,7 @@ from cutmaster.application.errors import (
     MaterialMemoryTabNotFoundError,
     MaterialMemoryUnavailableError,
     MaterialPreviewUnavailableError,
+    ProjectCoverUnavailableError,
     ProviderConnectionFailedError,
     RenderDispatchFailedError,
     StorageRevealFailedError,
@@ -40,6 +41,7 @@ from cutmaster.infrastructure.persistence.sqlite import (
     ManagedStateNotFound,
 )
 from cutmaster.infrastructure.storage.local.material_catalog import (
+    MaterialConsumedError,
     MaterialInconsistentError,
     MaterialNameCollisionError,
     MaterialNotFoundError,
@@ -194,6 +196,20 @@ def install_problem_handlers(app: FastAPI) -> None:
             retryable=False,
         )
 
+    @app.exception_handler(ProjectCoverUnavailableError)
+    async def project_cover_unavailable(
+        request: Request,
+        error: ProjectCoverUnavailableError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=404,
+            code=error.code,
+            title="Project cover unavailable",
+            detail=str(error),
+            retryable=False,
+        )
+
     @app.exception_handler(MaterialNameCollisionError)
     async def material_name_collision(
         request: Request,
@@ -238,6 +254,21 @@ def install_problem_handlers(app: FastAPI) -> None:
                 request.app.state.cutmaster_application,
                 error.references,
             ),
+        )
+
+    @app.exception_handler(MaterialConsumedError)
+    async def material_consumed(
+        request: Request,
+        error: MaterialConsumedError,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=409,
+            code="material_has_active_consumers",
+            title="Material is in use",
+            detail=str(error),
+            command_id=_command_id(request),
+            blockers=[{"kind": "active_consumer"}],
         )
 
     @app.exception_handler(ActiveAttemptBlocker)

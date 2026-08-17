@@ -67,19 +67,46 @@ def test_activity_projects_canonical_navigation_context_for_each_owner(
         with application.materials.lease(material.material_id) as binding:
             if binding.material.material_type.value == "music":
                 (binding.memory_root / "music_memory.json").write_text(
-                    json.dumps({"source_duration_sec": 60.0}),
+                    json.dumps(
+                        {
+                            "schema_version": "2.0",
+                            "source_duration_sec": 60.0,
+                            "tempo_bpm": 120.0,
+                            "beats_sec": [],
+                            "accents_sec": [],
+                            "energy_step_sec": 0.5,
+                            "energy_curve": [],
+                            "sections": [],
+                        }
+                    ),
                     encoding="utf-8",
                 )
             staged = tmp_path / f"{material.material_id}-analysis-result.json"
             staged.write_text(
                 json.dumps(
                     {
-                        "schema_version": "2.0",
+                        "schema_version": "3.0",
                         "status": "success",
                         "material_id": str(binding.material.material_id),
                         "material_type": binding.material.material_type.value,
                         "material_name": binding.material.name,
                         "material_fingerprint": str(binding.material.fingerprint),
+                        "memory_schema_version": (
+                            "3.0"
+                            if binding.material.material_type.value == "video"
+                            else "2.0"
+                        ),
+                        "elapsed_sec": 0.0,
+                        "material_reused": False,
+                        "analysis_reused": False,
+                        **(
+                            {
+                                "model_usage_summary": {},
+                                "model_usage_cumulative_summary": {},
+                            }
+                            if binding.material.material_type.value == "video"
+                            else {}
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -200,7 +227,7 @@ def test_settings_read_save_and_storage_report_are_real(client: TestClient) -> N
     saved = client.put(
         "/api/settings",
         headers=key(),
-        json={"overlay": {"renderer": {"width": 1280, "height": 720}}},
+        json={"values": {"renderer": {"width": 1280, "height": 720}}},
     )
 
     assert current.status_code == 200

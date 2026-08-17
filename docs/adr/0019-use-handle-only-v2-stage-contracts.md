@@ -35,18 +35,19 @@ refactor and is not part of the completed handle-only request migration.
 
 CLI compatibility is preserved above this breaking boundary. The existing
 `analyse`, `analyse-music`, `plan`, `render`, and `run` commands continue to
-accept their documented file/name-facing inputs and invoke `app.direct`, which
-constructs v2 stage requests. Mashup-Benchmark likewise calls
-`app.direct.execute_workflow(ExecuteWorkflowCommand)` and preserves its worker
-subprocess and artifact contract. Both callers have migrated; the transitional
-complete-workflow facade and `WorkflowRequest` are removed.
+accept their documented managed inputs and synchronously drive the same durable
+local Job executors as Web. Mashup-Benchmark likewise uses
+`LocalManagedWorkflow` with `ExecuteManagedWorkflowCommand`, preserving its
+worker subprocess while exporting copies from Web-visible managed history. Both
+callers have migrated; the transitional complete-workflow facade and
+`WorkflowRequest` are removed.
 
 The completed migration followed this order:
 
 1. Introduce `CutMasterApplication`, Material resolution, and the synchronous
    direct component/workflow use cases.
-2. Migrate CLI and Mashup-Benchmark to those use cases and pass their
-   compatibility tests.
+2. Migrate CLI and Mashup-Benchmark first to the Direct use cases, then to the
+   managed Project/Run/Render lifecycle, and pass their compatibility tests.
 3. Replace stage request schemas and implementations with handle-only v2
    contracts and remove the raw-path stage DTO definitions, keeping only the
    three stage class names/import paths stable.

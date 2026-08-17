@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import StrEnum
 
 from fastapi import APIRouter, Query, Response, status
@@ -25,6 +26,12 @@ from cutmaster.adapters.web.schemas.projects import (
     SetProjectMaterialsBody,
 )
 from cutmaster.application import CutMasterApplication
+from cutmaster.application.errors import (
+    MaterialPreviewUnavailableError,
+    ProjectCoverUnavailableError,
+    RenderMediaUnavailableError,
+)
+from cutmaster.application.materials import MaterialView
 from cutmaster.application.projects import (
     CreateProjectCommand,
     DeleteProjectCommand,
@@ -34,9 +41,21 @@ from cutmaster.application.projects import (
     SaveProjectSetupCommand,
     SetProjectMaterialsCommand,
 )
+from cutmaster.application.renders import RenderVariantView
+from cutmaster.application.runs import RunView
 from cutmaster.domain.ids import MaterialId, ProjectId
+from cutmaster.domain.materials import MaterialCondition, MaterialType
+from cutmaster.domain.renders import RenderVariantStatus
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+_COVER_HEADERS = {
+    "Accept-Ranges": "none",
+    "Cache-Control": "private, no-store",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 class ProjectSort(StrEnum):
@@ -101,12 +120,54 @@ def _project_card_view(
         "video": selected_videos,
         "music": selected_music,
     }
+    latest_render = _latest_ready_render(application, runs)
     payload["preview_url"] = (
-        f"/api/materials/{ready_video['material_id']}/thumbnail"
-        if ready_video is not None
+        f"/api/projects/{project.project_id}/cover"
+        if latest_render is not None or ready_video is not None
         else None
     )
     return payload
+
+
+def _latest_ready_render(
+    application: CutMasterApplication,
+    runs: Sequence[RunView],
+) -> RenderVariantView | None:
+    ready: list[RenderVariantView] = []
+    for run in runs:
+        for edit in application.runs.list_frozen_edits(run.run_id):
+            ready.extend(
+                variant
+                for variant in application.renders.list(edit.edit_id)
+                if variant.status is RenderVariantStatus.READY
+            )
+    return (
+        max(
+            ready,
+            key=lambda variant: (
+                variant.updated_at,
+                variant.created_at,
+                str(variant.render_variant_id),
+            ),
+        )
+        if ready
+        else None
+    )
+
+
+def _first_ready_video(
+    application: CutMasterApplication,
+    project: ProjectView,
+) -> MaterialView | None:
+    for material_id in project.video_material_ids:
+        material = application.materials.get(material_id)
+        if (
+            material is not None
+            and material.material_type is MaterialType.VIDEO
+            and material.condition is MaterialCondition.READY
+        ):
+            return material
+    return None
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -126,6 +187,40 @@ def get_project(
     application: ApplicationDependency,
 ) -> dict[str, object]:
     return project_view(application.projects.get(ProjectId.parse(project_id)))
+
+
+@router.get("/{project_id}/cover", response_class=Response)
+def get_project_cover(
+    project_id: str,
+    application: ApplicationDependency,
+) -> Response:
+    """Return the latest Ready master cover or the first Ready Video cover."""
+
+    project = application.projects.get(ProjectId.parse(project_id))
+    latest_render = _latest_ready_render(
+        application,
+        application.runs.list(project.project_id),
+    )
+    if latest_render is not None:
+        try:
+            content = application.renders.cover(latest_render.render_variant_id)
+        except RenderMediaUnavailableError as error:
+            raise ProjectCoverUnavailableError(
+                f"Project {project.project_id} has no safe Render cover"
+            ) from error
+    else:
+        video = _first_ready_video(application, project)
+        if video is None:
+            raise ProjectCoverUnavailableError(
+                f"Project {project.project_id} has no Ready Video cover"
+            )
+        try:
+            content = application.materials.preview(video.material_id).content
+        except MaterialPreviewUnavailableError as error:
+            raise ProjectCoverUnavailableError(
+                f"Project {project.project_id} has no safe Video cover"
+            ) from error
+    return Response(content=content, media_type="image/jpeg", headers=_COVER_HEADERS)
 
 
 @router.get("/{project_id}/workspace")

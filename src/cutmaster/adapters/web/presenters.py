@@ -8,7 +8,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from cutmaster.application.jobs import AttemptView, EventView, JobView
+from cutmaster.application.jobs import (
+    AttemptLogEntryView,
+    AttemptLogPageView,
+    AttemptView,
+    EventView,
+    JobView,
+)
 from cutmaster.application.jobs.usage import compact_usage_summary
 from cutmaster.application.materials import (
     MaterialDetailView,
@@ -347,6 +353,28 @@ def execution_view(
     }
 
 
+def attempt_log_entry_view(value: AttemptLogEntryView) -> dict[str, object]:
+    return {
+        "cursor": value.cursor,
+        "timestamp": value.timestamp,
+        "level": value.level,
+        "component": value.component,
+        "event": value.event,
+        "fields": value.fields,
+        "message": value.message,
+    }
+
+
+def attempt_log_page_view(value: AttemptLogPageView) -> dict[str, object]:
+    return {
+        "log": {"path": value.path, "exists": value.exists},
+        "entries": [attempt_log_entry_view(item) for item in value.entries],
+        "start_cursor": value.start_cursor,
+        "end_cursor": value.end_cursor,
+        "has_more_before": value.has_more_before,
+    }
+
+
 def event_view(value: EventView) -> dict[str, Any]:
     return {
         "event_id": value.event_id,
@@ -366,7 +394,6 @@ def settings_view(value: SettingsView) -> dict[str, Any]:
     return {
         "values": json_value(value.values),
         "base_path": str(value.base_path),
-        "overlay_path": str(value.overlay_path),
         "data_root": str(value.data_root),
         "secrets": {
             "llm_configured": value.secrets.llm_configured,

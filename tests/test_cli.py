@@ -26,8 +26,8 @@ def test_run_cli_preserves_raw_path_inputs_and_accepts_candidate_names() -> None
             "Feature Film",
             "--music-material-name",
             "Main Score",
-            "--output-dir",
-            "output",
+            "--project-name",
+            "CLI Test",
         ]
     )
 
@@ -35,6 +35,7 @@ def test_run_cli_preserves_raw_path_inputs_and_accepts_candidate_names() -> None
     assert args.audio.name == "score.mp3"
     assert args.video_material_name == "Feature Film"
     assert args.music_material_name == "Main Score"
+    assert args.project_name == "CLI Test"
 
 
 def test_plan_and_run_cli_can_select_materials_by_exact_name() -> None:
@@ -48,8 +49,6 @@ def test_plan_and_run_cli_can_select_materials_by_exact_name() -> None:
             "Main Score",
             "--prompt",
             "A tense reunion",
-            "--output-dir",
-            "planners",
         ]
     )
     run = parser.parse_args(
@@ -61,13 +60,34 @@ def test_plan_and_run_cli_can_select_materials_by_exact_name() -> None:
             "Main Score",
             "--prompt",
             "A tense reunion",
-            "--output-dir",
-            "output",
         ]
     )
 
     assert plan.video_material == run.video_material == "Feature Film (2)"
     assert plan.music_material == run.music_material == "Main Score"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["analyse", "--video", "movie.mp4", "--output-dir", "output"],
+        ["analyse-music", "--audio", "score.mp3", "--output-dir", "output"],
+        [
+            "run",
+            "--video",
+            "movie.mp4",
+            "--audio",
+            "score.mp3",
+            "--prompt",
+            "A montage",
+            "--output-dir",
+            "output",
+        ],
+    ],
+)
+def test_cli_rejects_custom_output_directories(command: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(command)
 
 
 def test_serve_cli_uses_local_only_defaults() -> None:

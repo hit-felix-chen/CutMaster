@@ -2,8 +2,10 @@
 
 The current backend has three independently callable, handle-only Workflow
 stages behind a framework-independent Application Layer. CLI and
-Mashup-Benchmark both enter through `CutMasterApplication.direct`; complete
-workflow execution is no longer owned by a separate facade.
+Mashup-Benchmark create Web-visible managed history and synchronously drive the
+same durable local Job executors used by Web. `CutMasterApplication.direct`
+remains a synchronous stage collaborator, not the authoritative storage path
+for complete CLI or Benchmark executions.
 
 ## Implemented backend layout
 
@@ -61,6 +63,17 @@ one `workflow/` boundary. `workflow` is the canonical package name because it
 corresponds to the domain term CutMaster Workflow; an additional `core/` or
 per-stage `services/` wrapper would add no useful boundary.
 
+## Portable Material Memory
+
+Material Memory is location-independent. Persisted video, music, dialogue,
+analysis-receipt, and frame-manifest documents contain no absolute paths or
+serialized runtime handles. The Application binds their Material IDs and
+fingerprints to the active Data Root and constructs runtime paths only while a
+Material lease is held. Segment clips and scene frames are resolved from safe
+identifiers inside their owning Material directory. Only the current schema is
+accepted; runtime compatibility readers for older persisted contracts do not
+exist. See [ADR 0023](adr/0023-use-portable-material-memory-contracts.md).
+
 ### Repository root
 
 ```text
@@ -97,7 +110,7 @@ CutMaster/
 └── uv.lock
 ```
 
-`CONTEXT.md`, packaging metadata, legal files, the version-controlled base
+`CONTEXT.md`, packaging metadata, legal files, the authoritative Application
 configuration, and its environment template stay at the root. Documentation
 images live under `docs/assets/`; they are not Web assets or runtime package
 resources. Mashup-Benchmark remains a separate peer-adapter repository and is
@@ -381,8 +394,9 @@ src/cutmaster/
 │   ├── data_root.py
 │   └── snapshots.py
 │
-└── contracts/                          # stable direct Application contracts
+└── contracts/                          # stable managed and Direct contracts
     ├── __init__.py
+    ├── managed_workflow.py
     └── workflow.py
 ```
 
@@ -390,10 +404,10 @@ Agent classes remain directly visible in their owning stage package; only
 deterministic helpers belong in that stage's `tools/` directory. Root-level
 public re-exports keep `from cutmaster import Analyser, Planners, Renderer`
 available even though their implementation lives under `workflow/`. CLI and
-Mashup-Benchmark now both call `app.direct`, so the former root `cli.py`,
-complete-workflow facade, `WorkflowRequest`, and raw-path stage DTOs have been
-removed. `contracts/workflow.py` remains the stable home of direct Application
-commands and results. The three root stage-class exports remain supported,
+Mashup-Benchmark now use shared local managed orchestration, so the former root
+`cli.py`, complete-workflow facade, `WorkflowRequest`, and raw-path stage DTOs
+remain removed. `contracts/managed_workflow.py` owns their receipt contract;
+`contracts/workflow.py` retains the explicit Direct API. The three root stage-class exports remain supported,
 while their v2 request contracts are handle-only and intentionally do not
 preserve the former raw-path DTO signatures.
 
@@ -680,13 +694,17 @@ The backend migration completed these boundaries on 2026-08-12:
 3. Real synchronous component and complete-workflow operations in `app.direct`,
    including managed Direct Workflow Bundles and atomic Artifact Manifest
    publication.
-4. Peer CLI and Mashup-Benchmark adapters calling `app.direct`; the installed
+4. Peer CLI and Mashup-Benchmark adapters initially calling `app.direct`; the installed
    console entry point is `cutmaster.adapters.cli.main:main`, and
    `cutmaster.__main__` delegates to it.
 5. Analyser, Planners, Renderer, prompting, contracts, and shared helpers under
    `workflow/`, with handle-only v2 stage requests and a portable RenderPlan v2.
 6. SQLite-backed Projects, Material References, Runs, Frozen Edits, Render
    Variants, Attempts, jobs, durable events, command receipts, and settings.
+
+On 2026-08-16, CLI and Mashup-Benchmark complete execution moved onto those
+managed records and Job executors. Custom CLI output directories were removed;
+Benchmark now exports validated copies after the managed Render completes.
 
 The managed local execution slice now extends the original ASTER subprocess
 path to Material Analysis and Renderer. It includes shared FIFO/capacity
@@ -743,8 +761,11 @@ At the Workflow boundary, Analyser accepts a `MaterialRuntimeHandle` defined in
 `workflow/contracts/material.py`. It contains the immutable Material ID, type,
 name, fingerprint, runtime-only absolute source and memory paths, and any
 verified immutable video-subtitle sidecar. The Application derives this handle
-from canonical ID and Data Root-relative references while holding the Material
-lease; the handle is never persisted as product state.
+from canonical ID and Data Root-relative references while holding the
+appropriate Material lease; the handle is never persisted as product state.
+Analysis and sidecar publication use an exclusive mutation lease. Planning and
+Rendering use verified shared consumption leases, so independent consumers of
+one Ready Material do not serialize each other.
 
 Raw source paths and candidate names terminate at the Application materials
 use case. Analyser still verifies the managed source and fingerprint and owns
@@ -758,8 +779,9 @@ Planners accepts `AnalysedVideoRuntimeHandle` and
 validated Material Memory version, fingerprint, and resolved runtime artifact
 paths. Its request also contains a transport-neutral `PlannersBrief` and
 `PlannersOptions`; it contains no raw video/audio path or Material Name
-selector. The Application holds both Material leases for the whole planning
-operation and translates CLI or managed inputs into this contract.
+selector. The Application holds shared consumption leases for both Materials
+for the whole planning operation and translates CLI or managed inputs into this
+contract.
 
 `PlannersBrief` carries Editing Intent and Target Duration. CLI/Benchmark-only
 compatibility controls such as target shot length, prompt type, and maximum clip
@@ -788,11 +810,12 @@ contains exact source ranges and output frame ranges and never contains
 prepared audio paths or temporary render state. `render_result.json` describes
 one concrete BGM-only or dialogue render.
 
-The implemented RenderPlan v2 schema is portable: it records the selected video and
-music Material IDs and expected fingerprints, but never absolute paths, mtimes,
-or prepared media. At render time the Application resolves those identities
-while holding both Material leases and supplies a separate
-`RenderRuntimeBindings` object containing the two `MaterialRuntimeHandle`s.
+The implemented RenderPlan v2 schema is portable: it records the selected video
+and music Material IDs and expected fingerprints, but never absolute paths,
+mtimes, or prepared media. At render time the Application resolves those
+identities while holding shared consumption leases for both Materials and
+supplies a separate `RenderRuntimeBindings` object containing the two
+`MaterialRuntimeHandle`s.
 
 Renderer receives the immutable RenderPlan, runtime bindings, a structured
 output target, and RenderOptions. It validates plan/binding IDs, fingerprints,
@@ -873,7 +896,7 @@ Benchmark workflows use RenderPlan without creating Frozen Edit product history.
 - `adapters/cli/` translates transport input and output and calls only the
   Application Layer. `adapters/web/` is the implemented FastAPI peer adapter
   and owns the managed local-job and durable SSE transports.
-- `configuration/` loads and validates bootstrap, local overlay, environment,
+- `configuration/` loads and validates the selected TOML file, environment,
   Data Root resolution, and non-secret snapshot configuration for the
   composition root. The Application and local storage adapters implement the
   guarded Data Root Migration control plane.
@@ -897,11 +920,18 @@ stem. Names are unique within each Material type.
 - SHA-256 is an internal consistency check. It is not part of the Material
   ID or Name, is not accepted as a CLI selector, and is not a global
   deduplication key.
-- Browsing projections, Material Memory inspection, and byte-range preview use
-  a deletion-safe read lease and do not recompute SHA-256 for every request.
-  Any operation that consumes a Material for analysis, planning, or rendering,
-  plus explicit consistency verification, uses the verified lease and checks
-  the complete source digest.
+- Browsing projections, Material Memory inspection, covers, waveform, and
+  byte-range preview are lock-free inspection. They do not recompute SHA-256
+  and cannot wait behind Analysis, Planning, Rendering, or deletion. A source
+  response pins its open descriptor so an in-flight stream can finish after
+  deletion; new inspection after deletion returns Not Found.
+- Analysis and sidecar publication use one exclusive verified lease per
+  Material. Planning and Rendering use verified shared consumption leases,
+  remain subject to global Job Supervisor capacity, and may concurrently
+  consume the same Ready Material.
+- Delete never waits for a Material lease. It rejects references and active
+  Material Analysis first, then attempts an exclusive deletion lease
+  non-blockingly; an active consumer produces a conflict response.
 - Managed storage is derived only from the internal ID as
   `media/<video|music>/mat_<uuid>/`; names and fingerprints never enter paths.
 - A fingerprint mismatch makes a Material inconsistent and blocks it from
@@ -943,7 +973,7 @@ app.settings     # model connections, execution settings, storage, and Data Root
 ```
 
 `app.settings` owns Effective Configuration reads, canonical provider profiles,
-validated local overlay and sibling `.env` writes, bounded connection tests,
+validated `config.toml` and sibling `.env` writes, bounded connection tests,
 storage reporting, and the supported host file-manager reveal action. Direct
 Bundle bulk cleanup is **Proposed**; guarded Data Root Migration is implemented.
 Browser-only Locale and Colour Mode preferences will not pass through this
@@ -976,39 +1006,30 @@ the old Data Root, so old-root cleanup remains an explicit manual decision.
 ### Effective configuration
 
 Every adapter loads one Effective Configuration through the Application
-composition entry point. For the default repository setup, version-controlled
-`config.toml` provides defaults and research controls, while git-ignored
-`config.local.toml` is a sparse local overlay containing only non-secret values
-that Settings may edit. The overlay path is derived from the exact selected base
-path by inserting `.local` before its final `.toml` suffix: `config.toml` maps to
-`config.local.toml`, and `/path/eval.toml` maps to
-`/path/eval.local.toml`. If that sibling does not exist, only the selected base
-is loaded. The loader never falls back to or mixes in a local overlay from the
-repository root or current working directory.
+composition entry point. The explicitly selected TOML file is the only
+non-secret configuration authority: the repository setup uses `config.toml`,
+while `/path/eval.toml` is complete and independent when explicitly selected.
+CutMaster does not discover or merge a sibling local TOML file.
 
-The merge order for non-secret fields is base configuration followed by the
-local overlay. API keys remain exclusively in the process environment or the
-git-ignored `.env` beside the selected base configuration; an existing process
-environment value wins over the dotenv file. The loader validates the complete
-merged configuration, rejects implicit scalar coercion, materializes defaults,
-and removes the former Material Library path before exposing the canonical
-snapshot. Application configuration rejects inline `api_key` values; the
-runtime `load_config()` path still materializes provider secrets after the
-Application resolves their environment references. A historical Material
-Library key may remain in the versioned base for that loader but is rejected in
-the Application overlay and never becomes a second storage authority.
-Settings likewise validates a candidate merge and atomically replaces the
-local overlay only after validation, so CLI, Benchmark, workers, and Web
-observe either the previous complete file or the new complete file, never a
-partial write.
+API keys remain exclusively in the process environment or the git-ignored
+`.env` beside the selected configuration; an existing process environment value
+wins over the dotenv file. The loader validates the complete configuration,
+rejects implicit scalar coercion, materializes defaults, and removes the former
+Material Library path before exposing the canonical snapshot. Application
+configuration rejects inline `api_key` values; the runtime `load_config()` path
+still materializes provider secrets after the Application resolves their
+environment references. Settings validates a complete candidate and atomically
+replaces the selected TOML file while preserving unedited sections and comments,
+so CLI, Benchmark, workers, and Web observe either the previous complete file or
+the new complete file, never a partial write.
 
 Research controls that the first-release Settings UI does not expose stay in
-the version-controlled base. Managed ASTER Runs and Render Variants snapshot the
+the selected TOML file. Managed ASTER Runs and Render Variants snapshot the
 effective non-secret values required for reproducibility, not either source
 file. Locale and Colour Mode are browser preferences and do not participate in
 this merge.
 
-Saving Settings atomically writes the local overlay and reports that an
+Saving Settings atomically writes the selected TOML file and reports that an
 Application restart is required. A newly opened `CutMasterApplication` sees the
 new Effective Configuration; an existing instance and any synchronous Direct
 Workflow keep the immutable configuration loaded at process start. Managed
@@ -1112,8 +1133,14 @@ Activity uses a cursor-paginated projection and exposes structured owner
 context—Material Name, or Project Name plus Run/edit/Variant sequence—so every
 row links to a canonical Material, Run, or Render Variant route without showing
 bare internal IDs. The React client renders localized operation/status failure
-copy rather than persisted internal exception messages; raw logs remain
-server-owned, and a richer Activity log drawer is deferred.
+copy rather than persisted internal exception messages. Each managed Job owns
+one append-only UTF-8 file under `<data-root>/logs/jobs/<job-id>.log`. Material
+and ASTER Run detail expose its absolute path and an on-demand Attempt-scoped
+viewer: REST returns the latest 50 complete sanitized lines and a separate SSE
+endpoint tails byte-cursor updates from the retained file. The browser never
+attaches to worker stdout directly, and closing the modal closes that SSE
+connection. Files remain server-owned; a richer Activity drawer combining
+Attempt history and concise logs is deferred.
 
 HTTP resources use shallow ownership routes. Listing or creating a child may be
 scoped once beneath its owner, while detail queries and commands address the
@@ -1224,35 +1251,33 @@ implemented; they belong to the Web/managed-worker milestone.
 
 ### Benchmark compatibility boundary
 
-Introducing the Application Layer must not require an HTTP server, SQLite
-product history, or a durable worker for direct component and benchmark runs.
-The following existing interfaces are compatibility contracts:
+Benchmark execution does not require an HTTP server, but it now intentionally
+uses SQLite product history and the durable local Job model. The following
+interfaces are contracts:
 
 - the synchronous `cutmaster analyse`, `analyse-music`, `plan`, `render`, and
-  `run` command names, arguments, exit behaviour, and JSON output for current
-  raw-input flows and artifacts generated by the refactored workflow; historical v1
-  RenderPlan files are explicitly outside this compatibility guarantee;
-- `CutMasterApplication.open(...).direct.execute_workflow(...)`, used directly
-  by the Mashup-Benchmark worker inside its existing per-task subprocess; and
-- the documented three-stage artifact layout, including root `result.json`
-  and `renderer/output.mp4`.
+  `run` command names and JSON receipts;
+- `ExecuteManagedWorkflowCommand` and `ManagedWorkflowResult`, used by the
+  Mashup-Benchmark worker inside its per-task subprocess; and
+- the managed Project/Run/Render ownership layout plus versioned relative
+  artifact manifest.
 
-Direct calls execute without creating Project, ASTER Run, or SQLite history
-records and delegate to framework-independent Application use cases. Web-managed
-operations use the durable Application workflow instead.
+CLI and Benchmark create Project, ASTER Run, Frozen Edit, Attempt, Job, and
+Render Variant records. The older Direct API remains available to explicit
+Python callers but is not their storage authority.
 
 ### Complete-generation CLI contract
 
-`cutmaster run` remains the stable one-command interface for automated and
-manual evaluation. It synchronously executes the complete CutMaster Workflow
-through the direct Application use case and returns only after the final video
-and `result.json` have been written. It never requires FastAPI, SQLite product
-history, or the durable job supervisor.
+`cutmaster run` remains the one-command interface for automated and manual
+evaluation. It synchronously drives the durable managed Analyser, Planners, and
+Renderer Jobs and returns only after the Render Variant master and managed
+receipt have been committed. It does not require FastAPI or an open browser.
 
-The command continues to accept either raw video/music paths or exact existing
-Material Names, plus editing intent, target duration, output directory, and the
-current advanced compatibility options. A successful command exits with code
-zero and prints a machine-readable `WorkflowResult`; failure exits non-zero.
+The command accepts either raw video/music paths or exact existing Material
+Names, plus Project Name, editing intent, target duration, and advanced
+planning options. It does not accept an output directory or overwrite existing
+history. A successful command exits with code zero and prints a machine-readable
+`ManagedWorkflowResult`; failure exits non-zero.
 The separate `analyse`, `analyse-music`, `plan`, and `render` commands remain
 available for component-level evaluation and debugging.
 
@@ -1262,26 +1287,27 @@ Settings/Setup, the managed Material Analysis and ASTER Run lifecycles, Frozen
 Edit Review, atomic Guided Revision, Render Variants/Outputs, durable SSE, and
 Data Root Migration through the same Application boundary.
 
-The official Mashup-Benchmark adapter may call the same direct Application API
-as a peer adapter instead of spawning this CLI adapter. Both routes execute the
-same use case and must produce the same workflow result and artifact contract.
+The official Mashup-Benchmark adapter calls the same managed local API as a peer
+adapter instead of spawning the CLI. Both routes produce the same managed
+history and receipt contract.
 
-### Output ownership
+### Direct API output ownership
 
 **Implemented:** Direct Bundle allocation, explicit external-output validation,
 Material leases, storage reporting, and guarded Data Root Migration.
 **Proposed:** bulk Direct Bundle cleanup.
 
 Output ownership is explicit and is never inferred from the resolved path.
-The Application Layer accepts three output targets:
+The explicit Direct Python API retains two compatibility output targets:
 
-- omitting CLI `--output-dir` allocates a unique Direct Workflow Bundle at
+- omitting the Direct command output path allocates a unique Direct Workflow Bundle at
   `direct/bundle_<uuid>/` beneath the Application Data Root;
-- an explicit CLI `--output-dir` is an external output and must resolve outside
+- an explicit Direct command output path is external and must resolve outside
   the Application Data Root; and
-- a managed product use case supplies an owning entity ID plus a root-relative
-  Managed Artifact Reference. CLI callers cannot construct this target by
-  passing a path.
+
+Managed product use cases instead supply an owning entity ID plus a
+root-relative Managed Artifact Reference. CLI and Benchmark cannot construct a
+target by passing a path.
 
 Direct Workflow Bundles count toward Application Data Root storage usage but do
 not create Project, ASTER Run, Activity, or Render Variant records. External
@@ -1303,30 +1329,31 @@ copying or switching managed state.
 ### Implemented Benchmark adapter
 
 Mashup-Benchmark is a peer inbound adapter, not a client of the CLI or FastAPI
-Web adapters. Its worker keeps the existing per-task
-subprocess boundary but calls the synchronous direct-execution API exposed by
-the Application Layer. CLI and Benchmark both call `app.direct`; the former
-complete-workflow facade and `WorkflowRequest` contract have therefore been
-removed.
+Web adapters. Its worker keeps the existing per-task subprocess boundary but
+calls `LocalManagedWorkflow` with an `ExecuteManagedWorkflowCommand`. CLI and
+Benchmark therefore create the same managed history as Web; the former
+complete-workflow facade and `WorkflowRequest` contract remain removed.
 
-The direct workflow result publishes a versioned logical `artifacts` mapping
-inside `result.json`. Benchmark integrations consume those returned references
-instead of reconstructing paths such as `planners/script_raw.json`. Existing
-top-level result fields and the documented artifact layout remain available for
-compatibility. Manifest version `1.0` uses stable dotted logical keys and
-normalized POSIX paths relative to the directory containing `result.json`.
+The managed result publishes a versioned logical `artifacts` mapping using
+normalized POSIX paths relative to the Application Data Root. Benchmark
+consumes those references instead of reconstructing internal paths. Manifest
+version `1.0` uses stable dotted logical keys.
 Benchmark rejects an unsupported major version, ignores unknown keys from a
 compatible minor version, and treats a missing required key as an invalid
-successful result.
+successful result. It then copies evaluation files into its own Run directory;
+those copies are not canonical CutMaster artifacts.
 
 Benchmark media records may provide an explicit stable `material_name`. When
 that field is absent, the adapter uses the existing local-path filename stem,
 preserving current Material identities. The adapter passes the resolved video
-and music names in `ExecuteWorkflowCommand`, which makes reuse independent of
+and music names in `ExecuteManagedWorkflowCommand`, which makes reuse independent of
 the per-task output directory and turns changed bytes under a known name into
 an explicit consistency error.
 
 ## Direct compatibility artifact layout
+
+The layout below remains only for explicit Direct Python callers. CLI and
+Benchmark no longer use it as their authoritative output.
 
 ```text
 output_dir/
@@ -1403,48 +1430,47 @@ app.settings     # models, execution settings, storage, and Data Root
 `CutMasterApplication.open(...)`, all seven lazy service groups, Direct and
 Material operations, SQLite-backed managed use cases, and Settings reads,
 writes, tests, and storage/migration controls are implemented. CLI and
-Mashup-Benchmark both invoke the Direct service; FastAPI maps its routes to the
-same Application and dispatches managed Analyser, Planners, and Renderer work
-through the shared supervisor. Frozen Edit Review, atomic Guided Revision,
+Mashup-Benchmark use shared local managed orchestration; FastAPI maps its routes
+to the same Application and dispatches the same managed Analyser, Planners, and
+Renderer executors through the shared supervisor. Frozen Edit Review, atomic Guided Revision,
 automatic Dialogue Preview, Render Variants/Outputs, durable SSE, provider
 Setup, and Data Root Migration are implemented. Persistent application
 notifications, the Activity log drawer, Direct Bundle bulk cleanup/retention,
 generated OpenAPI transport drift CI, multi-user/cloud execution, and broader
 provider/media port injection remain **Proposed**.
 
-The complete direct workflow uses a stable versioned contract from
-`cutmaster.contracts.workflow`:
+The CLI and Benchmark complete workflow uses the stable managed contract:
 
 ```python
-from cutmaster.contracts import ExecuteWorkflowCommand, WorkflowResult
+from cutmaster.adapters.local_workflow import LocalManagedWorkflow
+from cutmaster.contracts import ExecuteManagedWorkflowCommand, ManagedWorkflowResult
 
-def execute(command: ExecuteWorkflowCommand) -> WorkflowResult:
-    return app.direct.execute_workflow(command)
+def execute(command: ExecuteManagedWorkflowCommand) -> ManagedWorkflowResult:
+    return LocalManagedWorkflow(app).execute_workflow(command)
 ```
 
 Command construction is omitted only to keep this architecture example
-independent of its field list. The direct command and `WorkflowResult` remain
-usable by peer adapters without importing `application/` implementation
-modules. A successful `WorkflowResult` exposes
+independent of its field list. A successful `ManagedWorkflowResult` exposes
 `artifact_manifest_version == "1.0"` and `artifacts: dict[str, str]`; consumers
-resolve those references against the Workflow Bundle root associated with the
-command—for a serialized result, the parent of `result.json`—rather than
+resolve those references against its absolute `artifact_root` (the selected
+Application Data Root) rather than
 treating the values as process-relative or absolute paths.
 
 | Surface | Stability |
 |---|---|
 | `CutMasterApplication.open(...)` and its seven grouped services | Permanent public composition API |
-| `ExecuteWorkflowCommand` and versioned `WorkflowResult` | Permanent public direct-workflow contract |
+| `ExecuteManagedWorkflowCommand` and versioned `ManagedWorkflowResult` | Public managed CLI/Benchmark contract |
+| `ExecuteWorkflowCommand` and versioned `WorkflowResult` | Direct Python compatibility contract |
 | Root `Analyser`, `Planners`, and `Renderer` class names/imports | Permanent public stage surface |
 | Stage request DTO signatures | v2 handle-only contracts; former raw-path constructors are not retained |
-| Removed complete-workflow facade, `WorkflowRequest`, and `Analyser.resolve_*` | Use `app.direct` / `app.materials` |
+| Removed complete-workflow facade, `WorkflowRequest`, and `Analyser.resolve_*` | Use managed orchestration or grouped Application services |
 | MASTER agents, tools, cache paths, fingerprints, repositories, and absolute managed paths | Internal, never public |
 
 The v2 stage boundary is deliberately not dual-mode. Analyser receives resolved
 Material handles; Planners receives analysed video/music handles plus planning
 brief and options; Renderer receives a portable RenderPlan, explicit
 `RenderRuntimeBindings`, RenderOptions, and a structured output target. Callers
-cannot fabricate supported handles from arbitrary paths. CLI command and
-Benchmark compatibility is provided by `app.direct`, which resolves inputs and
-constructs the v2 stage requests. See
+cannot fabricate supported handles from arbitrary paths. CLI and Benchmark
+compatibility is provided by the managed local adapter, which resolves inputs,
+creates product history, and drives v2 stage requests. See
 [ADR 0019](adr/0019-use-handle-only-v2-stage-contracts.md).

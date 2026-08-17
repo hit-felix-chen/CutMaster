@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -18,20 +18,40 @@ from cutmaster.configuration.schema import (
 from cutmaster.infrastructure.observability.logging import log_event
 
 
-ANALYSIS_SCHEMA_VERSION = "2.0"
+ANALYSIS_SCHEMA_VERSION = "3.0"
+_DIALOGUE_DOCUMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "postprocessor",
+        "statistics",
+        "sentences",
+        "merge_operations",
+    }
+)
 
 
 def file_signature(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
+    """Return a location-independent signature for one immutable sidecar."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"sha256": digest.hexdigest()}
+
+
+def _source_signature(fingerprint: str) -> dict[str, str]:
+    if not isinstance(fingerprint, str):
+        raise TypeError("source_fingerprint must be a string")
+    if len(fingerprint) != 64 or any(
+        character not in "0123456789abcdef" for character in fingerprint
+    ):
+        raise ValueError("source_fingerprint must be a lowercase SHA-256")
+    return {"sha256": fingerprint}
 
 
 def analysis_signature(
-    video_path: Path,
+    source_fingerprint: str,
     video_title: str,
     subtitle_path: Path | None,
     detection_config: ShotDetectionConfig,
@@ -41,11 +61,12 @@ def analysis_signature(
     llm_config: LLMConfig,
     vlm_config: VLMConfig,
 ) -> dict[str, Any]:
-    source_signature = file_signature(video_path)
+    if not isinstance(video_title, str) or not video_title.strip():
+        raise ValueError("video_title must be non-empty")
     return {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
-        "source": source_signature,
-        "video_title": video_title or video_path.stem,
+        "source": _source_signature(source_fingerprint),
+        "video_title": video_title.strip(),
         "subtitle": (
             file_signature(subtitle_path)
             if subtitle_path is not None
@@ -103,106 +124,6 @@ def write_json_checkpoint(path: Path, value: Any) -> None:
         "Analysis checkpoint written",
         path=path,
     )
-
-
-def reuse_compatible_stage_checkpoints(
-    material_directory: Path,
-    analysis_signature: dict[str, Any],
-    duration_sec: float,
-) -> None:
-    """Reuse deterministic upstream stages from an older analysis schema."""
-    if not material_directory.parent.is_dir():
-        return
-    candidates = sorted(
-        (
-            path.parent
-            for path in material_directory.parent.glob(
-                "analysis-*/analysis_manifest.json"
-            )
-            if path.parent != material_directory
-        ),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    shots_path = material_directory / "shots.json"
-    needs_shots = valid_shot_checkpoint(
-        read_json_checkpoint(shots_path),
-        duration_sec,
-    ) is None
-    source_subtitle_path = material_directory / "source.srt"
-    needs_source_subtitle = not (
-        source_subtitle_path.is_file()
-        and source_subtitle_path.stat().st_size > 0
-    )
-    needs_dialogue = dialogue_checkpoint(material_directory) is None
-    for candidate in candidates:
-        manifest = read_json_checkpoint(candidate / "analysis_manifest.json")
-        if not isinstance(manifest, dict):
-            continue
-        if manifest.get("source") != analysis_signature.get("source"):
-            continue
-        if (
-            needs_shots
-            and manifest.get("scene_detection")
-            == analysis_signature.get("scene_detection")
-        ):
-            candidate_shots = valid_shot_checkpoint(
-                read_json_checkpoint(candidate / "shots.json"),
-                duration_sec,
-            )
-            if candidate_shots is not None:
-                write_json_checkpoint(shots_path, candidate_shots)
-                needs_shots = False
-                log_event(
-                    "INFO",
-                    "analyser",
-                    "cache.hit",
-                    "Compatible Shot detection checkpoint reused",
-                    source_directory=candidate,
-                    target_directory=material_directory,
-                    shots=len(candidate_shots),
-                )
-        subtitle_matches = (
-            manifest.get("subtitle") == analysis_signature.get("subtitle")
-        )
-        candidate_source_subtitle = candidate / "source.srt"
-        if (
-            needs_source_subtitle
-            and subtitle_matches
-            and candidate_source_subtitle.is_file()
-            and candidate_source_subtitle.stat().st_size > 0
-        ):
-            shutil.copy2(candidate_source_subtitle, source_subtitle_path)
-            needs_source_subtitle = False
-            log_event(
-                "INFO",
-                "analyser",
-                "cache.hit",
-                "Compatible ASR subtitle checkpoint reused",
-                source_directory=candidate,
-                target_directory=material_directory,
-            )
-        if (
-            needs_dialogue
-            and subtitle_matches
-            and manifest.get("llm") == analysis_signature.get("llm")
-            and dialogue_checkpoint(candidate) is not None
-            and candidate_source_subtitle.is_file()
-        ):
-            for name in ("source.srt", "dialogue_merged.srt", "dialogues.json"):
-                shutil.copy2(candidate / name, material_directory / name)
-            needs_source_subtitle = False
-            needs_dialogue = False
-            log_event(
-                "INFO",
-                "analyser",
-                "cache.hit",
-                "Compatible dialogue checkpoints reused",
-                source_directory=candidate,
-                target_directory=material_directory,
-            )
-        if not needs_shots and not needs_source_subtitle and not needs_dialogue:
-            return
 
 
 def read_json_checkpoint(path: Path) -> Any | None:
@@ -292,6 +213,8 @@ def dialogue_checkpoint(material_directory: Path) -> tuple[Path, Path] | None:
         not processed_subtitle.is_file()
         or processed_subtitle.stat().st_size <= 0
         or not isinstance(document, dict)
+        or set(document) != _DIALOGUE_DOCUMENT_FIELDS
+        or document.get("schema_version") != "2.0"
         or not isinstance(document.get("sentences"), list)
     ):
         return None
