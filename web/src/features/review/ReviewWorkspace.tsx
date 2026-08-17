@@ -828,7 +828,7 @@ export function ReviewWorkspace() {
             }}
           >
             <RotateCcw size={15} aria-hidden="true" />
-            {t('review.resetChanges')}
+            {t('common.undoChanges')}
           </button>
           <button
             className="button button--primary"
@@ -837,7 +837,7 @@ export function ReviewWorkspace() {
             onClick={() => save.mutate()}
           >
             <Save size={15} aria-hidden="true" />
-            {save.isPending ? t('review.savingRevision') : t('review.saveRevision')}
+            {save.isPending ? t('review.savingRevision') : t('common.save')}
           </button>
         </div>
       </header>

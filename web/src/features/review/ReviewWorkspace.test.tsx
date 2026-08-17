@@ -318,7 +318,8 @@ describe('Review workspace', () => {
     ).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Use candidate' }))
     expect(screen.getByText('Unsaved changes')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Save revision' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Undo changes' })).toBeEnabled()
   })
 
   it.each([
@@ -416,7 +417,7 @@ describe('Review workspace', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Use candidate' }))
     expect(screen.getByText('Unsaved changes')).toBeVisible()
-    await user.click(screen.getByRole('button', { name: 'Save revision' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(

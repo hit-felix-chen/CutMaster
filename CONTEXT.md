@@ -462,6 +462,34 @@ optional source subtitle selected before analysis or from ASR when none is
 provided.
 _Avoid_: Video cache, Music Memory
 
+**Planning Segment**:
+An ASTER Run-local chronological projection of one Segment from **Video Material
+Memory** after **Story Anchor** placement. Every source Segment produces one or
+more Planning Segments named like `segment_0010_01`, divided by fixed Anchor
+pictures rather than continuing L-cut dialogue, without changing Material Memory.
+_Avoid_: Material Segment, Retrieval Region, source clip
+
+**Planning Segment Capacity**:
+The source-picture duration available for chronologically placing unanchored
+**Slots** inside one **Planning Segment**. A Story Anchor arrangement is valid
+only when every resulting Planning Segment can contain the total planned Slot
+duration assigned to it.
+_Avoid_: Candidate count, parent Segment duration, search allowance
+
+**Planning Segment Corridor**:
+The Anchor-bounded ordered set of Planning Segments in which **Timeline Scout**
+may expand one Slot's search without changing its current Segment assignment.
+Search moves through adjacent members of the corridor; exhausting it requires
+targeted Arrangement rather than crossing an Anchor.
+_Avoid_: Planning Segment assignment, unrestricted adjacent search, Candidate Space
+
+**Targeted Arrangement**:
+The reassignment of the smallest contiguous group of unanchored **Slots** whose
+Planning Segment constraints must change together. It first preserves Story
+Anchors; only an infeasible repair permits Story Editor to replace the affected
+Anchor arrangement and its Planning Segment topology.
+_Avoid_: single-Slot patch, full ASTER restart, Guided Revision
+
 **Music Memory**:
 The **Material Memory** of one complete source track, containing intrinsic
 musical structure such as tempo, beats, accents, energy, and sections.
@@ -469,18 +497,35 @@ _Avoid_: Music Profile, BGM preprocessing, project music
 
 **Slot**:
 One arranged interval on the output timeline with an editorial purpose, target
-duration, emotional intent, and visual requirements.
+duration, emotional intent, and visual requirements. Every unanchored Slot has
+exactly one current **Planning Segment**; a broader search allowance is not its
+Segment assignment and is bounded by its **Planning Segment Corridor**.
 _Avoid_: Clip, scene
 
 **Story Anchor**:
 A selected passage of original dialogue together with its source-synchronous
-picture that fixes a key narrative moment to a Slot.
+picture that fixes a key narrative moment to a Slot. Its fixed picture passage
+divides **Planning Segments**, while its dialogue may continue independently as
+an L-cut.
 _Avoid_: Subtitle, voice-over
 
 **Candidate Space**:
 The validated set of source-timeline alternatives from which the final visual
-choice for each unanchored Slot may be made.
+choice for each unanchored Slot may be made. Every candidate remains owned by
+exactly one Slot and lies wholly within one **Planning Segment**.
 _Avoid_: Search results, retrieved clips
+
+**Viable Candidate**:
+A candidate that belongs to at least one complete **Chronological Candidate
+Path**. Candidate-count requirements include only Viable Candidates, not every
+retrieved or individually validated window.
+_Avoid_: Raw candidate, locally compatible candidate, selected candidate
+
+**Chronological Candidate Path**:
+One candidate for every Slot in output Slot order whose source-picture ranges
+are monotonically ordered and non-overlapping. A source reversal or overlap
+makes the path invalid rather than merely lowering its score.
+_Avoid_: Candidate Space, scored sequence, Segment assignment
 
 **Candidate Bundle** *(Required for every Frozen Edit)*:
 The immutable, integrity-checked managed artifact set that preserves an ASTER
@@ -585,6 +630,50 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 >
 > **Domain expert:** No. It defines the Slots. The Story Editor fixes a few
 > Story Anchors, and the Timeline Scout builds the remaining Candidate Space.
+>
+> **Developer:** Does a Story Anchor split the reusable Video Material Memory?
+>
+> **Domain expert:** No. Its fixed picture divides the parent Segment into
+> ASTER Run-local Planning Segments such as `segment_0010_01` and
+> `segment_0010_02`; continuing L-cut dialogue does not divide or occupy them,
+> and the source Segment remains unchanged.
+>
+> **Developer:** Can one Slot be assigned to several Planning Segments?
+>
+> **Domain expert:** No. A Slot has exactly one current Planning Segment;
+> permission to search additional Planning Segments is a separate allowance,
+> and every resulting candidate still belongs wholly to one Segment.
+>
+> **Developer:** Can Timeline Scout repair an Anchor that leaves too little
+> source time for the surrounding Slots?
+>
+> **Domain expert:** No. Story Editor accepts only Anchor arrangements whose
+> Planning Segment Capacity can contain the assigned unanchored Slots; an
+> impossible partition never reaches candidate retrieval.
+>
+> **Developer:** May Timeline Scout keep widening its search past a Story Anchor?
+>
+> **Domain expert:** No. It expands only through adjacent Planning Segments in
+> the Slot's Planning Segment Corridor; exhausting that corridor requires
+> targeted Arrangement.
+>
+> **Developer:** Does exhausted search immediately move a Story Anchor?
+>
+> **Domain expert:** No. Targeted Arrangement first replans the smallest
+> affected group of ordinary Slots with Anchors fixed; Story Editor is rerun
+> only when that repair remains infeasible.
+>
+> **Developer:** May Edit Composer keep an overlapping path if its visual score
+> is high enough?
+>
+> **Domain expert:** No. Reversal or overlap makes a Chronological Candidate
+> Path invalid; quality is optimized only among valid paths.
+>
+> **Developer:** Does every visually validated candidate count toward a Slot's
+> candidate target?
+>
+> **Domain expert:** No. Only Viable Candidates that belong to at least one
+> complete Chronological Candidate Path count toward that target.
 >
 > **Developer:** Who chooses the final clip for each Slot?
 >

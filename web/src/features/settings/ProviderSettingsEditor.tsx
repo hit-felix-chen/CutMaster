@@ -1,5 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, CircleAlert, LoaderCircle, Save, ServerCog } from 'lucide-react'
+import {
+  CheckCircle2,
+  CircleAlert,
+  LoaderCircle,
+  RotateCcw,
+  Save,
+  ServerCog,
+} from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -264,11 +271,24 @@ export function ProviderSettingsEditor({
     })
   }
 
+  const undoChanges = () => {
+    setProfile(initial.profile)
+    setProviders(cloneBundle(initial.providers))
+    setCredentials(freshCredentials(initial, initial.providers, setupMode))
+    setConnectionResults({})
+    setCredentialResults({})
+    setRestartRequired(false)
+    setValidationError(null)
+    setDirty(false)
+    save.reset()
+    test.reset()
+  }
+
   return (
     <section
       className={`settings-section settings-section--connections${setupMode ? ' settings-section--setup' : ''}`}
     >
-      <header>
+      <header className="settings-connections-header">
         <ServerCog size={18} />
         <div>
           <h2>{t(setupMode ? 'setup.connectionsTitle' : 'settings.connections')}</h2>
@@ -279,6 +299,30 @@ export function ProviderSettingsEditor({
                 : 'settings.connectionsDescription',
             )}
           </p>
+        </div>
+        <div className="settings-connections-header__actions">
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={!dirty || save.isPending}
+            onClick={undoChanges}
+          >
+            <RotateCcw size={16} aria-hidden="true" />
+            {t('common.undoChanges')}
+          </button>
+          <button
+            className="button button--primary"
+            type="button"
+            disabled={!dirty || save.isPending}
+            onClick={submit}
+          >
+            {save.isPending ? (
+              <LoaderCircle className="spin" size={16} aria-hidden="true" />
+            ) : (
+              <Save size={16} aria-hidden="true" />
+            )}
+            {t(setupMode ? 'setup.saveAndCheck' : 'common.save')}
+          </button>
         </div>
       </header>
 
@@ -352,22 +396,6 @@ export function ProviderSettingsEditor({
           </ul>
         </div>
       ) : null}
-      <div className="settings-save-row">
-        <span>{dirty ? t('settings.unsaved') : t('settings.saved')}</span>
-        <button
-          className="button button--primary"
-          type="button"
-          disabled={!dirty || save.isPending}
-          onClick={submit}
-        >
-          {save.isPending ? (
-            <LoaderCircle className="spin" size={16} />
-          ) : (
-            <Save size={16} />
-          )}
-          {t(setupMode ? 'setup.saveAndCheck' : 'common.save')}
-        </button>
-      </div>
     </section>
   )
 }

@@ -138,6 +138,32 @@ afterEach(() => {
 })
 
 describe('Provider Settings editor', () => {
+  it('keeps disabled actions in the connection header and restores the saved draft', async () => {
+    renderEditor()
+    const save = screen.getByRole('button', { name: 'Save' })
+    const undo = screen.getByRole('button', { name: 'Undo changes' })
+    const heading = screen.getByRole('heading', { name: 'Model connections' })
+    const header = heading.closest('header')
+
+    expect(header).toContainElement(undo)
+    expect(header).toContainElement(save)
+    expect(undo).toBeDisabled()
+    expect(save).toBeDisabled()
+    expect(document.querySelector('.settings-save-row')).not.toBeInTheDocument()
+
+    const modelInput = screen.getByDisplayValue('deepseek-v4-flash')
+    await userEvent.clear(modelInput)
+    await userEvent.type(modelInput, 'temporary-model')
+    expect(undo).toBeEnabled()
+    expect(save).toBeEnabled()
+
+    await userEvent.click(undo)
+    expect(screen.getByDisplayValue('deepseek-v4-flash')).toBeVisible()
+    expect(screen.getByRole('radio', { name: /Cost Saving/ })).toBeChecked()
+    expect(undo).toBeDisabled()
+    expect(save).toBeDisabled()
+  })
+
   it('uses the server preset and propagates one shared DashScope credential', async () => {
     let savedBody: Record<string, unknown> | undefined
     vi.stubGlobal(
