@@ -65,6 +65,37 @@ def test_attempt_logs_return_absolute_path_last_fifty_lines_and_safe_execution_p
     assert activity["items"][0]["log"] == payload["log"]
 
 
+def test_full_attempt_logs_return_the_complete_snapshot_and_end_cursor(
+    client: TestClient,
+    application: CutMasterApplication,
+    tmp_path: Path,
+) -> None:
+    _material, submission = _submission(application, tmp_path)
+    path = (
+        application.settings.get().data_root
+        / "logs"
+        / "jobs"
+        / f"{submission.job.job_id}.log"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "".join(_line(index) for index in range(60))
+    path.write_text(content, encoding="utf-8")
+
+    response = client.get(
+        f"/api/attempts/{submission.attempt.attempt_id}/logs/full"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["attempt_id"] == str(submission.attempt.attempt_id)
+    assert len(payload["entries"]) == 60
+    assert payload["entries"][0]["message"] == "Completed line 0"
+    assert payload["entries"][-1]["message"] == "Completed line 59"
+    assert payload["start_cursor"] == 0
+    assert payload["end_cursor"] == len(content.encode("utf-8"))
+    assert payload["has_more_before"] is False
+
+
 def test_attempt_log_stream_replays_after_cursor_and_finishes_for_terminal_attempt(
     client: TestClient,
     application: CutMasterApplication,

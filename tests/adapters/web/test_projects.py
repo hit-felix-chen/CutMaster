@@ -121,6 +121,49 @@ def test_project_commands_are_durably_idempotent(client: TestClient) -> None:
     assert conflict.json()["code"] == "idempotency_conflict"
 
 
+def test_project_name_conflict_returns_existing_project_identity(
+    client: TestClient,
+) -> None:
+    existing = client.post(
+        "/api/projects",
+        headers=key(),
+        json={"name": "Shared Project"},
+    )
+
+    conflict = client.post(
+        "/api/projects",
+        headers=key(),
+        json={"name": "  Shared Project  "},
+    )
+
+    assert existing.status_code == 201
+    assert conflict.status_code == 409
+    assert conflict.headers["content-type"].startswith("application/problem+json")
+    assert conflict.json()["code"] == "project_name_conflict"
+    assert conflict.json()["parameters"] == {
+        "project_id": existing.json()["project_id"],
+        "project_name": "Shared Project",
+    }
+
+    other = client.post(
+        "/api/projects",
+        headers=key(),
+        json={"name": "Other Project"},
+    ).json()
+    rename_conflict = client.post(
+        f"/api/projects/{other['project_id']}/rename",
+        headers=key(),
+        json={"name": "Shared Project"},
+    )
+
+    assert rename_conflict.status_code == 409
+    assert rename_conflict.json()["code"] == "project_name_conflict"
+    assert rename_conflict.json()["parameters"] == {
+        "project_id": existing.json()["project_id"],
+        "project_name": "Shared Project",
+    }
+
+
 def test_project_setup_atomically_saves_materials_and_brief(
     client: TestClient,
     application: CutMasterApplication,

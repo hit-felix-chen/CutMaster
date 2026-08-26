@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Iterator
 
 from loguru import logger
 
@@ -110,6 +112,7 @@ _COMPONENT_BY_MODULE = {
     "workflow_context": "model",
 }
 _INTERNAL_FIELDS = {"component", "event", "fields_suffix", "log_timestamp"}
+_FILE_CAPTURE_LOCK = RLock()
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
     re.compile(
@@ -184,6 +187,46 @@ def _patch_record(record: dict[str, Any]) -> None:
         if key not in _INTERNAL_FIELDS
     ]
     extra["fields_suffix"] = f" | {' '.join(fields)}" if fields else ""
+
+
+def _prepare_file_record(record: dict[str, Any]) -> bool:
+    """Populate the stable file schema without replacing process-wide sinks."""
+
+    _patch_record(record)
+    return True
+
+
+@contextmanager
+def capture_log_file(
+    file_path: Path,
+    *,
+    file_level: str = "DEBUG",
+) -> Iterator[Path]:
+    """Add one scoped structured file sink while preserving existing sinks.
+
+    Synchronous managed executions can contain worker threads, so the capture
+    lock covers the whole scope instead of relying on thread-local log context.
+    The re-entrant lock also permits an outer Workflow log to contain nested
+    per-Job captures in the same process.
+    """
+
+    if not isinstance(file_path, Path):
+        raise TypeError("file_path must be a pathlib.Path")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with _FILE_CAPTURE_LOCK:
+        sink_id = logger.add(
+            file_path,
+            level=file_level,
+            format=LOG_FORMAT,
+            filter=_prepare_file_record,
+            colorize=False,
+            encoding="utf-8",
+            mode="a",
+        )
+        try:
+            yield file_path
+        finally:
+            logger.remove(sink_id)
 
 
 def configure_console_logging(

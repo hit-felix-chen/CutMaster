@@ -29,7 +29,10 @@ contract are removed. The
 stable managed contract exposes `ExecuteManagedWorkflowCommand` plus a
 versioned receipt containing Application-Data-Root-relative artifact paths.
 The Benchmark adapter validates those keys against that root and copies the
-evaluation artifacts into its own Run directory. It passes stable Material
+evaluation artifacts into its own Run directory. This includes copying the
+Application-owned canonical `workflow.log` unchanged after successful
+completion; Benchmark does not create its log artifact by redirecting the
+CutMaster adapter process's stdout or stderr. It passes stable Material
 Names so analysis can be reused without depending on paths or fingerprints.
 The synchronous `cutmaster run` command remains a one-command complete-video
 interface and creates history that can be opened in Web. The implemented CLI exposes the five synchronous
@@ -42,6 +45,16 @@ state to the client. All adapters open one Application Data
 Root and one Material Catalog. CLI exposes no custom output directory; canonical
 artifacts are entity-owned beneath that root. Benchmark copies are explicitly
 secondary submission artifacts.
+
+The execution strategy does not change log ownership. The Local Job Supervisor
+persists each isolated Worker's output to the canonical Data Root Job Log, and
+the synchronous Application Managed Job Executor writes the same per-Job
+contract without relying on its calling adapter. A complete synchronous
+execution also publishes a canonical Workflow Log through its Managed Workflow
+Receipt, alongside `analyser.video_job_log` and `analyser.music_job_log` when
+those Jobs ran, plus `planners.job_log` and `renderer.job_log`. Web tails
+canonical Job Logs by Attempt; Benchmark copies only the Workflow Log after
+success.
 
 The managed-history decision and export boundary are defined by
 [ADR 0021](0021-store-cli-and-benchmark-runs-as-managed-history.md).

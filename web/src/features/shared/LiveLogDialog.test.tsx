@@ -64,30 +64,46 @@ beforeEach(async () => {
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.stubGlobal(
     'fetch',
-    vi.fn(
-      async () =>
+    vi.fn(async (input: RequestInfo | URL) => {
+      const full = String(input).endsWith('/logs/full')
+      const entries = [
+        ...(full
+          ? [
+              {
+                cursor: 60,
+                timestamp: '2026-08-17 09:59:59.000+08:00',
+                level: 'DEBUG',
+                component: 'analyser',
+                event: 'stage.progress',
+                fields: 'stage=analysis',
+                message: 'Historical analysis line',
+              },
+            ]
+          : []),
+        {
+          cursor: 120,
+          timestamp: '2026-08-17 10:00:00.000+08:00',
+          level: 'INFO',
+          component: 'planners',
+          event: 'stage.start',
+          fields: 'stage=planning',
+          message: 'Planning started',
+        },
+      ]
+      return Promise.resolve(
         new Response(
           JSON.stringify({
             attempt_id: 'attempt_1',
             log: execution.log,
-            entries: [
-              {
-                cursor: 120,
-                timestamp: '2026-08-17 10:00:00.000+08:00',
-                level: 'INFO',
-                component: 'planners',
-                event: 'stage.start',
-                fields: 'stage=planning',
-                message: 'Planning started',
-              },
-            ],
+            entries,
             start_cursor: 0,
             end_cursor: 120,
-            has_more_before: false,
+            has_more_before: !full,
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         ),
-    ),
+      )
+    }),
   )
 })
 
@@ -153,5 +169,59 @@ describe('Attempt live logs', () => {
 
     expect(source.closed).toBe(true)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('loads the full snapshot, keeps streaming, and filters by level and task', async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <ExecutionLogAccess execution={execution} />
+      </QueryClientProvider>,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'View live logs' }))
+    expect(await screen.findByText(/Planning started/)).toBeInTheDocument()
+    expect(screen.queryByText(/Historical analysis line/)).not.toBeInTheDocument()
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Read full log' }))
+    expect(await screen.findByText(/Historical analysis line/)).toBeInTheDocument()
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2))
+    expect(FakeEventSource.instances[0].closed).toBe(true)
+    expect(FakeEventSource.instances[1].url).toContain('after_cursor=120')
+
+    act(() => {
+      FakeEventSource.instances[1].emit('log_entry', {
+        cursor: 180,
+        timestamp: '2026-08-17 10:00:01.000+08:00',
+        level: 'ERROR',
+        component: 'model',
+        event: 'model.fail',
+        fields: '',
+        message: 'Model failed',
+      })
+      FakeEventSource.instances[1].emit('log_entry', {
+        cursor: 220,
+        timestamp: '2026-08-17 10:00:02.000+08:00',
+        level: 'WARNING',
+        component: 'analyser',
+        event: 'fallback.apply',
+        fields: '',
+        message: 'Analysis fallback',
+      })
+    })
+
+    await userEvent.selectOptions(screen.getByLabelText('Log level'), 'ERROR')
+    expect(screen.getByText('Model failed')).toBeInTheDocument()
+    expect(screen.queryByText(/Planning started/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Analysis fallback')).not.toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByLabelText('Log level'), '__all__')
+    await userEvent.selectOptions(screen.getByLabelText('Task'), 'analyser')
+    expect(screen.getByText(/Historical analysis line/)).toBeInTheDocument()
+    expect(screen.getByText('Analysis fallback')).toBeInTheDocument()
+    expect(screen.queryByText('Model failed')).not.toBeInTheDocument()
   })
 })

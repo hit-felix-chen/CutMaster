@@ -1207,7 +1207,9 @@ function RunUsagePanel({ modelUsage }: { modelUsage: RunModelUsage }) {
   const { t, i18n } = useTranslation('common')
   const total = modelUsage.run_total
   const modelEntries = Object.entries(total.by_model)
-  const taskEntries = Object.entries(total.by_task)
+  const taskEntries = Object.entries(total.by_task).sort(([left], [right]) =>
+    compareAsterTasks(left, right),
+  )
   return (
     <section className="run-usage" aria-labelledby="run-usage-title">
       <header className="run-usage__header">
@@ -1336,21 +1338,43 @@ function UsageBreakdown({
     <section>
       <h4>{title}</h4>
       <div>
-        {items.map(([name, usage]) => (
-          <article key={name}>
-            <div className="run-usage__group-name">
-              {showAsterAgent ? <AsterAgentBadge task={name} /> : null}
-              <strong>{name}</strong>
-            </div>
-            <span>
-              {t('projects.usageBreakdown', {
-                requests: usage.request_count,
-                tokens: formatNumber(usage.total_tokens, i18n.language),
-                cost: formatCost(usage.total_cost_yuan, i18n.language),
-              })}
-            </span>
-          </article>
-        ))}
+        {showAsterAgent
+          ? groupAsterTasks(items).map((group) => (
+              <article
+                className={`run-usage__task-group${group.agent ? '' : ' run-usage__task-group--unassigned'}`}
+                key={group.key}
+              >
+                {group.agent ? <AsterAgentBadge task={group.items[0][0]} /> : null}
+                <div className="run-usage__task-rows">
+                  {group.items.map(([name, usage]) => (
+                    <div className="run-usage__task-row" key={name}>
+                      <strong>{name}</strong>
+                      <span>
+                        {t('projects.usageBreakdown', {
+                          requests: usage.request_count,
+                          tokens: formatNumber(usage.total_tokens, i18n.language),
+                          cost: formatCost(usage.total_cost_yuan, i18n.language),
+                        })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))
+          : items.map(([name, usage]) => (
+              <article key={name}>
+                <div className="run-usage__group-name">
+                  <strong>{name}</strong>
+                </div>
+                <span>
+                  {t('projects.usageBreakdown', {
+                    requests: usage.request_count,
+                    tokens: formatNumber(usage.total_tokens, i18n.language),
+                    cost: formatCost(usage.total_cost_yuan, i18n.language),
+                  })}
+                </span>
+              </article>
+            ))}
       </div>
     </section>
   )
@@ -1368,6 +1392,45 @@ const asterAgentByTask: Record<string, { initial: string; name: string }> = {
   edit_composer: { initial: 'E', name: 'Edit Composer' },
   script_review: { initial: 'R', name: 'Revision Editor' },
   revision_editor: { initial: 'R', name: 'Revision Editor' },
+}
+
+const asterTaskOrder: Record<string, number> = {
+  slot_arrangement: 0,
+  arrangement_architect: 0,
+  dialogue_anchor_selection: 1,
+  story_editor: 1,
+  candidate_retrieval: 2,
+  timeline_scout: 2,
+  candidate_visual_scoring: 3,
+  pairwise_scoring: 4,
+  edit_composer: 4,
+  script_review: 5,
+  revision_editor: 5,
+}
+
+function compareAsterTasks(left: string, right: string) {
+  const leftOrder = asterTaskOrder[left] ?? Number.MAX_SAFE_INTEGER
+  const rightOrder = asterTaskOrder[right] ?? Number.MAX_SAFE_INTEGER
+  return leftOrder - rightOrder || left.localeCompare(right)
+}
+
+function groupAsterTasks(items: Array<[string, ModelUsageBucket]>) {
+  const groups: Array<{
+    key: string
+    agent: { initial: string; name: string } | null
+    items: Array<[string, ModelUsageBucket]>
+  }> = []
+  items.forEach((item) => {
+    const agent = asterAgentByTask[item[0]] ?? null
+    const key = agent?.name ?? `task:${item[0]}`
+    const previous = groups.at(-1)
+    if (previous?.key === key) {
+      previous.items.push(item)
+    } else {
+      groups.push({ key, agent, items: [item] })
+    }
+  })
+  return groups
 }
 
 function AsterAgentBadge({ task }: { task: string }) {

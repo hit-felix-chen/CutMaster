@@ -74,6 +74,26 @@ class ManagedStateConflict(SQLiteStoreError):
         super().__init__(detail)
 
 
+class ProjectNameConflict(ManagedStateConflict):
+    """One normalized Project Name already identifies another Project."""
+
+    def __init__(self, project_id: ProjectId | str, project_name: str) -> None:
+        self.existing_project_id = (
+            project_id
+            if isinstance(project_id, ProjectId)
+            else ProjectId.parse(str(project_id))
+        )
+        self.existing_project_name = project_name
+        # Transport projections use the concise names while the explicit
+        # aliases retain the exception's conflict semantics for callers.
+        self.project_id = self.existing_project_id
+        self.project_name = self.existing_project_name
+        super().__init__(
+            "project_name_conflict",
+            f"A Project named {project_name!r} already exists",
+        )
+
+
 class IdempotencyConflict(ManagedStateConflict):
     """One command UUID was reused for a different request."""
 
@@ -238,6 +258,8 @@ class SQLiteApplicationStore:
                 for migration in MIGRATIONS:
                     if migration.version <= version:
                         continue
+                    if migration.version == 5:
+                        self._require_unique_project_names_for_migration(connection)
                     for statement in migration.statements:
                         connection.execute(statement)
                     connection.execute(f"PRAGMA user_version = {migration.version}")
@@ -246,6 +268,30 @@ class SQLiteApplicationStore:
             except Exception:
                 connection.rollback()
                 raise
+
+    @staticmethod
+    def _require_unique_project_names_for_migration(
+        connection: sqlite3.Connection,
+    ) -> None:
+        duplicate = connection.execute(
+            """
+            SELECT name, count(*) AS duplicate_count,
+                   group_concat(project_id, ', ') AS project_ids
+            FROM projects
+            GROUP BY name
+            HAVING count(*) > 1
+            ORDER BY name
+            LIMIT 1
+            """
+        ).fetchone()
+        if duplicate is None:
+            return
+        raise SQLiteStoreError(
+            "Cannot migrate to schema version 5 because Project Name "
+            f"{duplicate['name']!r} is used by {duplicate['duplicate_count']} "
+            f"Projects ({duplicate['project_ids']}). Rename or remove the "
+            "duplicates before restarting CutMaster; no data was changed."
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -387,6 +433,15 @@ class SQLiteApplicationStore:
         request = {"name": normalized_name}
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            existing = connection.execute(
+                "SELECT project_id, name FROM projects WHERE name = ?",
+                (normalized_name,),
+            ).fetchone()
+            if existing is not None:
+                raise ProjectNameConflict(
+                    existing["project_id"],
+                    existing["name"],
+                )
             project_id = str(ProjectId.new())
             connection.execute(
                 """
@@ -409,6 +464,50 @@ class SQLiteApplicationStore:
 
         return self._idempotent(command_id, "projects.create", request, action)
 
+    def ensure_project_by_name(
+        self,
+        command_id: str,
+        name: str,
+    ) -> IdempotentResult:
+        """Atomically resolve or create one Project by normalized exact name."""
+
+        normalized_name = _normalise_name(name, "Project Name")
+        request = {"name": normalized_name}
+
+        def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            existing = connection.execute(
+                "SELECT project_id FROM projects WHERE name = ?",
+                (normalized_name,),
+            ).fetchone()
+            if existing is not None:
+                return self._project_record(connection, existing["project_id"])
+            project_id = str(ProjectId.new())
+            connection.execute(
+                """
+                INSERT INTO projects (
+                    project_id, name, brief_intent, brief_target_duration,
+                    created_at, updated_at
+                ) VALUES (?, ?, NULL, NULL, ?, ?)
+                """,
+                (project_id, normalized_name, now, now),
+            )
+            self._event(
+                connection,
+                event_type="project.created",
+                occurred_at=now,
+                object_type="project",
+                object_id=project_id,
+                command_id=command_id,
+            )
+            return self._project_record(connection, project_id)
+
+        return self._idempotent(
+            command_id,
+            "projects.ensure_by_name",
+            request,
+            action,
+        )
+
     def rename_project(
         self,
         command_id: str,
@@ -419,6 +518,19 @@ class SQLiteApplicationStore:
         request = {"project_id": str(project_id), "name": normalized_name}
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
+            self._require_project(connection, str(project_id))
+            existing = connection.execute(
+                """
+                SELECT project_id, name FROM projects
+                WHERE name = ? AND project_id != ?
+                """,
+                (normalized_name, str(project_id)),
+            ).fetchone()
+            if existing is not None:
+                raise ProjectNameConflict(
+                    existing["project_id"],
+                    existing["name"],
+                )
             cursor = connection.execute(
                 "UPDATE projects SET name = ?, updated_at = ? WHERE project_id = ?",
                 (normalized_name, now, str(project_id)),

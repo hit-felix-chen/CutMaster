@@ -401,11 +401,13 @@ same Project Setup page. Closing the page does not cancel background work, and
 reopening the project restores its last explicitly saved setup and current Run
 state.
 
-Every Edit Project has an opaque stable ID and a mutable, non-unique Project
-Name. Filesystem layout and relationships use the ID, so renaming never moves
-artifacts. New projects require only a name and may begin as `Untitled Project`.
-Projects with equal names are distinguished by Material thumbnails, update
-time, and recent Run state.
+Every Edit Project has an opaque stable ID and a mutable, globally unique
+Project Name. Filesystem layout and relationships use the ID, so renaming
+never moves artifacts. New projects require only a name and may begin as
+`Untitled Project`. When Create Project finds that normalized name already in
+use, the API returns the existing Project ID; the dialog explains the conflict
+and offers a direct navigation action to that Project instead of manufacturing
+a suffix or rendering two same-name cards.
 
 ### Project Setup
 

@@ -81,11 +81,14 @@ def prepared_project(
     application: CutMasterApplication,
     tmp_path: Path,
     *,
+    project_name: str = "Web Run",
     music_duration_sec: float = 90.0,
     target_duration_sec: float = 45.0,
     ready: bool = True,
 ):
-    project = application.projects.create(CreateProjectCommand(command_id(), "Web Run"))
+    project = application.projects.create(
+        CreateProjectCommand(command_id(), project_name)
+    )
     video_path = tmp_path / f"{uuid4()}.mp4"
     music_path = tmp_path / f"{uuid4()}.mp3"
     video_path.write_bytes(b"video")
@@ -731,6 +734,7 @@ def test_start_run_rejects_unready_material_and_target_longer_than_music(
     too_long = prepared_project(
         application,
         tmp_path,
+        project_name="Web Run Too Long",
         music_duration_sec=30.0,
         target_duration_sec=45.0,
     )

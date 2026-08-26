@@ -20,6 +20,7 @@
   "project_materials_incomplete": "请为项目各选择一个视频和一个音乐素材。",
   "project_material_type_mismatch": "项目所选素材类型不正确。",
   "project_material_not_ready": "只有分析完成且状态正常的素材才能保存到项目。",
+  "project_name_conflict": "同名项目已存在。",
   "project_setup_changed": "项目设置已发生变化，请刷新后重新启动。",
   "run_material_not_ready": "所选素材尚未准备完成，不能启动剪辑。",
   "target_duration_exceeds_music_duration": "目标时长不能超过所选音乐的完整时长。",

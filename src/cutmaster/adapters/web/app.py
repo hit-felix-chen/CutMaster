@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,6 +39,9 @@ DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
 )
+_SPA_DOCUMENT_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
+_REVALIDATED_ASSET_CACHE_CONTROL = "no-cache"
+_IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 class _DormantJobDispatcher:
@@ -181,21 +185,69 @@ def _resolve_spa_directory(value: Path | str | None) -> Path | None:
 
 
 def _install_spa_routes(app: FastAPI, directory: Path) -> None:
+    index = directory / "index.html"
+    immutable_assets = _load_vite_asset_paths(directory)
+
     @app.get("/{spa_path:path}", include_in_schema=False)
     def spa(spa_path: str) -> FileResponse:
         # API misses stay API errors; the browser shell never hides a typo in an
         # HTTP resource URL behind index.html.
         if spa_path == "api" or spa_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="API resource not found")
-        requested = directory / spa_path if spa_path else directory / "index.html"
+        requested = directory / spa_path if spa_path else index
         try:
             resolved = requested.resolve()
             resolved.relative_to(directory)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="Asset not found") from exc
-        if resolved.is_file() and not resolved.is_symlink():
-            return FileResponse(resolved)
-        return FileResponse(directory / "index.html")
+        if not resolved.is_file() or resolved.is_symlink():
+            return FileResponse(
+                index,
+                headers={"Cache-Control": _SPA_DOCUMENT_CACHE_CONTROL},
+            )
+        if resolved == index:
+            cache_control = _SPA_DOCUMENT_CACHE_CONTROL
+        elif resolved.relative_to(directory).as_posix() in immutable_assets:
+            cache_control = _IMMUTABLE_ASSET_CACHE_CONTROL
+        else:
+            cache_control = _REVALIDATED_ASSET_CACHE_CONTROL
+        return FileResponse(resolved, headers={"Cache-Control": cache_control})
+
+
+def _load_vite_asset_paths(directory: Path) -> frozenset[str]:
+    """Return build outputs whose content-addressed URLs are safe to cache."""
+
+    try:
+        manifest = json.loads(
+            (directory / ".vite" / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return frozenset()
+    if not isinstance(manifest, dict):
+        return frozenset()
+
+    assets: set[str] = set()
+    for entry in manifest.values():
+        if not isinstance(entry, dict):
+            continue
+        _add_manifest_asset(assets, entry.get("file"))
+        for field in ("css", "assets"):
+            values = entry.get(field)
+            if isinstance(values, list):
+                for value in values:
+                    _add_manifest_asset(assets, value)
+    return frozenset(assets)
+
+
+def _add_manifest_asset(assets: set[str], value: object) -> None:
+    if not isinstance(value, str):
+        return
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return
+    normalized = path.as_posix().lstrip("./")
+    if normalized.startswith("assets/"):
+        assets.add(normalized)
 
 
 __all__ = ["DEFAULT_DEV_ORIGINS", "create_app"]

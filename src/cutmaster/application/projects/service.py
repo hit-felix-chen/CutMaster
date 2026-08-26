@@ -17,6 +17,7 @@ from cutmaster.application.ports.data_root import (
 from cutmaster.application.projects.commands import (
     CreateProjectCommand,
     DeleteProjectCommand,
+    EnsureProjectByNameCommand,
     RenameProjectCommand,
     SaveCreativeBriefCommand,
     SaveProjectSetupCommand,
@@ -84,6 +85,14 @@ class ProjectsService:
     @root_shared_operation
     def create(self, command: CreateProjectCommand) -> ProjectView:
         result = self._store.create_project(command.command_id, command.name)
+        return _project_view(result.value)
+
+    @root_shared_operation
+    def ensure_by_name(self, command: EnsureProjectByNameCommand) -> ProjectView:
+        result = self._store.ensure_project_by_name(
+            command.command_id,
+            command.name,
+        )
         return _project_view(result.value)
 
     @root_shared_operation

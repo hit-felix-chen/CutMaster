@@ -29,6 +29,19 @@ def attempt_logs(
     return result
 
 
+@router.get("/{attempt_id}/logs/full")
+def full_attempt_logs(
+    attempt_id: str,
+    application: ApplicationDependency,
+) -> dict[str, object]:
+    """Return every complete line in the current persisted log snapshot."""
+
+    parsed = AttemptId.parse(attempt_id)
+    result = attempt_log_page_view(application.jobs.full_attempt_log(parsed))
+    result["attempt_id"] = str(parsed)
+    return result
+
+
 @router.get("/{attempt_id}/logs/stream", response_class=StreamingResponse)
 async def attempt_logs_stream(
     attempt_id: str,

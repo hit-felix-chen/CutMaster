@@ -41,6 +41,13 @@ class UploadPolicy:
     max_file_size_mb: float | None = None
 
 
+def _remaining_timeout(deadline: float, operation: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ASRError(f"Fun-ASR overall timeout expired while {operation}")
+    return remaining
+
+
 def _headers(api_key: str, **extra: str) -> dict[str, str]:
     if not api_key.strip():
         raise ASRError("DashScope ASR API key is empty")
@@ -70,6 +77,8 @@ def extract_asr_audio(
     video_path: Path,
     audio_path: Path,
     cancellation_token: CancellationToken | None = None,
+    *,
+    deadline: float | None = None,
 ) -> Path:
     raise_if_cancelled(cancellation_token)
     audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +101,19 @@ def extract_asr_audio(
         "64k",
         str(temporary),
     ]
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            timeout=(
+                _remaining_timeout(deadline, "extracting ASR audio")
+                if deadline is not None
+                else None
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        temporary.unlink(missing_ok=True)
+        raise ASRError("Fun-ASR overall timeout expired while extracting audio") from exc
     try:
         raise_if_cancelled(cancellation_token)
     except WorkflowCancelledError:
@@ -102,12 +123,17 @@ def extract_asr_audio(
     return audio_path
 
 
-def _request_upload_policy(api_key: str, session=requests) -> UploadPolicy:
+def _request_upload_policy(
+    api_key: str,
+    *,
+    deadline: float,
+    session=requests,
+) -> UploadPolicy:
     response = session.get(
         UPLOAD_POLICY_URL,
         params={"action": "getPolicy", "model": "fun-asr"},
         headers=_headers(api_key),
-        timeout=30,
+        timeout=_remaining_timeout(deadline, "requesting an upload policy"),
     )
     data = (
         _response_json(response, "Requesting DashScope upload policy").get("data") or {}
@@ -130,7 +156,13 @@ def _request_upload_policy(api_key: str, session=requests) -> UploadPolicy:
     )
 
 
-def _upload_audio(audio_path: Path, policy: UploadPolicy, session=requests) -> str:
+def _upload_audio(
+    audio_path: Path,
+    policy: UploadPolicy,
+    *,
+    deadline: float,
+    session=requests,
+) -> str:
     if policy.max_file_size_mb is not None:
         max_bytes = policy.max_file_size_mb * 1024 * 1024
         if audio_path.stat().st_size > max_bytes:
@@ -153,7 +185,7 @@ def _upload_audio(audio_path: Path, policy: UploadPolicy, session=requests) -> s
             policy.upload_host,
             data=form,
             files={"file": (safe_name, handle)},
-            timeout=120,
+            timeout=_remaining_timeout(deadline, "uploading audio"),
         )
     try:
         response.raise_for_status()
@@ -164,7 +196,13 @@ def _upload_audio(audio_path: Path, policy: UploadPolicy, session=requests) -> s
     return f"oss://{key}"
 
 
-def _submit(api_key: str, oss_url: str, session=requests) -> str:
+def _submit(
+    api_key: str,
+    oss_url: str,
+    *,
+    deadline: float,
+    session=requests,
+) -> str:
     response = session.post(
         TRANSCRIPTION_URL,
         headers=_headers(
@@ -179,7 +217,7 @@ def _submit(api_key: str, oss_url: str, session=requests) -> str:
             "input": {"file_urls": [oss_url]},
             "parameters": {"diarization_enabled": True},
         },
-        timeout=30,
+        timeout=_remaining_timeout(deadline, "submitting the transcription task"),
     )
     data = _response_json(response, "Submitting Fun-ASR task")
     task_id = str((data.get("output") or {}).get("task_id") or "").strip()
@@ -192,18 +230,20 @@ def _poll(
     api_key: str,
     task_id: str,
     config: ASRConfig,
+    *,
+    deadline: float,
     session=requests,
     cancellation_token: CancellationToken | None = None,
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + config.timeout_sec
     last_status = "PENDING"
-    while time.monotonic() < deadline:
+    while True:
         raise_if_cancelled(cancellation_token)
         response = session.post(
             TASK_URL_TEMPLATE.format(task_id=task_id),
             headers=_headers(api_key),
-            timeout=30,
+            timeout=_remaining_timeout(deadline, "polling the transcription task"),
         )
+        _remaining_timeout(deadline, "polling the transcription task")
         output = _response_json(response, "Polling Fun-ASR task").get("output") or {}
         raise_if_cancelled(cancellation_token)
         last_status = str(output.get("task_status") or "").upper()
@@ -217,8 +257,8 @@ def _poll(
             return first
         if last_status in TERMINAL_FAILURES:
             raise ASRError(f"Fun-ASR task failed: {last_status}")
-        time.sleep(config.poll_interval_sec)
-    raise ASRError(f"Fun-ASR timed out; last status: {last_status}")
+        remaining = _remaining_timeout(deadline, "polling the transcription task")
+        time.sleep(min(config.poll_interval_sec, remaining))
 
 
 def _iter_sentences(data: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -340,24 +380,33 @@ def transcribe_bailian(
     subtitle_path: Path,
     config: ASRConfig,
     cancellation_token: CancellationToken | None = None,
+    *,
+    deadline: float | None = None,
 ) -> Path:
+    if deadline is None:
+        deadline = time.monotonic() + config.timeout_sec
     raise_if_cancelled(cancellation_token)
-    policy = _request_upload_policy(config.api_key)
+    policy = _request_upload_policy(config.api_key, deadline=deadline)
     raise_if_cancelled(cancellation_token)
-    oss_url = _upload_audio(audio_path, policy)
+    oss_url = _upload_audio(audio_path, policy, deadline=deadline)
     raise_if_cancelled(cancellation_token)
-    task_id = _submit(config.api_key, oss_url)
+    task_id = _submit(config.api_key, oss_url, deadline=deadline)
     raise_if_cancelled(cancellation_token)
     result = _poll(
         config.api_key,
         task_id,
         config,
+        deadline=deadline,
         cancellation_token=cancellation_token,
     )
     transcription_url = str(result.get("transcription_url") or "").strip()
     if not transcription_url:
         raise ASRError("Fun-ASR result is missing transcription_url")
-    response = requests.get(transcription_url, timeout=60)
+    response = requests.get(
+        transcription_url,
+        timeout=_remaining_timeout(deadline, "downloading the transcription result"),
+    )
+    _remaining_timeout(deadline, "downloading the transcription result")
     data = _response_json(response, "Downloading Fun-ASR result")
     raise_if_cancelled(cancellation_token)
     subtitle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,6 +442,7 @@ def prepare_subtitles(
         return subtitle_path
     if config.backend != "bailian":
         raise ValueError(f"Unsupported ASR backend in CutMaster core: {config.backend}")
+    deadline = time.monotonic() + config.timeout_sec
     audio_path = output_dir / "source_audio.m4a"
     if not (config.reuse and audio_path.is_file() and audio_path.stat().st_size > 0):
         stage_started = time.monotonic()
@@ -405,7 +455,12 @@ def prepare_subtitles(
             sample_rate_hz=16000,
             channels=1,
         )
-        extract_asr_audio(video_path, audio_path, cancellation_token)
+        extract_asr_audio(
+            video_path,
+            audio_path,
+            cancellation_token,
+            deadline=deadline,
+        )
         log_event(
             "INFO",
             "asr",
@@ -430,6 +485,7 @@ def prepare_subtitles(
         subtitle_path,
         config,
         cancellation_token,
+        deadline=deadline,
     )
     raise_if_cancelled(cancellation_token)
     log_event(

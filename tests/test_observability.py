@@ -12,11 +12,52 @@ from cutmaster.domain.ids import JobId
 from cutmaster.infrastructure.observability.job_logs import JobLogReader
 from cutmaster.infrastructure.observability.logging import (
     VALID_COMPONENTS,
+    capture_log_file,
     configure_console_logging,
     configure_logging,
     error_summary,
     log_event,
 )
+
+
+def test_additive_log_file_capture_preserves_console_and_supports_nesting(
+    tmp_path: Path,
+) -> None:
+    workflow_log = tmp_path / "workflow.log"
+    job_log = tmp_path / "job.log"
+    console = io.StringIO()
+    console_sink = logger.add(console, format="{message}")
+    try:
+        with capture_log_file(workflow_log):
+            log_event("INFO", "cutmaster", "workflow.start", "Workflow started")
+            with capture_log_file(job_log):
+                log_event(
+                    "WARNING",
+                    "model",
+                    "model.retry",
+                    "Nested Job event",
+                    attempt=2,
+                )
+                assert "Nested Job event" in job_log.read_text(encoding="utf-8")
+            log_event("SUCCESS", "cutmaster", "workflow.complete", "Workflow done")
+        log_event(
+            "INFO",
+            "cutmaster",
+            "stage.progress",
+            "Console remains configured",
+        )
+    finally:
+        logger.remove(console_sink)
+
+    assert console.getvalue().count("Workflow started") == 1
+    assert console.getvalue().count("Nested Job event") == 1
+    assert console.getvalue().count("Workflow done") == 1
+    assert console.getvalue().count("Console remains configured") == 1
+    workflow_lines = workflow_log.read_text(encoding="utf-8").splitlines()
+    job_lines = job_log.read_text(encoding="utf-8").splitlines()
+    assert len(workflow_lines) == 3
+    assert len(job_lines) == 1
+    assert "| WARNING  | model | model.retry | attempt=2 | Nested Job event" in job_lines[0]
 
 
 def test_dialogue_anchor_stage_is_part_of_log_taxonomy() -> None:

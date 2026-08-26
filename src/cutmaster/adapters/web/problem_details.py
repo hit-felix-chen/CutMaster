@@ -39,6 +39,7 @@ from cutmaster.infrastructure.persistence.sqlite import (
     ActiveAttemptBlocker,
     ManagedStateConflict,
     ManagedStateNotFound,
+    ProjectNameConflict,
 )
 from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialConsumedError,
@@ -62,6 +63,7 @@ def problem_response(
     command_id: str | None = None,
     field_errors: list[dict[str, Any]] | None = None,
     blockers: list[dict[str, Any]] | None = None,
+    parameters: dict[str, Any] | None = None,
     retryable: bool = False,
 ) -> JSONResponse:
     payload: dict[str, Any] = {
@@ -79,6 +81,8 @@ def problem_response(
         payload["field_errors"] = field_errors
     if blockers:
         payload["blockers"] = blockers
+    if parameters:
+        payload["parameters"] = parameters
     return JSONResponse(
         status_code=status,
         content=payload,
@@ -286,6 +290,24 @@ def install_problem_handlers(app: FastAPI) -> None:
             blockers=[
                 {"type": "attempt", "attempt_id": value} for value in error.attempt_ids
             ],
+        )
+
+    @app.exception_handler(ProjectNameConflict)
+    async def project_name_conflict(
+        request: Request,
+        error: ProjectNameConflict,
+    ) -> JSONResponse:
+        return problem_response(
+            request,
+            status=409,
+            code=error.code,
+            title="Project Name already exists",
+            detail=str(error),
+            command_id=_command_id(request),
+            parameters={
+                "project_id": str(error.project_id),
+                "project_name": error.project_name,
+            },
         )
 
     @app.exception_handler(ManagedStateConflict)

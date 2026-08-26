@@ -3,6 +3,7 @@
 from cutmaster.application.projects.commands import (
     CreateProjectCommand,
     DeleteProjectCommand,
+    EnsureProjectByNameCommand,
     RenameProjectCommand,
     SaveCreativeBriefCommand,
     SaveProjectSetupCommand,
@@ -15,6 +16,7 @@ __all__ = [
     "CreateProjectCommand",
     "DeleteProjectCommand",
     "DeletedProjectView",
+    "EnsureProjectByNameCommand",
     "ProjectView",
     "ProjectsService",
     "RenameProjectCommand",

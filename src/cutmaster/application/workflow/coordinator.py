@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from cutmaster.application.jobs import EnqueueMaterialAnalysisCommand
 from cutmaster.application.projects import (
-    CreateProjectCommand,
+    EnsureProjectByNameCommand,
     SaveProjectSetupCommand,
 )
 from cutmaster.application.renders import CreateRenderVariantCommand
@@ -24,6 +24,11 @@ from cutmaster.application.workflow.contracts import (
 from cutmaster.domain.attempts import AttemptStatus, TERMINAL_ATTEMPT_STATUSES
 from cutmaster.domain.ids import FrozenEditId, JobId
 from cutmaster.domain.materials import MaterialCondition, MaterialType
+from cutmaster.infrastructure.observability.logging import (
+    capture_log_file,
+    error_summary,
+    log_event,
+)
 
 if TYPE_CHECKING:
     from cutmaster.application.cutmaster import CutMasterApplication
@@ -67,7 +72,7 @@ class ManagedWorkflowCoordinator:
     ) -> dict[str, Any]:
         """Ensure and synchronously analyse one managed video Material."""
 
-        material = self._ensure_ready_material(
+        material, _job_id = self._ensure_ready_material(
             MaterialType.VIDEO,
             source_path=source_path,
             candidate_name=material_name,
@@ -83,7 +88,7 @@ class ManagedWorkflowCoordinator:
     ) -> dict[str, Any]:
         """Ensure and synchronously analyse one managed music Material."""
 
-        material = self._ensure_ready_material(
+        material, _job_id = self._ensure_ready_material(
             MaterialType.MUSIC,
             source_path=source_path,
             candidate_name=material_name,
@@ -105,15 +110,15 @@ class ManagedWorkflowCoordinator:
     ) -> dict[str, Any]:
         """Create and synchronously complete one managed ASTER Run."""
 
-        video = self._ensure_ready_material(
+        video, _video_job_id = self._ensure_ready_material(
             MaterialType.VIDEO,
             existing_name=video_material,
         )
-        music = self._ensure_ready_material(
+        music, _music_job_id = self._ensure_ready_material(
             MaterialType.MUSIC,
             existing_name=music_material,
         )
-        project, run, edit = self._plan(
+        project, run, edit, _planning_job_id = self._plan(
             video,
             music,
             prompt=prompt,
@@ -142,7 +147,7 @@ class ManagedWorkflowCoordinator:
     ) -> dict[str, Any]:
         """Create and synchronously complete one managed Render Variant."""
 
-        variant = self._render(edit_id, audio_mode=audio_mode)
+        variant, _render_job_id = self._render(edit_id, audio_mode=audio_mode)
         if variant.master is None or variant.duration_sec is None:
             raise RuntimeError("Managed Renderer completed without a master")
         return {
@@ -163,20 +168,60 @@ class ManagedWorkflowCoordinator:
 
         if not isinstance(command, ExecuteManagedWorkflowCommand):
             raise TypeError("command must be an ExecuteManagedWorkflowCommand")
-        video = self._resolve_material(
+        workflow_log = (
+            self._data_root
+            / "logs"
+            / "workflows"
+            / f"workflow_{uuid4()}.log"
+        )
+        with capture_log_file(workflow_log):
+            log_event(
+                "INFO",
+                "application.workflow",
+                "workflow.start",
+                "Managed workflow started",
+                target_duration_sec=command.target_output_length_sec,
+            )
+            try:
+                result = self._execute_and_wait(command, workflow_log=workflow_log)
+            except Exception as error:
+                log_event(
+                    "ERROR",
+                    "application.workflow",
+                    "workflow.fail",
+                    "Managed workflow failed",
+                    error=error_summary(error),
+                )
+                raise
+            log_event(
+                "SUCCESS",
+                "application.workflow",
+                "workflow.complete",
+                "Managed workflow completed",
+                run_id=result.run_id,
+            )
+            return result
+
+    def _execute_and_wait(
+        self,
+        command: ExecuteManagedWorkflowCommand,
+        *,
+        workflow_log: Path,
+    ) -> ManagedWorkflowResult:
+        video, video_analysis_job_id = self._resolve_material(
             MaterialType.VIDEO,
             source_path=command.video_path,
             existing_name=command.video_material,
             candidate_name=command.video_material_name,
             subtitle_path=command.subtitle_path,
         )
-        music = self._resolve_material(
+        music, music_analysis_job_id = self._resolve_material(
             MaterialType.MUSIC,
             source_path=command.audio_path,
             existing_name=command.music_material,
             candidate_name=command.music_material_name,
         )
-        project, run, edit = self._plan(
+        project, run, edit, planning_job_id = self._plan(
             video,
             music,
             prompt=command.prompt,
@@ -187,7 +232,10 @@ class ManagedWorkflowCoordinator:
             video_title=command.video_title,
             max_clip_duration_sec=command.max_clip_duration_sec,
         )
-        variant = self._render(edit.edit_id, audio_mode=command.audio_mode)
+        variant, render_job_id = self._render(
+            edit.edit_id,
+            audio_mode=command.audio_mode,
+        )
         if variant.master is None or variant.duration_sec is None:
             raise RuntimeError("Managed Renderer completed without a master")
 
@@ -200,6 +248,13 @@ class ManagedWorkflowCoordinator:
             plan_relative_path=edit.plan.relative_path,
             master_relative_path=variant.master.relative_path,
             usage=usage,
+            workflow_log=workflow_log,
+            job_logs={
+                "analyser.video_job_log": video_analysis_job_id,
+                "analyser.music_job_log": music_analysis_job_id,
+                "planners.job_log": planning_job_id,
+                "renderer.job_log": render_job_id,
+            },
         )
         result = ManagedWorkflowResult(
             status="success",
@@ -289,7 +344,7 @@ class ManagedWorkflowCoordinator:
                     subtitle_path.resolve(),
                 )
         if material.condition is MaterialCondition.READY:
-            return material
+            return material, None
 
         submission = self._application.jobs.enqueue_material_analysis(
             EnqueueMaterialAnalysisCommand(str(uuid4()), material.material_id)
@@ -302,7 +357,7 @@ class ManagedWorkflowCoordinator:
         ready = self._application.materials.get(material.material_id)
         if ready is None or ready.condition is not MaterialCondition.READY:
             raise RuntimeError("Material Analysis completed without Ready Material")
-        return ready
+        return ready, submission.job.job_id
 
     def _plan(
         self,
@@ -317,8 +372,8 @@ class ManagedWorkflowCoordinator:
         video_title: str,
         max_clip_duration_sec: float | None,
     ):
-        project = self._application.projects.create(
-            CreateProjectCommand(str(uuid4()), project_name)
+        project = self._application.projects.ensure_by_name(
+            EnsureProjectByNameCommand(str(uuid4()), project_name)
         )
         project = self._application.projects.save_setup(
             SaveProjectSetupCommand(
@@ -349,7 +404,7 @@ class ManagedWorkflowCoordinator:
         edits = self._application.runs.list_frozen_edits(run.run_id)
         if len(edits) != 1:
             raise RuntimeError("Completed initial ASTER Run must own one Frozen Edit")
-        return project, run, edits[0]
+        return project, run, edits[0], submission.job.job_id
 
     def _render(self, edit_id: FrozenEditId, *, audio_mode: str):
         submission = self._application.renders.create(
@@ -362,8 +417,11 @@ class ManagedWorkflowCoordinator:
             worker_id=self._worker_id,
         )
         self._require_complete(submission.attempt.attempt_id, "Renderer")
-        return self._application.renders.get(
-            submission.render_variant.render_variant_id
+        return (
+            self._application.renders.get(
+                submission.render_variant.render_variant_id
+            ),
+            submission.job.job_id,
         )
 
     @property
@@ -389,11 +447,23 @@ class ManagedWorkflowCoordinator:
         plan_relative_path: str,
         master_relative_path: str,
         usage: dict[str, Any],
+        workflow_log: Path,
+        job_logs: dict[str, JobId | None],
     ) -> dict[str, str]:
         artifacts: dict[str, str] = {
             "planners.render_plan": plan_relative_path,
             "renderer.output_video": master_relative_path,
+            "workflow.log": self._relative_existing(workflow_log),
         }
+        for logical_key, job_id in job_logs.items():
+            if job_id is None:
+                continue
+            job_log = self._data_root / "logs" / "jobs" / f"{job_id}.log"
+            if not job_log.is_file() or job_log.is_symlink():
+                raise RuntimeError(
+                    f"Managed Job completed without its canonical log: {job_id}"
+                )
+            artifacts[logical_key] = self._relative_existing(job_log)
         for material_id, names in (
             (
                 video_material_id,

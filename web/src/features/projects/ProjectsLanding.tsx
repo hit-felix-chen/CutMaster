@@ -12,13 +12,18 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { appRoutes } from '@/app/routes'
 import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
 import { OperationProblem } from '@/components/ui/OperationProblem'
 import { StatusBadge } from '@/components/ui/StatusBadge'
-import { api, collectionItems, type ProjectSummary } from '@/features/shared/api'
+import {
+  ApiError,
+  api,
+  collectionItems,
+  type ProjectSummary,
+} from '@/features/shared/api'
 
 export function ProjectsLanding() {
   const { t, i18n } = useTranslation('common')
@@ -374,6 +379,7 @@ function DeleteProjectDialog({
 
 function CreateProjectDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation('common')
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const create = useMutation({
@@ -383,6 +389,52 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
       onClose()
     },
   })
+  const conflict = projectNameConflict(create.error)
+  if (conflict) {
+    return (
+      <div className="dialog-layer" role="presentation">
+        <div
+          className="dialog"
+          role="alertdialog"
+          aria-labelledby="create-project-conflict-title"
+          aria-describedby="create-project-conflict-body"
+        >
+          <header>
+            <h2 id="create-project-conflict-title">
+              {t('projects.createConflictTitle')}
+            </h2>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={onClose}
+              aria-label={t('common.close')}
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
+          </header>
+          <p id="create-project-conflict-body">
+            {t('projects.createConflictBody', { name: conflict.projectName })}
+          </p>
+          <footer>
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={() => create.reset()}
+            >
+              {t('projects.createConflictBack')}
+            </button>
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={() => navigate(appRoutes.projectOverview(conflict.projectId))}
+            >
+              {t('projects.createConflictOpen')}
+            </button>
+          </footer>
+        </div>
+      </div>
+    )
+  }
   return (
     <div
       className="dialog-layer"
@@ -393,20 +445,22 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
     >
       <form
         className="dialog"
+        role="dialog"
+        aria-labelledby="create-project-title"
         onSubmit={(event) => {
           event.preventDefault()
           create.mutate()
         }}
       >
         <header>
-          <h2>{t('projects.createTitle')}</h2>
+          <h2 id="create-project-title">{t('projects.createTitle')}</h2>
           <button
             className="icon-button"
             type="button"
             onClick={onClose}
             aria-label={t('common.close')}
           >
-            <X size={18} />
+            <X size={18} aria-hidden="true" />
           </button>
         </header>
         <label className="field">
@@ -433,4 +487,20 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
       </form>
     </div>
   )
+}
+
+function projectNameConflict(error: unknown) {
+  if (
+    !(error instanceof ApiError) ||
+    error.status !== 409 ||
+    error.problem?.code !== 'project_name_conflict'
+  ) {
+    return null
+  }
+  const projectId = error.problem.parameters?.project_id
+  const projectName = error.problem.parameters?.project_name
+  if (typeof projectId !== 'string' || typeof projectName !== 'string') {
+    return null
+  }
+  return { projectId, projectName }
 }

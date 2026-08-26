@@ -20,7 +20,13 @@ from cutmaster.workflow.analyser.tools.cache import (
 )
 from cutmaster.workflow.contracts.video import SpeechMode, TimelineRole
 from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
-from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.workflow.prompting import (
+    PromptFailureCode,
+    PromptStage,
+    PromptTask,
+    build_prompt_failure,
+    prompt_registry,
+)
 from cutmaster.workflow.prompting.analyser import (
     SCENE_BOUNDARY_PROMPT_VERSION,
     SceneBoundaryDetectionDetails,
@@ -411,27 +417,62 @@ def detect_scene_boundaries(
             def validate(parsed: dict[str, Any]) -> list[dict[str, Any]]:
                 return _validate_window_decisions(parsed, focus_shot_ids)
 
-            decisions = context.call_prompt(
-                package=package,
-                config=vlm_config,
-                validate_business=validate,
-                image_data_urls=image_data_urls,
-                image_labels=image_labels,
-            )
-            write_json_checkpoint(
-                checkpoint_path,
-                {
-                    "schema_version": "1.0",
-                    "window_id": window.window_id,
-                    "prompt_id": package.prompt_id,
-                    "prompt_version": package.prompt_version,
-                    "prompt_fingerprint": package.fingerprint,
-                    "contract_fingerprint": package.response_contract.fingerprint,
-                    "context_shot_ids": [str(shot["shot_id"]) for shot in window_shots],
-                    "focus_shot_ids": focus_shot_ids,
-                    "response": {"decisions": decisions},
-                },
-            )
+            fallback: dict[str, str] | None = None
+            try:
+                decisions = context.call_prompt(
+                    package=package,
+                    config=vlm_config,
+                    validate_business=validate,
+                    image_data_urls=image_data_urls,
+                    image_labels=image_labels,
+                )
+            except Exception as exc:
+                if "data_inspection_failed" not in str(exc).lower():
+                    raise
+                decisions = [
+                    {
+                        "shot_id": shot_id,
+                        "is_scene_end": False,
+                        "confidence_likert": 1,
+                    }
+                    for shot_id in focus_shot_ids
+                ]
+                fallback = {
+                    "reason_code": (
+                        PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED.value
+                    ),
+                    "strategy": "assume_no_scene_boundaries",
+                }
+                failure = build_prompt_failure(
+                    PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED,
+                    operation=package.operation,
+                    error_message=str(exc),
+                )
+                log_event(
+                    "WARNING",
+                    "analyser",
+                    "fallback.apply",
+                    "Scene boundary window skipped after provider content inspection; "
+                    "assuming no Scene boundaries",
+                    window_id=window.window_id,
+                    focus_shots=len(focus_shot_ids),
+                    fallback=fallback["strategy"],
+                    **failure,
+                )
+            checkpoint_payload: dict[str, Any] = {
+                "schema_version": "1.0",
+                "window_id": window.window_id,
+                "prompt_id": package.prompt_id,
+                "prompt_version": package.prompt_version,
+                "prompt_fingerprint": package.fingerprint,
+                "contract_fingerprint": package.response_contract.fingerprint,
+                "context_shot_ids": [str(shot["shot_id"]) for shot in window_shots],
+                "focus_shot_ids": focus_shot_ids,
+                "response": {"decisions": decisions},
+            }
+            if fallback is not None:
+                checkpoint_payload["fallback"] = fallback
+            write_json_checkpoint(checkpoint_path, checkpoint_payload)
             raise_if_cancelled(cancellation_token)
         else:
             raise_if_cancelled(cancellation_token)

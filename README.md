@@ -232,13 +232,16 @@ CLI 会自动读取与 `config.toml` 同目录的 `.env`，且不会覆盖进程
 
 ### 本地 Web 工作台
 
-先构建前端，然后启动本地应用：
+首次检出代码后安装前端依赖，然后启动本地应用：
 
 ```bash
 npm --prefix web ci
-npm --prefix web run build
 uv run cutmaster serve --config config.toml
 ```
+
+在源码工作树中，`serve` 会在打开浏览器前检查 `web/dist`；当产物缺失或落后于
+前端源码时会自动执行生产构建。也可以随时手动运行
+`npm --prefix web run build`。已打开的旧页面在构建更新后需要刷新一次。
 
 默认在 `http://127.0.0.1:8000` 打开。Web 工作台使用真实 Application 数据
 提供 Projects、Material Library、Video/Music Memory Explorer、Activity 和

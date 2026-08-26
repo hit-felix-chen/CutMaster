@@ -21,7 +21,9 @@ from cutmaster.application.materials import MaterialsService
 from cutmaster.application.projects import (
     CreateProjectCommand,
     DeleteProjectCommand,
+    EnsureProjectByNameCommand,
     ProjectsService,
+    RenameProjectCommand,
     SaveCreativeBriefCommand,
     SetProjectMaterialsCommand,
 )
@@ -48,7 +50,9 @@ from cutmaster.infrastructure.persistence.sqlite import (
     ActiveAttemptBlocker,
     IdempotencyConflict,
     ManagedStateConflict,
+    ProjectNameConflict,
     SQLiteApplicationStore,
+    SQLiteStoreError,
 )
 from cutmaster.infrastructure.storage.local.material_catalog import (
     MaterialCatalog,
@@ -401,10 +405,10 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
     assert projects.list() == (first,)
     with pytest.raises(IdempotencyConflict):
         projects.create(CreateProjectCommand(create_id, "Different"))
-    assert store.schema_version == 4
+    assert store.schema_version == 5
     assert store.integrity_check() == "ok"
     with sqlite3.connect(store.database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         connection.execute("PRAGMA foreign_keys = ON")
         with pytest.raises(sqlite3.IntegrityError):
@@ -426,6 +430,97 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
             )
 
 
+def test_project_names_are_unique_after_normalisation_and_case_sensitive(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    store = SQLiteApplicationStore(managed_configuration.data_root)
+    projects = ProjectsService(managed_configuration, store)
+    existing = projects.create(CreateProjectCommand(command_id(), "Shared Project"))
+
+    with pytest.raises(ProjectNameConflict) as duplicate:
+        projects.create(CreateProjectCommand(command_id(), "  Shared Project  "))
+
+    assert duplicate.value.code == "project_name_conflict"
+    assert duplicate.value.project_id == existing.project_id
+    assert duplicate.value.project_name == "Shared Project"
+    case_variant = projects.create(
+        CreateProjectCommand(command_id(), "shared project")
+    )
+    assert case_variant.project_id != existing.project_id
+
+
+def test_project_rename_rejects_another_projects_name(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    store = SQLiteApplicationStore(managed_configuration.data_root)
+    projects = ProjectsService(managed_configuration, store)
+    existing = projects.create(CreateProjectCommand(command_id(), "Existing"))
+    renamed = projects.create(CreateProjectCommand(command_id(), "Rename Me"))
+
+    with pytest.raises(ProjectNameConflict) as duplicate:
+        projects.rename(
+            RenameProjectCommand(command_id(), renamed.project_id, " Existing ")
+        )
+
+    assert duplicate.value.project_id == existing.project_id
+    assert duplicate.value.project_name == "Existing"
+    assert projects.get(renamed.project_id).name == "Rename Me"
+    assert (
+        projects.rename(
+            RenameProjectCommand(command_id(), renamed.project_id, "Rename Me")
+        ).project_id
+        == renamed.project_id
+    )
+
+
+def test_ensure_project_by_name_is_atomic_and_reuses_the_existing_project(
+    managed_configuration: EffectiveConfiguration,
+) -> None:
+    store = SQLiteApplicationStore(managed_configuration.data_root)
+    projects = ProjectsService(managed_configuration, store)
+
+    first = projects.ensure_by_name(
+        EnsureProjectByNameCommand(command_id(), "  Benchmark Project  ")
+    )
+    replay = projects.ensure_by_name(
+        EnsureProjectByNameCommand(command_id(), "Benchmark Project")
+    )
+
+    assert replay.project_id == first.project_id
+    assert projects.list() == (first,)
+
+    gate = Event()
+    results = []
+    errors: list[BaseException] = []
+
+    def ensure() -> None:
+        gate.wait(timeout=5)
+        try:
+            results.append(
+                projects.ensure_by_name(
+                    EnsureProjectByNameCommand(command_id(), "Concurrent Project")
+                )
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [Thread(target=ensure), Thread(target=ensure)]
+    for thread in threads:
+        thread.start()
+    gate.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(results) == 2
+    assert results[0].project_id == results[1].project_id
+    assert [item.name for item in projects.list()] == [
+        "Concurrent Project",
+        "Benchmark Project",
+    ]
+
+
 def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
     tmp_path: Path,
 ) -> None:
@@ -442,7 +537,7 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
 
     store = SQLiteApplicationStore(data_root)
 
-    assert store.schema_version == 4
+    assert store.schema_version == 5
     with sqlite3.connect(database_path) as connection:
         columns = {
             row[1]: row for row in connection.execute("PRAGMA table_info(attempts)")
@@ -460,6 +555,60 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
             row[1]: row for row in connection.execute("PRAGMA table_info(runs)")
         }
         assert run_columns["planning_options_json"][3] == 1
+        project_name_index = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("projects_name_unique_idx",),
+        ).fetchone()
+        assert project_name_index is not None
+        assert "UNIQUE INDEX" in project_name_index[0]
+
+
+def test_schema_v5_refuses_legacy_duplicate_project_names_without_mutation(
+    tmp_path: Path,
+) -> None:
+    from cutmaster.infrastructure.persistence.sqlite.migrations import MIGRATIONS
+
+    data_root = tmp_path / "duplicate-project-data"
+    data_root.mkdir()
+    database_path = data_root / "cutmaster.db"
+    with sqlite3.connect(database_path) as connection:
+        for migration in MIGRATIONS:
+            if migration.version >= 5:
+                break
+            for statement in migration.statements:
+                connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {migration.version}")
+        connection.executemany(
+            """
+            INSERT INTO projects (
+                project_id, name, brief_intent, brief_target_duration,
+                created_at, updated_at
+            ) VALUES (?, 'Duplicate', NULL, NULL, ?, ?)
+            """,
+            [
+                (
+                    "project_00000000-0000-4000-8000-000000000001",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "project_00000000-0000-4000-8000-000000000002",
+                    "2026-01-01T00:00:01+00:00",
+                    "2026-01-01T00:00:01+00:00",
+                ),
+            ],
+        )
+        connection.commit()
+
+    with pytest.raises(SQLiteStoreError, match="Project Name 'Duplicate'.*2 Projects"):
+        SQLiteApplicationStore(data_root)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("SELECT count(*) FROM projects").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'projects_name_unique_idx'"
+        ).fetchone() is None
 
 
 def test_run_snapshots_adapter_planning_options_separately_from_configuration(

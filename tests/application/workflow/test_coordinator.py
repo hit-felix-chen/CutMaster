@@ -148,10 +148,20 @@ class _Projects:
     def __init__(self) -> None:
         self.created = []
         self.setup = []
+        self._by_name = {}
 
     def create(self, command):
         self.created.append(command)
-        return SimpleNamespace(project_id=ProjectId.new())
+        project = SimpleNamespace(project_id=ProjectId.new(), name=command.name.strip())
+        self._by_name[project.name] = project
+        return project
+
+    def ensure_by_name(self, command):
+        name = command.name.strip()
+        project = self._by_name.get(name)
+        if project is not None:
+            return project
+        return self.create(command)
 
     def save_setup(self, command):
         self.setup.append(command)
@@ -284,8 +294,15 @@ class _Executor:
         self.application = application
         self.calls: list[tuple[str, JobId, str]] = []
 
+    def _write_job_log(self, job_id: JobId, message: str) -> None:
+        root = self.application.settings.effective_configuration.data_root
+        path = root / "logs" / "jobs" / f"{job_id}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{message}\n", encoding="utf-8")
+
     def execute_material_job(self, job_id: JobId, **kwargs) -> None:
         self.calls.append(("material", job_id, kwargs["worker_id"]))
+        self._write_job_log(job_id, "material analysis")
         material_id = self.application.jobs.material_by_job[job_id]
         self.application.materials.mark_ready(material_id)
         attempt = next(
@@ -297,10 +314,12 @@ class _Executor:
 
     def execute_run_job(self, job_id: JobId, **kwargs) -> None:
         self.calls.append(("run", job_id, kwargs["worker_id"]))
+        self._write_job_log(job_id, "aster planning")
         self.application.runs.complete_job(job_id)
 
     def execute_render_job(self, job_id: JobId, **kwargs) -> None:
         self.calls.append(("render", job_id, kwargs["worker_id"]))
+        self._write_job_log(job_id, "rendering")
         self.application.renders.complete_job(job_id)
 
 
@@ -398,11 +417,58 @@ def test_execute_and_wait_preserves_managed_history_and_portable_artifacts(
     assert result.artifacts["planners.selection_diagnostics"].endswith(
         "selection_diagnostics.json"
     )
+    assert result.artifacts["workflow.log"].startswith("logs/workflows/")
+    assert result.artifacts["analyser.video_job_log"].startswith("logs/jobs/")
+    assert result.artifacts["analyser.music_job_log"].startswith("logs/jobs/")
+    assert result.artifacts["planners.job_log"].startswith("logs/jobs/")
+    assert result.artifacts["renderer.job_log"].startswith("logs/jobs/")
     result_path = root.joinpath(*result.artifacts["workflow.result"].split("/"))
     usage_path = root.joinpath(*result.artifacts["workflow.model_usage"].split("/"))
+    workflow_log = root.joinpath(*result.artifacts["workflow.log"].split("/"))
     assert json.loads(result_path.read_text(encoding="utf-8")) == result.to_dict()
     assert json.loads(usage_path.read_text(encoding="utf-8")) == result.model_usage
+    assert workflow_log.is_file()
+    workflow_log_text = workflow_log.read_text(encoding="utf-8")
+    assert "| application.workflow | workflow.start" in workflow_log_text
+    assert "| application.workflow | workflow.complete" in workflow_log_text
     assert all(not Path(path).is_absolute() for path in result.artifacts.values())
+
+
+def test_execute_and_wait_reuses_project_name_and_creates_another_run(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".cutmaster"
+    root.mkdir()
+    application = _application(root)
+    coordinator = ManagedWorkflowCoordinator(
+        application,
+        job_executor=_Executor(application),
+    )
+    video = tmp_path / "movie.mp4"
+    music = tmp_path / "score.mp3"
+    video.write_bytes(b"video")
+    music.write_bytes(b"music")
+    command = ExecuteManagedWorkflowCommand(
+        prompt="Create a coherent character arc",
+        video_path=video,
+        audio_path=music,
+        video_material_name="Feature",
+        music_material_name="Score",
+        project_name="  Repeated Benchmark Task  ",
+        target_output_length_sec=60,
+    )
+
+    first = coordinator.execute_and_wait(command)
+    second = coordinator.execute_and_wait(command)
+
+    assert first.project_id == second.project_id
+    assert first.run_id != second.run_id
+    assert len(application.projects.created) == 1
+    assert len(application.projects.setup) == 2
+    assert len(application.runs.created) == 2
+    assert {str(item.project_id) for item in application.runs.created} == {
+        first.project_id
+    }
 
 
 def test_component_methods_return_managed_receipts(tmp_path: Path) -> None:

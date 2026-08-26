@@ -966,6 +966,10 @@ export const api = {
   attempts: {
     logs: (attemptId: string) =>
       apiRequest<AttemptLogPage>(`/api/attempts/${encodeURIComponent(attemptId)}/logs`),
+    fullLogs: (attemptId: string) =>
+      apiRequest<AttemptLogPage>(
+        `/api/attempts/${encodeURIComponent(attemptId)}/logs/full`,
+      ),
     logStreamUrl: (attemptId: string, afterCursor: number) =>
       `/api/attempts/${encodeURIComponent(attemptId)}/logs/stream?${new URLSearchParams(
         {

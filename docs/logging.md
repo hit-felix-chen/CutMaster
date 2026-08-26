@@ -134,12 +134,29 @@ prompt_chars
 ## 进度条与持久化文件
 
 - `cutmaster.log`：使用本规范的结构化运行日志，文件级别为 `DEBUG`。
+- `<data_root>/logs/jobs/<job_id>.log`：每个持久化 Job 的 canonical
+  Job 日志。无论 Job 是由 Web Supervisor 在隔离 Worker 中执行，还是由
+  Application 的同步 Managed Job Executor 执行，都必须写入这个相同的
+  Data Root-owned 文件。Web 只按 Job ID 读取并实时 tail 该文件，不读取
+  adapter 进程管道。日志窗口默认读取最后 50 条完整日志行；用户显式选择
+  “读取完整日志”时，Web 获取请求时刻的完整文件快照，再从快照末尾的字节
+  游标继续通过 SSE 追加，切换过程不得漏行。前端的 Level 与 Component
+  筛选只影响显示，不影响日志接收和游标推进。
+- `workflow.log`：由 Application 同步完整流程拥有的 canonical 聚合
+  日志，按实际执行顺序包含本次 Material Analysis（如有）、ASTER
+  Planning 和 Rendering Job 的日志。它作为 `workflow.log` 逻辑产物出现在
+  Managed Workflow Receipt 中。Receipt 还分别暴露
+  `analyser.video_job_log`、`analyser.music_job_log`（仅当本次确实运行对应
+  Analysis Job 时）、`planners.job_log` 和 `renderer.job_log`；各 Job 日志仍是
+  Web 按 Attempt 查看时的 authoritative source。
 - 终端：使用同一格式，默认从 `INFO` 开始。
 - `infrastructure/observability/progress.py` 的 `tqdm` 进度条：只在交互式
   终端输出到 stdout；非 TTY 的 Managed Worker 不输出进度刷新，也不写入
   Job 日志或 `cutmaster.log`。
-- benchmark 的 `logs/backend.log`：由 adapter 捕获进程输出，可以包含结构化日志与
-  第三方原始输出；CutMaster 内置 `tqdm` 在该非 TTY 通道中保持关闭。
+- benchmark 的 `logs/backend.log`：不是运行时重定向。Benchmark Adapter
+  不得捕获 CutMaster Worker 的 stdout/stderr 来生成该文件；只在同步
+  Managed Workflow 成功并拿到 Receipt 后，验证 `workflow.log` 的 Data
+  Root-relative 引用，再将该 CutMaster-owned 产物复制为提交副本。
 - `analysis_history.json`、`planners_history.json`：仅保存轻量工作流产物和脚本版本，不包含模型调用历史。
 - `planners_calls.json`：按任务和调用组织 Planners 阶段调用树，完整保存每次重试的模型回复；Prompt 仅保存标识、版本、指纹、字符数和上下文字段等元数据，不保存正文或上下文快照。
 - `shot_annotations/`：按 Segment 保存可断点复用的有序 Shot 结构化标注数组。
@@ -162,9 +179,10 @@ log_event(
 )
 ```
 
-禁止在业务模块中直接调用或配置 Loguru。日志 sink 只在进程边界初始化：
-需要独立文件的入口使用 `configure_logging()`；Managed Worker 使用
-`configure_console_logging()` 输出无 ANSI 的结构化 stderr，由 Supervisor
-单次持久化到对应 Job 日志。Application、Domain 和 Workflow 不感知当前入口
-类型。Benchmark Adapter 作为平级入口，只捕获自己的 Worker 进程输出，不调用
-CLI 来配置日志。
+禁止在业务模块中直接调用或配置 Loguru。日志 sink 只在执行边界初始化：
+Managed Worker 使用 `configure_console_logging()` 输出无 ANSI 的结构化
+stderr，由 Supervisor 单次持久化到对应 canonical Job 日志；Application
+的同步 Managed Job Executor 必须在自己的 Job 执行边界建立同等的
+canonical sink，不得依赖 CLI 或 Benchmark 重定向。Domain 和 Workflow 不感知
+当前入口类型。CLI 与 Benchmark 作为平级入口，都不调用另一个 adapter
+来配置或捕获日志。

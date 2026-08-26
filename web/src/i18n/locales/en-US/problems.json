@@ -20,6 +20,7 @@
   "project_materials_incomplete": "Select exactly one video and one music Material.",
   "project_material_type_mismatch": "A selected Project Material has the wrong type.",
   "project_material_not_ready": "Only Ready Materials can be saved to a Project.",
+  "project_name_conflict": "A Project with this name already exists.",
   "project_setup_changed": "The Project setup changed. Refresh and start again.",
   "run_material_not_ready": "The selected Materials are not Ready yet.",
   "target_duration_exceeds_music_duration": "Target Duration cannot exceed the full music duration.",

@@ -285,6 +285,12 @@ class JobsService:
         return self._log_reader().tail(job.job_id, limit=tail)
 
     @root_shared_operation
+    def full_attempt_log(self, attempt_id: AttemptId) -> AttemptLogPageView:
+        _require_attempt_id(attempt_id)
+        job = self.get_job_for_attempt(attempt_id)
+        return self._log_reader().full(job.job_id)
+
+    @root_shared_operation
     def attempt_log_after(
         self,
         attempt_id: AttemptId,

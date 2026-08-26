@@ -461,6 +461,101 @@ def test_scene_boundary_windows_are_checkpointed_independently(
     assert cached == decisions
 
 
+def test_scene_boundary_provider_inspection_assumes_no_boundaries(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    shots = _shots(21)
+    frame_directory = tmp_path / "frames"
+    frame_directory.mkdir()
+    stub = frame_directory / "frame.jpg"
+    stub.write_bytes(b"jpeg")
+    frame_map = {
+        shot["shot_id"]: [
+            {"file": stub.name, "time_sec": float(index)}
+            for index in range(3)
+        ]
+        for shot in shots
+    }
+    monkeypatch.setattr(
+        "cutmaster.workflow.analyser.tools.scene_segmenter.prepare_scene_frames",
+        lambda *_args, **_kwargs: frame_map,
+    )
+
+    class Context:
+        calls = 0
+
+        def call_prompt(self, **kwargs):
+            self.calls += 1
+            focus_ids = kwargs["package"].response_contract.schema["properties"][
+                "decisions"
+            ]["items"]["properties"]["shot_id"]["enum"]
+            if self.calls == 1:
+                raise RuntimeError("data_inspection_failed")
+            parsed = {
+                "decisions": [
+                    {
+                        "shot_id": shot_id,
+                        "is_scene_end": True,
+                        "confidence_likert": 4,
+                    }
+                    for shot_id in focus_ids
+                ]
+            }
+            return kwargs["validate_business"](parsed)
+
+    context = Context()
+    checkpoint_directory = tmp_path / "windows"
+    decisions = detect_scene_boundaries(
+        Path("source.mp4"),
+        shots,
+        [],
+        context,
+        VLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_concurrency=1,
+        ),
+        SceneSegmentationConfig(),
+        frame_directory,
+        checkpoint_directory,
+    )
+
+    assert context.calls == 2
+    assert decisions[:10] == [
+        {
+            "shot_id": shot["shot_id"],
+            "is_scene_end": False,
+            "confidence_likert": 1,
+        }
+        for shot in shots[:10]
+    ]
+    assert all(item["is_scene_end"] for item in decisions[10:])
+    fallback_checkpoint = json.loads(
+        (checkpoint_directory / "scene_window_00001.json").read_text()
+    )
+    assert fallback_checkpoint["fallback"] == {
+        "reason_code": "provider_image_inspection_failed",
+        "strategy": "assume_no_scene_boundaries",
+    }
+
+    class UnexpectedContext:
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("Fallback Scene boundary checkpoint should be reused")
+
+    assert detect_scene_boundaries(
+        Path("source.mp4"),
+        shots,
+        [],
+        UnexpectedContext(),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        SceneSegmentationConfig(),
+        frame_directory,
+        checkpoint_directory,
+    ) == decisions
+
+
 def test_segment_annotation_uses_one_parallel_vlm_call_per_segment(
     monkeypatch,
     tmp_path,

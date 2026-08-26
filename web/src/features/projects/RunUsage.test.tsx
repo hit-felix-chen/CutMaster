@@ -60,12 +60,12 @@ const fullSummary = {
   price_unit: 'yuan_per_million_tokens',
   by_model: { 'qwen3.7-max': bucket },
   by_task: {
-    slot_arrangement: bucket,
-    dialogue_anchor_selection: bucket,
     candidate_retrieval: bucket,
     candidate_visual_scoring: bucket,
+    dialogue_anchor_selection: bucket,
     pairwise_scoring: bucket,
     script_review: bucket,
+    slot_arrangement: bucket,
   },
 }
 
@@ -151,9 +151,30 @@ describe('Run model usage projection', () => {
     expect(screen.getByText('slot_arrangement')).toBeVisible()
     expect(screen.getByLabelText('Arrangement Architect')).toHaveTextContent('A')
     expect(screen.getByLabelText('Story Editor')).toHaveTextContent('S')
-    expect(screen.getAllByLabelText('Timeline Scout')).toHaveLength(2)
+    expect(screen.getAllByLabelText('Timeline Scout')).toHaveLength(1)
     expect(screen.getByLabelText('Edit Composer')).toHaveTextContent('E')
     expect(screen.getByLabelText('Revision Editor')).toHaveTextContent('R')
+    const taskSection = screen
+      .getByRole('heading', { name: 'By ASTER task' })
+      .closest('section')
+    expect(
+      Array.from(
+        taskSection?.querySelectorAll('.run-usage__task-row strong') ?? [],
+      ).map((item) => item.textContent),
+    ).toEqual([
+      'slot_arrangement',
+      'dialogue_anchor_selection',
+      'candidate_retrieval',
+      'candidate_visual_scoring',
+      'pairwise_scoring',
+      'script_review',
+    ])
+    expect(taskSection?.querySelectorAll('.run-usage__task-group')).toHaveLength(5)
+    const timelineScoutGroup = screen
+      .getByLabelText('Timeline Scout')
+      .closest('article')
+    expect(timelineScoutGroup).toHaveTextContent('candidate_retrieval')
+    expect(timelineScoutGroup).toHaveTextContent('candidate_visual_scoring')
     expect(
       screen.getByText(/Model requests without reported token usage: 1/),
     ).toBeVisible()

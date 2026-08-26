@@ -5,7 +5,9 @@ from cutmaster.infrastructure.persistence.sqlite.database import (
     IdempotencyConflict,
     ManagedStateConflict,
     ManagedStateNotFound,
+    ProjectNameConflict,
     SQLiteApplicationStore,
+    SQLiteStoreError,
 )
 
 __all__ = [
@@ -13,6 +15,7 @@ __all__ = [
     "IdempotencyConflict",
     "ManagedStateConflict",
     "ManagedStateNotFound",
+    "ProjectNameConflict",
     "SQLiteApplicationStore",
+    "SQLiteStoreError",
 ]
-

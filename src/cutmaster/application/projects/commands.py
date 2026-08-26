@@ -14,6 +14,12 @@ class CreateProjectCommand:
 
 
 @dataclass(frozen=True)
+class EnsureProjectByNameCommand:
+    command_id: str
+    name: str = "Untitled Project"
+
+
+@dataclass(frozen=True)
 class RenameProjectCommand:
     command_id: str
     project_id: ProjectId
@@ -55,6 +61,7 @@ class DeleteProjectCommand:
 __all__ = [
     "CreateProjectCommand",
     "DeleteProjectCommand",
+    "EnsureProjectByNameCommand",
     "RenameProjectCommand",
     "SaveCreativeBriefCommand",
     "SaveProjectSetupCommand",

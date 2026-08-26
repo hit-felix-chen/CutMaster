@@ -72,6 +72,35 @@ class JobLogReader:
             has_more_before=len(lines) > len(selected) or start > 0,
         )
 
+    def full(self, job_id: JobId) -> AttemptLogPageView:
+        """Read every complete line present in one Job log snapshot."""
+
+        path = self.path(job_id)
+        opened = _safe_regular_file(path, self._data_root)
+        if opened is None:
+            return AttemptLogPageView(
+                path=str(path),
+                exists=False,
+                entries=(),
+                start_cursor=0,
+                end_cursor=0,
+                has_more_before=False,
+            )
+        descriptor, size = opened
+        try:
+            chunk = os.pread(descriptor, size, 0)
+        finally:
+            os.close(descriptor)
+        lines = _complete_lines(chunk, absolute_start=0)
+        return AttemptLogPageView(
+            path=str(path),
+            exists=True,
+            entries=tuple(_entry(content, end) for content, _start, end in lines),
+            start_cursor=0,
+            end_cursor=(lines[-1][2] if lines else 0),
+            has_more_before=False,
+        )
+
     def after(
         self,
         job_id: JobId,

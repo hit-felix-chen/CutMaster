@@ -301,6 +301,15 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=5,
+        statements=(
+            """
+            CREATE UNIQUE INDEX projects_name_unique_idx
+            ON projects(name)
+            """,
+        ),
+    ),
 )
 
 

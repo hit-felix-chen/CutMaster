@@ -65,7 +65,7 @@ duplicate_frame_threshold = 1.0
 # backend: ASR 服务后端，当前支持 bailian。
 # api_key_env: 保存 ASR API Key 的环境变量名；Application 配置不接受内联 api_key。
 # reuse: 是否复用已有的非空 source.srt 和 ASR 音频。
-# timeout_sec: 一个异步 ASR 任务允许等待的总时长（秒）。
+# timeout_sec: 从本地音频抽取到下载转写结果的完整 ASR 流程总时限（秒）。
 # poll_interval_sec: 查询异步 ASR 任务状态的间隔（秒）。
 # max_chars: 初始字幕条目的期望最大字符数。
 # max_subtitle_duration_sec: 初始字幕条目的期望最大持续时间（秒）。

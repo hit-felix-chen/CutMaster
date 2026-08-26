@@ -25,7 +25,10 @@ The backend also implements SQLite-backed managed identity and history for
 Attempts**, **Frozen Edits**, **Render Variants**, jobs, durable events, command
 idempotency, and settings. The local Material Catalog, managed workflow
 receipts, secret-free Effective Configuration, and Application Data Root
-resolution are active code, not design placeholders.
+resolution are active code, not design placeholders. Application-owned
+canonical Job Logs are shared by synchronous and supervised execution, while a
+synchronous complete execution additionally publishes one canonical Workflow
+Log in its Managed Workflow Receipt.
 
 The FastAPI peer adapter, React/Vite Web UI, `cutmaster serve`, and the first
 managed Web slice are implemented over the same Application Layer. Projects,
@@ -297,8 +300,13 @@ Creative Brief are not separate tabs.
 _Avoid_: Overview dashboard, setup wizard, autosaved draft
 
 **Project Name**:
-The mutable, non-unique display label of an **Edit Project**. It helps people
-recognize a workspace but is not the project's stable identity.
+The mutable, globally unique user-facing name of an **Edit Project**. Creating
+or renaming a Project to an occupied normalized name is rejected with the
+existing Project identity. Managed CLI and Benchmark workflows use an atomic
+get-or-create-by-name operation, so a repeated name creates another immutable
+**ASTER Run** inside the existing Project instead of another Project. The
+opaque Project ID remains the stable storage and relationship identity, so a
+rename never moves artifacts.
 _Avoid_: Material Name, project ID, filesystem directory
 
 **Application Data Root** *(Resolution, storage, and migration implemented)*:
@@ -321,8 +329,9 @@ _Avoid_: absolute persisted path, exported copy, source path selector
 The portable result returned by `CutMasterApplication.workflows` after a complete
 managed execution and retained as `result.json` under the owning ASTER Run. It
 identifies the authoritative Project, Run, Frozen Edit, Render Variant, and
-Materials, and maps stable logical artifact keys to normalized Application Data
-Root-relative paths. It is an index over managed product history, not a second
+Materials, and maps stable logical artifact keys—including the complete
+execution's **Workflow Log** and its constituent Job Logs—to normalized
+Application Data Root-relative paths. It is an index over managed product history, not a second
 artifact bundle or an alternative history model.
 _Avoid_: standalone workflow bundle, exported copy, absolute artifact path,
 RenderPlan
@@ -333,6 +342,9 @@ adapter writes into the benchmark-provided run directory after the managed
 workflow succeeds. The source artifacts and their Project/Run/Frozen
 Edit/Render Variant history remain authoritative inside CutMaster's Application
 Data Root; deleting or moving the submission copy does not alter that history.
+Benchmark does not redirect CutMaster stdout or stderr into this copy. After a
+successful managed execution, it validates and copies the receipt's canonical
+Workflow Log unchanged as its `logs/backend.log` submission artifact.
 _Avoid_: Managed Artifact Reference, Render Variant master, CutMaster output
 directory
 
@@ -397,13 +409,30 @@ _Avoid_: ASTER-only dispatcher, browser task runner, distributed queue
 
 **Job Log** *(Implemented for managed Execution Attempts)*:
 The append-only UTF-8 log file owned by one durable Job and therefore one
-Execution Attempt. Its absolute path is displayed in Material and ASTER Run
+Execution Attempt. Every execution strategy writes the same canonical
+`<data_root>/logs/jobs/<job_id>.log`: the Local Job Supervisor persists an
+isolated Worker's output there, while the Application synchronous Managed Job
+Executor establishes the equivalent sink itself. Its absolute path is displayed in Material and ASTER Run
 detail. Opening the viewer reads only the latest 50 complete lines and then
 tails sanitized structured entries over an Attempt-scoped SSE connection;
 closing the viewer closes that connection. The retained file, rather than a
 worker process pipe, is the authoritative source so completed and restarted
 Attempts remain inspectable.
 _Avoid_: global event stream, browser-owned process output, Activity history
+
+**Workflow Log** *(Implemented for synchronous complete managed executions)*:
+The canonical Application-owned log artifact for one complete synchronous
+Material-to-Render execution. It contains the logs of Material Analysis Jobs
+that actually ran, followed by the ASTER Planning and Rendering Job logs in
+execution order, and is exposed by the `workflow.log` logical key in the
+Managed Workflow Receipt. The same receipt exposes
+`analyser.video_job_log` and `analyser.music_job_log` only when the corresponding
+Analysis Job ran during this execution, plus `planners.job_log` and
+`renderer.job_log`. The Workflow Log does not replace those constituent Job
+Logs: Web continues to stream them by Job/Attempt. Benchmark may copy the
+Workflow Log only after success and never creates it by redirecting adapter
+process output.
+_Avoid_: Job Log, adapter stdout capture, Benchmark Submission Copy
 
 **ASTER Stage Checkpoint** *(Implemented)*:
 A secret- and path-free durable receipt written only after a complete

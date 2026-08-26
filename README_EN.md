@@ -245,13 +245,18 @@ The CLI automatically loads `.env` next to `config.toml` without overriding vari
 
 ### Local Web workspace
 
-Build the client and start the local application:
+Install the client dependencies after the initial checkout, then start the local
+application:
 
 ```bash
 npm --prefix web ci
-npm --prefix web run build
 uv run cutmaster serve --config config.toml
 ```
+
+In a source checkout, `serve` checks `web/dist` before opening the browser and
+runs a production build automatically when the assets are missing or older than
+the frontend sources. You can still run `npm --prefix web run build` manually at
+any time. Refresh an already-open page once after its bundle has been rebuilt.
 
 CutMaster opens at `http://127.0.0.1:8000` by default. The Web workspace uses
 real Application data for Projects, the Material Library, Video/Music Memory

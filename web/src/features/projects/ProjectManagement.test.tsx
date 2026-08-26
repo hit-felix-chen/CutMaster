@@ -50,7 +50,13 @@ function response(value: unknown, status = 200) {
 
 function renderLanding() {
   const router = createMemoryRouter(
-    [{ path: '/projects', element: <ProjectsLanding /> }],
+    [
+      { path: '/projects', element: <ProjectsLanding /> },
+      {
+        path: '/projects/:projectId/overview',
+        element: <div>Existing project workspace</div>,
+      },
+    ],
     { initialEntries: ['/projects'] },
   )
   const client = new QueryClient({
@@ -76,6 +82,137 @@ afterEach(() => {
 })
 
 describe('Project landing management', () => {
+  it('offers the existing Project when creation reports a name conflict', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/api/projects' && !init?.method) {
+          return response({ items: [] })
+        }
+        if (url === '/api/projects' && init?.method === 'POST') {
+          return response(
+            {
+              title: 'Project name conflict',
+              detail: 'A Project with this name already exists.',
+              code: 'project_name_conflict',
+              parameters: {
+                project_id: 'project_existing',
+                project_name: 'Repeated Project',
+              },
+            },
+            409,
+          )
+        }
+        return response({ detail: 'Not found' }, 404)
+      }),
+    )
+    const { router } = renderLanding()
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'New Project' }))
+    await user.type(screen.getByLabelText('Project name'), 'Repeated Project')
+    await user.click(screen.getByRole('button', { name: 'Create Project' }))
+
+    const conflict = await screen.findByRole('alertdialog', {
+      name: 'A project with this name already exists',
+    })
+    expect(
+      within(conflict).getByText(
+        '“Repeated Project” already identifies an existing project. Change the name or open that project.',
+      ),
+    ).toBeVisible()
+
+    await user.click(within(conflict).getByRole('button', { name: 'Back to edit' }))
+    expect(screen.getByLabelText('Project name')).toHaveValue('Repeated Project')
+
+    await user.click(screen.getByRole('button', { name: 'Create Project' }))
+    const repeatedConflict = await screen.findByRole('alertdialog', {
+      name: 'A project with this name already exists',
+    })
+    await user.click(
+      within(repeatedConflict).getByRole('button', {
+        name: 'Open existing project',
+      }),
+    )
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        '/projects/project_existing/overview',
+      ),
+    )
+  })
+
+  it('keeps non-conflict creation failures in the standard problem view', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/api/projects' && !init?.method) {
+          return response({ items: [] })
+        }
+        if (url === '/api/projects' && init?.method === 'POST') {
+          return response({ code: 'application_error' }, 503)
+        }
+        return response({ detail: 'Not found' }, 404)
+      }),
+    )
+    renderLanding()
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'New Project' }))
+    await user.type(screen.getByLabelText('Project name'), 'Unavailable Project')
+    await user.click(screen.getByRole('button', { name: 'Create Project' }))
+
+    expect(
+      await screen.findByText('The application could not complete this operation.'),
+    ).toBeVisible()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('shows a localised standard problem when rename conflicts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/api/projects' && !init?.method) {
+          return response({ items: [project] })
+        }
+        if (url === '/api/projects/project_1/rename' && init?.method === 'POST') {
+          return response(
+            {
+              code: 'project_name_conflict',
+              parameters: {
+                project_id: 'project_existing',
+                project_name: 'Existing Project',
+              },
+            },
+            409,
+          )
+        }
+        return response({ detail: 'Not found' }, 404)
+      }),
+    )
+    renderLanding()
+    const user = userEvent.setup()
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Project actions for Launch Film',
+      }),
+    )
+    await user.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameDialog = screen.getByRole('dialog')
+    const name = within(renameDialog).getByLabelText('Project name')
+    await user.clear(name)
+    await user.type(name, 'Existing Project')
+    await user.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+
+    expect(
+      await within(renameDialog).findByText('A Project with this name already exists.'),
+    ).toBeVisible()
+  })
+
   it('shows real card projections and performs rename and two-step delete', async () => {
     let currentProject: typeof project | null = project
     const requests: Array<{ url: string; init?: RequestInit }> = []
