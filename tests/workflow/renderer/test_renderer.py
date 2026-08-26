@@ -5,11 +5,13 @@ import subprocess
 import pytest
 
 from cutmaster.configuration.schema import DialogueAudioConfig, RendererConfig
+from cutmaster.infrastructure.media.ffprobe import media_frame_count
 from cutmaster.workflow.renderer.renderer import (
     build_final_audio_filter,
     concatenate_clips,
     mix_bgm,
     render_clip,
+    render_montage,
 )
 
 
@@ -129,6 +131,52 @@ def test_concatenated_clips_preserve_exact_total_frame_count(tmp_path) -> None:
         )
         clip_stream = json.loads(clip_probe.stdout)["streams"][0]
         assert float(clip_stream["start_time"]) == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is required")
+def test_tail_clip_shifts_earlier_to_preserve_planned_frames(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    bgm = tmp_path / "bgm.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=60:duration=4",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=4.02",
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(source),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=220:duration=3", str(bgm),
+        ],
+        check=True,
+    )
+
+    _, output = render_montage(
+        source,
+        bgm,
+        [
+            {
+                "timestamp": "00:00:02,000-00:00:04,033",
+                "output_frame_range": [0, 61],
+            }
+        ],
+        tmp_path / "render",
+        RendererConfig(
+            width=160,
+            height=90,
+            fps=30,
+            encoder="libx264",
+            threads=1,
+        ),
+        include_dialogue_audio=False,
+    )
+
+    assert media_frame_count(output) == 61
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is required")

@@ -46,11 +46,12 @@ def probe_media(path: Path) -> dict[str, Any]:
         (stream for stream in streams if stream.get("codec_type") == "video"),
         {},
     )
-    duration = float(
-        (data.get("format") or {}).get("duration") or video.get("duration") or 0.0
-    )
+    format_duration = float((data.get("format") or {}).get("duration") or 0.0)
+    video_duration = float(video.get("duration") or format_duration or 0.0)
+    duration = format_duration or video_duration
     return {
         "duration": duration,
+        "video_duration": video_duration,
         "fps": _frame_rate(
             video.get("avg_frame_rate") or video.get("r_frame_rate")
         ),

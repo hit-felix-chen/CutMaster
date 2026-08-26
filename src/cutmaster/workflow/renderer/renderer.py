@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -34,6 +35,25 @@ def _video_filter(config: RendererConfig) -> str:
         f"pad={config.width}:{config.height}:(ow-iw)/2:(oh-ih)/2:black,"
         f"setsar=1,fps={config.fps}"
     )
+
+
+def _align_source_window_to_video_end(
+    start: float,
+    frame_count: int,
+    fps: int,
+    video_duration: float,
+) -> float:
+    clip_duration = frame_count / fps
+    if clip_duration > video_duration:
+        raise RenderError(
+            f"Planned clip duration {clip_duration:.3f}s exceeds source video "
+            f"duration {video_duration:.3f}s"
+        )
+    if start + clip_duration <= video_duration:
+        return start
+    # render_clip serializes the seek point to milliseconds. Floor rather than
+    # round so the aligned window can never creep back beyond the video EOF.
+    return math.floor((video_duration - clip_duration) * 1000.0) / 1000.0
 
 
 def render_clip(
@@ -212,6 +232,9 @@ def render_montage(
     if config.original_volume > 0:
         raise RenderError("Frame-exact rendering requires muted source audio; set original_volume = 0")
     source_meta = probe_media(video_path)
+    video_duration = float(
+        source_meta.get("video_duration") or source_meta["duration"]
+    )
     encoder = select_encoder(config.encoder)
     log_event(
         "INFO",
@@ -240,12 +263,26 @@ def render_montage(
                 raise RenderError(f"Clip {index} is missing output_frame_range")
             output_start_frame, output_end_frame = map(int, output_frames)
             frame_count = output_end_frame - output_start_frame
-            end = start + frame_count / config.fps
-            if end > source_meta["duration"] + 0.25:
-                raise RenderError(
-                    f"Clip {index} ends at {end:.3f}s beyond source duration "
-                    f"{source_meta['duration']:.3f}s"
+            original_start = start
+            start = _align_source_window_to_video_end(
+                start,
+                frame_count,
+                config.fps,
+                video_duration,
+            )
+            if start != original_start:
+                log_event(
+                    "INFO",
+                    "renderer",
+                    "fallback.apply",
+                    "Source clip window aligned to video end",
+                    clip=index,
+                    original_start_sec=original_start,
+                    aligned_start_sec=start,
+                    video_duration_sec=video_duration,
+                    frames=frame_count,
                 )
+            end = start + frame_count / config.fps
             clip_path = clips_dir / f"clip_{index:04d}.mp4"
             log_event(
                 "DEBUG",
