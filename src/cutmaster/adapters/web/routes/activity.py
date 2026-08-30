@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cutmaster.adapters.web.dependencies import (
     ApplicationDependency,
@@ -21,7 +22,10 @@ from cutmaster.adapters.web.presenters import (
 )
 from cutmaster.adapters.web.routes._execution import execution_with_log
 from cutmaster.application import CutMasterApplication
-from cutmaster.application.jobs import StopAttemptCommand
+from cutmaster.application.jobs import (
+    DismissActivityAttemptsCommand,
+    StopAttemptCommand,
+)
 from cutmaster.application.jobs.views import AttemptView
 from cutmaster.domain.attempts import AttemptStatus
 from cutmaster.domain.ids import (
@@ -34,6 +38,17 @@ from cutmaster.infrastructure.persistence.sqlite import ManagedStateNotFound
 
 router = APIRouter(tags=["activity"])
 _MAX_EVENT_ID = 9_223_372_036_854_775_807
+
+
+class DismissActivityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    attempt_ids: list[str] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def unique_attempt_ids(self) -> DismissActivityPayload:
+        if len(set(self.attempt_ids)) != len(self.attempt_ids):
+            raise ValueError("attempt_ids must not contain duplicates")
+        return self
 
 
 @router.get("/activity")
@@ -52,6 +67,7 @@ def activity(
         owner_type=owner_type,
         owner_id=owner_id,
         statuses=tuple(status_filter or ()),
+        include_dismissed=False,
         limit=limit,
         offset=offset,
     )
@@ -61,6 +77,7 @@ def activity(
             owner_type=owner_type,
             owner_id=owner_id,
             statuses=tuple(status_filter or ()),
+            include_dismissed=False,
             limit=1,
             offset=offset + limit,
         )
@@ -70,6 +87,24 @@ def activity(
         "limit": limit,
         "offset": offset,
         "has_more": has_more,
+    }
+
+
+@router.post("/activity/dismiss")
+def dismiss_activity(
+    payload: DismissActivityPayload,
+    application: ApplicationDependency,
+    command_id: IdempotencyKey,
+) -> dict[str, object]:
+    identifiers = application.jobs.dismiss_activity_attempts(
+        DismissActivityAttemptsCommand(
+            command_id,
+            tuple(AttemptId.parse(value) for value in payload.attempt_ids),
+        )
+    )
+    return {
+        "attempt_ids": [str(value) for value in identifiers],
+        "dismissed": len(identifiers),
     }
 
 

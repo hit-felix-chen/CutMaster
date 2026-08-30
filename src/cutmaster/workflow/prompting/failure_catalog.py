@@ -16,11 +16,14 @@ class PromptFailureCode(StrEnum):
     PLANNERS_STAGE_ATTEMPT_INFEASIBLE = "planners_stage_attempt_infeasible"
     RESPONSE_VALIDATION_FAILED = "response_validation_failed"
     CANDIDATE_RETRIEVAL_FAILED = "candidate_retrieval_failed"
+    TARGETED_SLOT_REDESIGN_FAILED = "targeted_slot_redesign_failed"
+    TARGETED_REPAIR_DOMAIN_UNREPAIRABLE = "targeted_repair_domain_unrepairable"
     SOURCE_SEGMENTS_TOO_SHORT = "source_segments_too_short"
     VISUALLY_STATIC = "visually_static"
     REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED = (
         "required_subject_not_visually_confirmed"
     )
+    VISUAL_SLOT_NOT_RELEVANT = "visual_slot_not_relevant"
     DUPLICATE_CANDIDATE_RANGE = "duplicate_candidate_range"
     NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS = (
         "no_candidate_passed_visual_diagnostics"
@@ -146,8 +149,30 @@ PROMPT_FAILURE_CATALOG: dict[
         ),
         repair_requirement=(
             "Return the required number of valid, fixed-duration candidate timestamps "
-            "inside the supplied source Segments. Candidate alternatives may overlap "
-            "but must not duplicate an excluded timestamp exactly."
+            "inside the supplied source Segments. Candidate alternatives must use "
+            "different source Shots or clearly non-overlapping time windows."
+        ),
+    ),
+    PromptFailureCode.TARGETED_SLOT_REDESIGN_FAILED: PromptFailureDefinition(
+        diagnosis=(
+            "Targeted Slot redesign failed before a valid local repair could be "
+            "applied: {error_message}"
+        ),
+        repair_requirement=(
+            "End this local repair path and let the outer ASTER attempt create a new "
+            "complete arrangement using the accumulated retrieval diagnostics."
+        ),
+    ),
+    PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE: PromptFailureDefinition(
+        diagnosis=(
+            "Backend validation proved that the current local repair domain cannot "
+            "satisfy Slots {failed_slot_ids}: {reason}"
+        ),
+        repair_requirement=(
+            "Do not ask the local Arrangement model to guess inside this domain. "
+            "Expand through an immediately adjacent movable blocking Slot; if no such "
+            "Slot exists, end the local repair and let the next complete Arrangement "
+            "use the accumulated evidence."
         ),
     ),
     PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT: (
@@ -158,9 +183,10 @@ PROMPT_FAILURE_CATALOG: dict[
                 "planned clip duration of {planned_duration_sec} seconds."
             ),
             repair_requirement=(
-                "Assign a different source Segment whose duration is longer than "
-                "{planned_duration_sec} seconds. Only one complete clip must fit; "
-                "overlapping alternative candidate windows are allowed."
+                "Keep the Slot's visible-event semantics and required_visible_subjects "
+                "unchanged. Assign a different source Segment whose duration is "
+                "longer than {planned_duration_sec} seconds. Only one complete clip "
+                "must fit; overlapping alternative candidate windows are allowed."
             ),
         )
     ),
@@ -171,8 +197,10 @@ PROMPT_FAILURE_CATALOG: dict[
             "threshold {static_threshold}; it is effectively static."
         ),
         repair_requirement=(
-            "Do not reuse this timestamp. Select source evidence with clearly visible "
-            "subject, camera, or environmental motion above the configured threshold."
+            "Keep the Slot's visible-event semantics and required_visible_subjects "
+            "unchanged. Do not reuse this timestamp; first select a different window, "
+            "and when local Arrangement repair is invoked, move to a different source "
+            "Segment with clearly visible motion above the configured threshold."
         ),
     ),
     PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED: (
@@ -183,21 +211,38 @@ PROMPT_FAILURE_CATALOG: dict[
                 "was: {visual_evidence}"
             ),
             repair_requirement=(
-                "Choose a different Segment and visible event where every subject that "
-                "must appear in this one clip can be verified. If the source never "
-                "shows those subjects together, reduce required_visible_subjects or "
-                "split the narrative requirement across separate Slots."
+                "Keep required_visible_subjects unchanged; never delete or rename a "
+                "required subject to make validation pass. First select a different "
+                "window, and when local Arrangement repair is invoked, assign a "
+                "different source Segment where every required subject can be "
+                "verified. If no such evidence exists, fail this local repair so the "
+                "outer complete arrangement can reconsider the Slot."
             ),
         )
     ),
-    PromptFailureCode.DUPLICATE_CANDIDATE_RANGE: PromptFailureDefinition(
+    PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT: PromptFailureDefinition(
         diagnosis=(
-            "Candidate {candidate_id} exactly duplicates a previously accepted or "
-            "rejected timestamp {timestamp} for {slot_id}."
+            "Candidate {candidate_id} at {timestamp} does not visually realize the "
+            "Slot's intended visible event. Its relevance score is "
+            "{visual_slot_relevance_likert}, below the required threshold "
+            "{visual_slot_relevance_likert_threshold}. The visual evidence was: "
+            "{visual_evidence}"
         ),
         repair_requirement=(
-            "Shift the candidate to a different timestamp while preserving the exact "
-            "planned clip duration. Partial overlap with another alternative is allowed."
+            "Keep required_visible_subjects and the Slot's narrative objective "
+            "unchanged. Choose a different visible event and source Segment whose "
+            "action, situation, and narrative meaning directly realize the Slot "
+            "content. Subject presence alone is not sufficient."
+        ),
+    ),
+    PromptFailureCode.DUPLICATE_CANDIDATE_RANGE: PromptFailureDefinition(
+        diagnosis=(
+            "Candidate {candidate_id} repeats the same source Shot or substantially "
+            "overlapping time window as prior evidence for {slot_id}: {timestamp}."
+        ),
+        repair_requirement=(
+            "Choose a different source Shot, or a clearly non-overlapping window when "
+            "Shot identity is unavailable, while preserving the planned clip duration."
         ),
     ),
     PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS: (
@@ -208,9 +253,12 @@ PROMPT_FAILURE_CATALOG: dict[
                 "included in candidate_rejections."
             ),
             repair_requirement=(
-                "Redesign the Slot's visible event, required_visible_subjects, and "
-                "source_segment_ids. Move to different source evidence instead of "
-                "paraphrasing the same unsupported request."
+                "Apply the candidate_rejections by reason: change source evidence for "
+                "static, duration, duplicate-range, or missing-subject failures; only "
+                "a visual-relevance failure permits rewriting the visible event. Keep "
+                "required_visible_subjects unchanged, especially after a missing-"
+                "subject failure, and move to a different source Segment instead of "
+                "paraphrasing unsupported evidence."
             ),
         )
     ),

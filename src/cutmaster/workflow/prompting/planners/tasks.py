@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from cutmaster.workflow.prompting.core import (
@@ -32,6 +32,9 @@ class SlotArrangementDetails:
     existing_slots: list[dict[str, Any]]
     target_slot_constraints: dict[str, dict[str, Any]]
     rejection_feedback: list[dict[str, Any]]
+    hard_forbidden_assignments: dict[str, list[list[str]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -195,21 +198,33 @@ from the first Arrangement Architect call. Treat existing_slot_plan as authorita
 replacement must fit chronologically between its previous_fixed_slot and next_fixed_slot and may
 use only that Slot's allowed_segment_ids. Multiple replacement Slots must remain in strictly
 increasing source order, with every Slot's maximum Segment index strictly lower than the next
-Slot's minimum Segment index. Never repeat a source_segment_ids assignment listed in
-forbidden_segment_assignments.
+Slot's minimum Segment index.
+
+Collateral/blocker Slots are present only to make the joint repair chronologically feasible. They
+should keep their previous_source_segment_ids whenever those IDs remain allowed and the merged plan can
+still maintain strictly increasing source order. Move a collateral/blocker Slot only when keeping
+its previous binding would make strict source order impossible.
 
 The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
 static imagery, or the deterministic duration check proved that no assigned Segment is longer
-than one complete planned clip. Use rejection_feedback to
-correct the actual cause. Every feedback item has reason_code, diagnosis, and repair_requirement:
-reason_code is the stable machine-readable category, diagnosis explains the concrete failed
-constraint with measured values, and repair_requirement is mandatory for the replacement. Redesign
-the Slot's visible event,
-required_visible_subjects, and source_segment_ids so that one continuous
-planned_duration_sec-long passage is visually realizable. Do not merely paraphrase the failed
-description while retaining unsupported subjects or source evidence. Role, team, and object
-subjects do not require a named-person face match; use precise required subjects that the source
-descriptions can visibly establish.
+than one complete planned clip. Use rejection_feedback to correct the actual cause. Every
+feedback item has reason_code, diagnosis, and repair_requirement: reason_code is the stable
+machine-readable category, diagnosis explains the concrete failed constraint with measured
+values, and repair_requirement is mandatory for the replacement. Local repair never changes
+required_visible_subjects; only a later complete Arrangement attempt may reconsider the complete
+Slot. Do not redesign the intended visible event for every failure:
+- for required_subject_not_visually_confirmed, keep the original required_visible_subjects and
+  first choose a different source Segment whose candidate window can visibly establish them;
+- for visually_static, keep the intended content and required_visible_subjects, but choose
+  different moving source evidence;
+- for source_segments_too_short, assign a different allowed source Segment that is longer than
+  one complete planned clip;
+- for visual_slot_not_relevant, preserve the maintained request's global editorial goal while
+  choosing a different source-realizable visible event and supporting Segment.
+When no_candidate_passed_visual_diagnostics contains candidate_rejections, follow each nested
+reason_code under these same rules. Do not merely paraphrase the failed description while
+retaining unsupported source evidence. Role, team, and object subjects do not require a
+named-person face match; use the existing required subjects at the granularity written.
 
 Source quality and relevance to the maintained request always take priority. Among comparably
 strong assignments inside the allowed chronological intervals, distribute source_segment_ids as
@@ -276,11 +291,21 @@ character must be seen. Maintain a coherent progression. Every slot after the fi
 how it continues or contrasts with the previous slot. Do not use title cards, opening or end
 credits, production logos, legal cards, or blank frames unless the maintained request explicitly
 requires them.
+
+The compact table below contains only exact source-Segment assignments that produced zero usable
+candidates. An assignment in this table for the same slot_id must not repeat exactly. Do not turn
+it into a global Segment blacklist: only the listed slot_id/assignment pair is forbidden. In the
+full response, the first array item is slot_01, the second is slot_02, and so on; use that
+positional slot_id mapping when applying the table.
+
+<hard_forbidden_assignments>
+{json.dumps(details.hard_forbidden_assignments, ensure_ascii=False)}
+</hard_forbidden_assignments>
 {retry_note}"""
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.SLOT_ARRANGEMENT,
-        prompt_version="3.4",
+        prompt_version="3.6" if targeted else "3.5",
         operation=(
             "Arrangement Architect targeted repair"
             if targeted
@@ -293,12 +318,7 @@ requires them.
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=(
-            "request",
-            "music_profile",
-            "source_story_context",
-            "planners_feedback",
-        ),
+        context_keys=("request", "music_profile", "source_story_context"),
         modality=PromptModality.TEXT,
         output_artifact=(
             "targeted_slot_redesign"
@@ -538,7 +558,7 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
             }
         )
     contract = ResponseContract(
-        version="1.0",
+        version="1.2",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -561,22 +581,29 @@ candidate as a precise time window:
 - its duration must equal that Slot's planned_duration_sec, to millisecond timestamp precision;
 - it must be fully contained in the supplied Segment timeline;
 - it may start or end inside a Shot and does not need to use Shot boundaries;
-- candidates for the same Slot may overlap each other and confirmed candidates, allowing small
-  timestamp displacements, but must not exactly duplicate another candidate or excluded range.
+- candidates for the same Slot must represent genuinely different visual evidence: candidates
+  from different source Shots are independent, and another window in the same Shot is allowed
+  when its time window does not overlap. Small timestamp displacements or overlapping windows
+  inside the same Shot are duplicates, not alternatives.
 Silent Segments are valid source material. Do not return source Shot IDs; the application derives
 the overlapping Shots deterministically from the validated timestamp.
 
 Prefer each Slot's source_segment_ids, preserve source chronology, and avoid exact excluded
-timestamps. Describe only the content expected inside the selected time window, based on its
-overlapping Shot descriptions. Use the maintained video summary for plot understanding; exact
-transcript text is intentionally omitted from visual candidate retrieval. Never let inferred
-speech override visible identity or action. Score semantic relevance, emotional intensity, and
-editorial salience from 0 to 1.
+timestamps. Each supplied Slot is the sole editorial target for its own candidates. Treat that
+Slot's content_description, required_visible_subjects, timing, and source bindings as the complete
+Slot contract; do not import an additional focal subject or editorial requirement from outside
+that Slot. Describe only the content expected inside the selected time window, based on its
+overlapping Shot descriptions. Use the maintained video summary only for plot chronology and
+local context; it must never override or add to the Slot contract. Exact transcript text is
+intentionally omitted from visual candidate retrieval. Never let inferred speech override
+visible identity or action. Score semantic relevance, emotional intensity, and editorial
+salience from 0 to 1 only against the current Slot contract.
 
 Candidates in confirmed_candidates already passed timestamp validation and VLM visual grounding.
-They are permanently retained. Return only the candidates requested by this contract and never
-duplicate a confirmed or excluded timestamp exactly. Excluded ranges also contain rejected
-windows; a genuinely different, slightly displaced window may overlap them.
+They are permanently retained. Return only the candidates requested by this contract. Do not
+reuse a confirmed candidate's Shot with an overlapping or nearly identical window, and do not
+create nominal alternatives by sliding a window by a few milliseconds. Choose a different Shot
+or a clearly non-overlapping window, including a separate window in the same long Shot.
 
 <slots>
 {json.dumps(details.slots, ensure_ascii=False)}
@@ -593,17 +620,18 @@ windows; a genuinely different, slightly displaced window may overlap them.
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_RETRIEVAL,
-        prompt_version="2.1",
+        prompt_version="2.3",
         operation=details.operation,
         system_prompt=(
-            "You are CutMaster's Timeline Scout. Scout real source-video passages from a "
-            "structured VideoDescription whose Segment timeline and Shot annotations are "
-            "authoritative. Choose precise fixed-duration windows within that timeline; never "
-            "invent timestamps, visuals, or dialogue. Return strict JSON only."
+            "You are CutMaster's Timeline Scout. Scout real source-video passages for each "
+            "candidate's current Slot contract. A structured VideoDescription supplies the "
+            "authoritative Segment timeline and Shot annotations, while the video summary supplies "
+            "chronology only. Choose precise fixed-duration windows; never invent timestamps, "
+            "visuals, dialogue, or extra subject requirements. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=("request", "video_summary"),
+        context_keys=("video_summary",),
         modality=PromptModality.TEXT,
     )
 
@@ -615,7 +643,7 @@ def _candidate_visual_scoring(
         str(candidate["candidate_id"]) for candidate in details.candidates
     ]
     contract = ResponseContract(
-        version="2.1",
+        version="2.2",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -671,36 +699,43 @@ def _candidate_visual_scoring(
     instructions = f"""Inspect attached candidate contact sheets in exactly the listed order.
 Each image is visibly labeled with its candidate ID.
 
-Resolve the requested focal subject and editorial goal from the maintained request and source
-title. For a named real person or fictional character, use visual identity knowledge appropriate
-to that source to distinguish the actual subject from other people.
+Evaluate every candidate only against that candidate's current Slot fields. The current Slot's
+required_visible_subjects is the complete subject requirement, and intended_visible_content is
+the complete visible-event requirement. Never import an additional subject requirement from
+project context, another Slot, or another candidate.
 
 Use the attached sampled pixels as primary evidence. Each candidate also includes its source
 Segment video description and the Shot descriptions overlapping the exact candidate window.
 Use those structured visual annotations as supporting evidence for visible identity, team or
 group membership, objects, and actions. In particular, character identity_evidence, readable
-jersey names or numbers, and Shot visual_evidence may corroborate a sampled frame.
+jersey names or numbers, and Shot visual_evidence may corroborate a sampled frame. Interpret each
+required subject at the granularity written: a concrete named person or character requires
+evidence for that identity, while a role, team, group, or object requires evidence only for that
+stated role, team, group, or object.
 
 The Segment dialogue_items and candidate_dialogue contain ASR dialogue associated with the
 source. Dialogue may provide supporting evidence about the named speaker, player, action, or
 event when its timestamp overlaps the candidate and agrees with the visual evidence. It is not,
 by itself, proof that a mentioned person is visible: commentary may describe off-screen action,
-earlier events, or another camera view. Do not use the intended Slot description, generic
-clothing, gender, scene familiarity, or narrative role as identity evidence. Never let dialogue,
-a Segment summary, or a Shot description override contradictory sampled pixels, and do not
-transfer identity evidence from a non-overlapping Shot.
+earlier events, or another camera view. Do not use intended_visible_content, generic clothing,
+gender, scene familiarity, or narrative role as proof of a concrete named identity. Never let
+dialogue, a Segment summary, or a Shot description override contradictory sampled pixels, and
+do not transfer identity evidence from a non-overlapping Shot.
 
-A prominent confirmed different person must receive required_subject_visibility=1. Before
-assigning 3 or higher, the combined sampled frames, overlapping Shot visual annotations, and
-time-aligned dialogue must provide a plausible match to the requested identity; dialogue alone
-is insufficient.
+Required Subject Visibility Likert is one aggregate score equal to the weakest required subject:
+- when required_visible_subjects is empty, return 5;
+- 1 = at least one required subject is clearly absent, contradicted, or a different named identity;
+- 2 = at least one required subject cannot be visually verified;
+- 3 = every required subject is plausibly visible, though at least one is brief, unclear, or obscured;
+- 4 = every required subject is clearly visible in a meaningful portion;
+- 5 = every required subject is repeatedly and unmistakably visible.
+Before assigning 3 or higher, the combined sampled frames, overlapping Shot visual annotations,
+and time-aligned dialogue must plausibly establish every required subject; dialogue alone is
+insufficient.
 
-Visibility Likert:
-1 = visible person is a different identity;
-2 = no usable face comparison, even when a person is prominent;
-3 = possible match but unclear, brief, or obscured;
-4 = face clearly matches in a meaningful portion;
-5 = repeated, unmistakable face match with dominant visibility.
+Score Visual Slot Relevance independently and only against intended_visible_content. Required
+subject presence alone does not prove that the intended action, situation, or narrative meaning
+occurs.
 
 Visual Slot Relevance Likert:
 1 = visible content conflicts with or is unrelated to the intended Slot content;
@@ -709,23 +744,27 @@ Visual Slot Relevance Likert:
 4 = clear visual match in a meaningful portion;
 5 = repeated, dominant visual evidence strongly matches the intended content.
 
+In visual_evidence, explicitly identify which required subjects were confirmed or unconfirmed,
+then separately describe the pixel evidence for intended_visible_content.
+
 <candidates>
 {json.dumps(details.candidates, ensure_ascii=False)}
 </candidates>"""
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_VISUAL_SCORING,
-        prompt_version="2.0",
+        prompt_version="2.1",
         operation=details.operation,
         system_prompt=(
-            "As CutMaster's Timeline Scout, inspect source-video contact sheets and resolve the "
-            "requested subject from the maintained request and source title, then judge whether "
-            "that subject and action are actually visible. Identity must come from pixels, "
-            "never dialogue or assumptions. Return strict JSON only."
+            "As CutMaster's Timeline Scout, inspect source-video contact sheets and judge only each "
+            "candidate's local Slot contract: its required_visible_subjects and "
+            "intended_visible_content. Do not infer extra subject requirements. Pixels are primary "
+            "evidence; dialogue and assumptions cannot establish visibility. Return strict JSON "
+            "only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=("request",),
+        context_keys=(),
         modality=PromptModality.TEXT_AND_IMAGES,
     )
 

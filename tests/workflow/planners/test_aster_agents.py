@@ -27,15 +27,16 @@ from cutmaster.workflow.planners.timeline_scout import (
 from cutmaster.workflow.planners.revision_editor import review_and_patch
 from cutmaster.workflow.planners.aster_team import ASTERTeam
 from cutmaster.workflow.planners.edit_composer import (
+    EditComposerAgent,
     NoFeasiblePathError,
     _pair_key,
     score_unary_candidate,
     path_to_script,
     select_paths,
     validate_chronological_path,
+    validate_source_segment_availability,
 )
 from cutmaster.workflow.planners.arrangement_architect import (
-    _expand_degenerate_target_slot_ids,
     _globally_align_boundaries,
     _source_story_context,
     _targeted_slot_constraints,
@@ -249,7 +250,7 @@ def test_slot_validation_and_accent_alignment() -> None:
         4.0,
         _video_description(),
         set(),
-        set(),
+        {},
     )
     aligned = align_slots_to_music(
         slots,
@@ -288,7 +289,7 @@ def test_slot_validation_requires_one_segment_longer_than_the_clip() -> None:
             5.0,
             video_description,
             set(),
-            set(),
+            {},
         )
 
 
@@ -327,7 +328,7 @@ def test_slot_validation_requires_strictly_increasing_segment_ranges() -> None:
             4.0,
             _video_description(),
             set(),
-            set(),
+            {},
         )
 
 
@@ -354,16 +355,21 @@ def test_slot_validation_rejects_failed_replan_assignments() -> None:
             4.0,
             _video_description(),
             {"segment_0001"},
-            set(),
+            {},
         )
-    with pytest.raises(ValueError, match="failed source-Segment assignment"):
+    with pytest.raises(
+        ValueError,
+        match="slot_01.*attempted assignment.*forbidden assignments",
+    ):
         _validate_slots(
             raw,
             4.0,
             4.0,
             _video_description(),
             set(),
-            failed_segment_assignments={("segment_0001",)},
+            hard_forbidden_assignments={
+                "slot_01": {("segment_0001",)},
+            },
         )
 
 
@@ -401,7 +407,7 @@ def test_slot_validation_accepts_model_selected_slot_count() -> None:
         4.0,
         _video_description(),
         set(),
-        set(),
+        {},
     )
 
     assert len(slots) == 2
@@ -432,7 +438,7 @@ def test_slot_validation_rejects_duration_total_far_from_target() -> None:
             4.0,
             _video_description(),
             set(),
-            set(),
+            {},
         )
 
 
@@ -460,7 +466,7 @@ def test_slot_validation_rejects_long_visual_slot_for_dialogue() -> None:
             4.0,
             _video_description(),
             set(),
-            set(),
+            {},
         )
 
 
@@ -489,7 +495,7 @@ def test_slot_validation_rejects_average_far_from_visual_target() -> None:
             4.0,
             _video_description(),
             set(),
-            set(),
+            {},
         )
 
 
@@ -517,7 +523,7 @@ def test_slot_average_allows_integer_count_quantization_for_short_output() -> No
         4.0,
         _video_description(),
         set(),
-        set(),
+        {},
     )
 
     assert len(slots) == 3
@@ -613,6 +619,80 @@ def test_chronology_preflight_accepts_a_complete_path() -> None:
         ],
     }
     validate_chronological_path(slots, pool)
+
+
+def test_composition_preflight_rejects_unavailable_source_segment() -> None:
+    slots = _slots()
+    pool = {
+        "slot_01": [
+            {
+                "candidate_id": "static-candidate",
+                "timestamp": "00:00:01,000-00:00:07,000",
+                "source_segment_ids": ["segment_0099"],
+            }
+        ],
+        "slot_02": [
+            {
+                "candidate_id": "valid-candidate",
+                "timestamp": "00:00:10,000-00:00:14,000",
+                "source_segment_ids": ["segment_0100"],
+            }
+        ],
+    }
+
+    with pytest.raises(NoFeasiblePathError) as exc_info:
+        validate_source_segment_availability(
+            slots,
+            pool,
+            {"segment_0099"},
+        )
+
+    assert exc_info.value.diagnostics == {
+        "reason_code": "candidate_uses_unavailable_source_segment",
+        "failed_slot_id": "slot_01",
+        "failed_slot_ids": ["slot_01"],
+        "candidate_ids": ["static-candidate"],
+        "source_segment_ids": ["segment_0099"],
+        "unavailable_source_segment_ids": ["segment_0099"],
+    }
+
+
+def test_composer_reads_unavailable_segments_from_restored_feedback(tmp_path) -> None:
+    slots = _slots()
+    pool = {
+        "slot_01": [
+            {
+                "candidate_id": "legacy-static-candidate",
+                "timestamp": "00:00:01,000-00:00:07,000",
+                "source_segment_ids": ["segment_0099"],
+            }
+        ],
+        "slot_02": [
+            {
+                "candidate_id": "valid-candidate",
+                "timestamp": "00:00:10,000-00:00:14,000",
+                "source_segment_ids": ["segment_0100"],
+            }
+        ],
+    }
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact(
+        "planners_feedback",
+        {"unavailable_source_segment_ids": ["segment_0099"]},
+    )
+    composer = EditComposerAgent(
+        None,
+        tmp_path / "video.mp4",
+        None,
+        context,
+    )
+
+    with pytest.raises(NoFeasiblePathError) as exc_info:
+        composer.validate(slots, pool)
+
+    assert exc_info.value.diagnostics["candidate_ids"] == [
+        "legacy-static-candidate"
+    ]
 
 
 def test_beam_search_rejects_source_time_reversal() -> None:
@@ -1191,92 +1271,6 @@ def test_targeted_slot_replan_is_bounded_by_neighboring_fixed_slots() -> None:
         )
 
 
-def test_one_segment_retry_expands_to_contiguous_neighboring_slots() -> None:
-    slots = [
-        {
-            "slot_id": f"slot_{index:02d}",
-            "content_description": f"event {index}",
-            "desired_duration_sec": 4.0,
-            "planned_duration_sec": 4.0,
-            "source_segment_ids": [f"segment_{index:04d}"],
-        }
-        for index in range(1, 4)
-    ]
-
-    expanded_slot_ids = _expand_degenerate_target_slot_ids(
-        slots,
-        {"slot_02"},
-        _video_description(),
-    )
-    constraints = _targeted_slot_constraints(
-        slots,
-        expanded_slot_ids,
-        _video_description(),
-    )
-
-    assert expanded_slot_ids == {"slot_01", "slot_02", "slot_03"}
-    assert all(
-        constraint["allowed_segment_ids"]
-        == ["segment_0001", "segment_0002", "segment_0003"]
-        for constraint in constraints.values()
-    )
-
-
-def test_one_segment_retry_does_not_redesign_dialogue_anchors() -> None:
-    slots = [
-        {
-            "slot_id": f"slot_{index:02d}",
-            "content_description": f"event {index}",
-            "desired_duration_sec": 4.0,
-            "planned_duration_sec": 4.0,
-            "source_segment_ids": [f"segment_{index:04d}"],
-            **(
-                {"fixed_candidate": {"candidate_id": f"anchor_{index}"}}
-                if index == 1
-                else {}
-            ),
-        }
-        for index in range(1, 4)
-    ]
-
-    expanded_slot_ids = _expand_degenerate_target_slot_ids(
-        slots,
-        {"slot_02"},
-        _video_description(),
-    )
-
-    assert expanded_slot_ids == {"slot_02", "slot_03"}
-
-
-def test_one_segment_retry_uses_anchor_neighbor_when_it_is_the_only_option() -> None:
-    slots = [
-        {
-            "slot_id": "slot_01",
-            "content_description": "anchored ending setup",
-            "desired_duration_sec": 4.0,
-            "planned_duration_sec": 4.0,
-            "source_segment_ids": ["segment_0002"],
-            "dialogue_anchor": {"source_segment_id": "segment_0002"},
-            "fixed_candidate": {"candidate_id": "slot_01_dialogue_anchor"},
-        },
-        {
-            "slot_id": "slot_02",
-            "content_description": "failed ending",
-            "desired_duration_sec": 4.0,
-            "planned_duration_sec": 4.0,
-            "source_segment_ids": ["segment_0003"],
-        },
-    ]
-
-    expanded_slot_ids = _expand_degenerate_target_slot_ids(
-        slots,
-        {"slot_02"},
-        _video_description(),
-    )
-
-    assert expanded_slot_ids == {"slot_01", "slot_02"}
-
-
 def test_replanned_anchor_segment_triggers_global_anchor_refresh(
     tmp_path,
     monkeypatch,
@@ -1384,7 +1378,7 @@ def test_retrieval_context_expands_only_when_adjacent_scope_is_requested() -> No
     ] == ["segment_0001", "segment_0002", "segment_0003"]
 
 
-def test_candidate_retrieval_allows_overlapping_alternatives_in_one_segment(
+def test_candidate_retrieval_accepts_distinct_shots_in_one_segment(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1394,9 +1388,29 @@ def test_candidate_retrieval_allows_overlapping_alternatives_in_one_segment(
         "source_segment_ids": ["segment_0002"],
         "required_visible_subjects": [],
     }
+    video_description = _video_description()
+    video_description["segments"][1]["time_range"]["end_sec"] = 30.0
+    video_description["segments"][1]["shots"] = [
+        {
+            "shot_id": f"shot_00002_{index}",
+            "time_range": {"start_sec": start, "end_sec": end},
+        }
+        for index, (start, end) in enumerate(
+            ((10.0, 16.0), (16.0, 22.0), (22.0, 30.0)),
+            1,
+        )
+    ]
+    video_description["segments"][2]["time_range"] = {
+        "start_sec": 30.0,
+        "end_sec": 40.0,
+    }
+    video_description["segments"][2]["shots"][0]["time_range"] = {
+        "start_sec": 30.0,
+        "end_sec": 40.0,
+    }
     context = WorkflowContext(tmp_path / "history.json")
     context.set_artifact("request", {"instruction": "test"})
-    context.set_artifact("video_description", _video_description())
+    context.set_artifact("video_description", video_description)
     operations = []
 
     def call_prompt(**kwargs):
@@ -1417,8 +1431,8 @@ def test_candidate_retrieval_allows_overlapping_alternatives_in_one_segment(
                         }
                         for timestamp in (
                             "00:00:10,000-00:00:14,000",
-                            "00:00:11,000-00:00:15,000",
-                            "00:00:12,000-00:00:16,000",
+                            "00:00:16,000-00:00:20,000",
+                            "00:00:22,000-00:00:26,000",
                         )
                     ],
                 }
@@ -1543,7 +1557,20 @@ def test_vlm_rejection_retries_planned_segment_and_preserves_confirmed_candidate
     video_description = _video_description()
     segment = video_description["segments"][1]
     segment["time_range"]["end_sec"] = 30.0
-    segment["shots"][0]["time_range"]["end_sec"] = 30.0
+    segment["shots"] = [
+        {
+            "shot_id": "shot_00002_a",
+            "time_range": {"start_sec": 10.0, "end_sec": 14.0},
+        },
+        {
+            "shot_id": "shot_00002_b",
+            "time_range": {"start_sec": 14.0, "end_sec": 18.0},
+        },
+        {
+            "shot_id": "shot_00002_c",
+            "time_range": {"start_sec": 18.0, "end_sec": 30.0},
+        },
+    ]
     video_description["segments"][2]["time_range"] = {
         "start_sec": 30.0,
         "end_sec": 40.0,
@@ -1756,27 +1783,32 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
     def add_visual_features(_video_path, visual_slots, visual_pool, *_args, **_kwargs):
         slot_id = visual_slots[0]["slot_id"]
         for candidate in visual_pool[slot_id]:
-            accepted = "_round_02_" in candidate["candidate_id"]
-            rejected_as_static = not accepted and slot_id == "slot_01"
+            # Exhaust the ordinary retrieval budget first; accept only the
+            # validation pass for the redesigned Slot contract.  The exact
+            # round number is intentionally not part of the behaviour.
+            accepted = str(
+                visual_slots[0]["content_description"]
+            ).startswith("supported ")
+            subject_visible_but_irrelevant = not accepted and slot_id == "slot_01"
             candidate.update(
                 {
                     "description": (
                         "the focal subject is visible"
-                        if accepted or rejected_as_static
+                        if accepted or subject_visible_but_irrelevant
                         else "a different person is visible"
                     ),
                     "visible_subjects": (
                         ["focal subject"]
-                        if accepted or rejected_as_static
+                        if accepted or subject_visible_but_irrelevant
                         else ["other"]
                     ),
                     "protagonist_visibility_likert": (
-                        5 if accepted or rejected_as_static else 1
+                        5 if accepted or subject_visible_but_irrelevant else 1
                     ),
                     "visual_slot_relevance_likert": 5 if accepted else 2,
                     "visual_evidence": (
                         "clear matching identity"
-                        if accepted or rejected_as_static
+                        if accepted or subject_visible_but_irrelevant
                         else "clear different identity"
                     ),
                 }
@@ -1799,7 +1831,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
             for failure in failures
         }
         assert rejection_reasons == {
-            "slot_01": "visually_static",
+            "slot_01": "visual_slot_not_relevant",
             "slot_02": "required_subject_not_visually_confirmed",
         }
         redesigned = [
@@ -1813,16 +1845,9 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
         return redesigned, {"slot_01", "slot_02"}
 
     def add_kinetic_features(_video_path, pool, *_args):
-        for slot_id, candidates in pool.items():
+        for candidates in pool.values():
             for candidate in candidates:
-                candidate["kinetic_energy"] = (
-                    0.04
-                    if (
-                        slot_id == "slot_01"
-                        and "_round_01_" in candidate["candidate_id"]
-                    )
-                    else 0.5
-                )
+                candidate["kinetic_energy"] = 0.5
 
     monkeypatch.setattr(context, "call_prompt", call_prompt)
     monkeypatch.setattr(
@@ -1849,7 +1874,7 @@ def test_all_vlm_rejected_slots_are_replanned_in_one_batch(
     )
 
     assert len(replan_calls) == 1
-    assert len(model_calls) == 4
+    assert len(model_calls) == 8
     assert [slot["source_segment_ids"] for slot in slots] == [
         ["segment_0002"],
         ["segment_0003"],
@@ -1884,18 +1909,22 @@ def test_too_short_source_segment_triggers_targeted_replan_before_llm(
 
     def replan_slots(current_slots, failures):
         replan_calls.append(failures)
-        assert failures == [
-            build_prompt_failure(
-                PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
-                slot_id="slot_01",
-                round=1,
-                scope="planned_segments",
-                scope_round=1,
-                planned_duration_sec=6.0,
-                longest_segment_duration_sec=5.0,
-                source_segment_ids=["segment_0001"],
-            )
-        ]
+        assert len(failures) == 1
+        expected_failure = build_prompt_failure(
+            PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
+            slot_id="slot_01",
+            round=1,
+            scope="planned_segments",
+            scope_round=1,
+            planned_duration_sec=6.0,
+            longest_segment_duration_sec=5.0,
+            source_segment_ids=["segment_0001"],
+        )
+        assert {
+            key: failures[0][key]
+            for key in expected_failure
+        } == expected_failure
+        assert failures[0]["failed_source_segment_ids"] == ["segment_0001"]
         redesigned = [
             {
                 **current_slots[0],
@@ -2067,8 +2096,8 @@ def test_adjacent_segment_round_overretrieves_threefold_and_keeps_best_scores(
         for round_index in range(1, 6)
     ]
     assert [candidate["timestamp"] for candidate in pool["slot_01"]] == [
-        "00:00:20,000-00:00:24,000",
-        "00:00:21,000-00:00:25,000",
+        "00:00:02,000-00:00:06,000",
+        "00:00:12,000-00:00:16,000",
         "00:00:22,000-00:00:26,000",
     ]
 
@@ -2172,12 +2201,8 @@ def test_underfilled_nonempty_candidate_pool_continues_after_all_scopes(
     )
 
     assert len(pool["slot_01"]) == 1
-    assert context.get_artifact("retrieval_failure") == build_prompt_failure(
-        PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
-        shortages={"slot_01": 2},
-        planned_segment_rounds=2,
-        adjacent_expansion_rounds=1,
-    )
+    assert context.get_artifact("candidate_shortages") == {"slot_01": 2}
+    assert context.get_artifact("retrieval_failure") is None
 
 
 def test_candidate_retrieval_runs_one_slot_per_concurrent_model_request(

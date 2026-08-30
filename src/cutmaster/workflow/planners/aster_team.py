@@ -237,6 +237,19 @@ class ASTERTeam:
         diagnostics: dict[str, Any],
         failed_slots: list[dict[str, Any]],
     ) -> None:
+        diagnostics = dict(diagnostics)
+        unavailable_source_segment_ids = {
+            str(value)
+            for value in [
+                *(diagnostics.get("unavailable_source_segment_ids") or []),
+                *(self.context.get_artifact("unavailable_source_segment_ids") or []),
+            ]
+            if str(value)
+        }
+        if unavailable_source_segment_ids:
+            diagnostics["unavailable_source_segment_ids"] = sorted(
+                unavailable_source_segment_ids
+            )
         feedback = merge_planners_feedback(
             self.context.get_artifact("planners_feedback"),
             attempt=attempt,

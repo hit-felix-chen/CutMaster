@@ -320,9 +320,9 @@ uv run python -m cutmaster run --help
 | `--video-title`                          | 提供给素材分析的片名                                                           |
 | `--material-name`                        | `analyse` / `analyse-music` 添加素材时使用的候选名称；默认取 filename stem |
 | `--video-material-name`                  | `run` 通过原始视频路径添加素材时使用的候选名称                               |
-| `--music-material-name`                  | `run` 通过原始音乐路径添加素材时使用的候选名称                             |
+| `--music-material-name`                  | `run` 通过原始音乐路径添加素材时使用的候选名称                               |
 | `--video-material`, `--music-material` | 按精确 Material Name 选择已完成分析的视频和音乐素材                            |
-| `--project-name`                        | 新建的 WebUI 可见 Edit Project 名称                                           |
+| `--project-name`                         | 新建的 WebUI 可见 Edit Project 名称                                            |
 | `--max-clip-duration`                    | 限制单个候选片段的最长时长                                                     |
 | `--audio-mode`                           | `bgm_only` 或 `dialogue`                                                   |
 
@@ -407,14 +407,14 @@ managed worker 共同使用的唯一非敏感配置文件；Settings 也会直�
 CLI、Benchmark 与 WebUI 运行共享下面的规范托管布局；不再围绕调用方指定的
 `output_dir` 建立独立 Bundle：
 
-| 托管路径 | 含义 |
-|---|---|
-| `media/<type>/mat_<uuid>/analysis/` | 可复用的 Video/Music Material Memory |
-| `projects/project_<uuid>/runs/run_<uuid>/plan.json` | Frozen Edit 使用的帧精确 RenderPlan |
-| `projects/project_<uuid>/runs/run_<uuid>/review_bundle.json` | Candidate Bundle 完整性清单 |
-| `projects/project_<uuid>/runs/run_<uuid>/model_usage.json` | 本次 ASTER Run 的 token 与费用汇总 |
-| `projects/project_<uuid>/runs/run_<uuid>/result.json` | CLI/Benchmark 托管执行回执与相对产物清单 |
-| `projects/project_<uuid>/renders/render_<uuid>/master.mp4` | WebUI、CLI 与 Benchmark 共用的规范 Render Variant master |
+| 托管路径                                                       | 含义                                                     |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| `media/<type>/mat_<uuid>/analysis/`                          | 可复用的 Video/Music Material Memory                     |
+| `projects/project_<uuid>/runs/run_<uuid>/plan.json`          | Frozen Edit 使用的帧精确 RenderPlan                      |
+| `projects/project_<uuid>/runs/run_<uuid>/review_bundle.json` | Candidate Bundle 完整性清单                              |
+| `projects/project_<uuid>/runs/run_<uuid>/model_usage.json`   | 本次 ASTER Run 的 token 与费用汇总                       |
+| `projects/project_<uuid>/runs/run_<uuid>/result.json`        | CLI/Benchmark 托管执行回执与相对产物清单                 |
+| `projects/project_<uuid>/renders/render_<uuid>/master.mp4`   | WebUI、CLI 与 Benchmark 共用的规范 Render Variant master |
 
 Benchmark 完成后会校验回执中的 Data-Root-relative 路径，并把评测需要的文件复制到
 Benchmark 自己的 `runs/<run_id>/task_outputs/<task_id>/`；这些只是提交副本，

@@ -3135,6 +3135,7 @@
 }
 .activity-group > header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem;
   border-bottom: 1px solid var(--border-subtle);
@@ -3144,9 +3145,20 @@
   margin: 0;
   font-size: 0.93rem;
 }
-.activity-group > header span {
+.activity-group__count {
   margin-left: auto;
   color: var(--text-tertiary);
+}
+.activity-group__management {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.activity-group__management .button {
+  min-height: 2rem;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.75rem;
 }
 .activity-row {
   position: relative;
@@ -3156,6 +3168,27 @@
   gap: var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
   padding: var(--space-4);
+}
+.activity-row--managing {
+  grid-template-columns: 28px minmax(240px, 1fr) 50px 105px 190px;
+}
+.activity-row__selector {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+}
+.activity-row__selector input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--accent-narrative);
+  cursor: pointer;
+}
+.activity-group > .operation-problem {
+  margin: var(--space-3) var(--space-4) var(--space-4);
 }
 
 .activity-row--linked {

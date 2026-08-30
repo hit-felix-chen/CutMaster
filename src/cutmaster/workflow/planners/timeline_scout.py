@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -19,6 +20,9 @@ from cutmaster.infrastructure.observability.progress import (
     progress_iter,
 )
 from cutmaster.workflow.planners.edit_composer import score_unary_candidate
+from cutmaster.workflow.planners.tools.errors import (
+    TargetedRepairUnrepairableError,
+)
 from cutmaster.workflow.planners.tools.segment_media import SegmentMediaReader
 from cutmaster.workflow.planners.tools.visual_scoring import _contact_sheet_data_url
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
@@ -36,6 +40,35 @@ from cutmaster.workflow.shared.timecode import format_range, parse_range
 
 _TIMESTAMP_TOLERANCE_SEC = 0.0011
 _ADJACENT_CANDIDATE_MULTIPLIER = 3
+
+
+_SLOT_RETRIEVAL_SIGNATURE_KEYS = (
+    "narrative_role",
+    "content_description",
+    "target_emotion",
+    "target_emotional_intensity",
+    "target_kinetic_energy",
+    "desired_duration_sec",
+    "planned_duration_sec",
+    "continuity_from_previous",
+    "source_segment_ids",
+    "required_visible_subjects",
+    "fixed_candidate",
+)
+
+
+def _slot_retrieval_signature(slot: dict[str, Any]) -> str:
+    """Return the part of a Slot that can change retrieval or validation."""
+
+    return json.dumps(
+        {
+            key: slot.get(key)
+            for key in _SLOT_RETRIEVAL_SIGNATURE_KEYS
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _ranges_overlap(
@@ -78,6 +111,113 @@ def _same_range(
         abs(first[0] - second[0]) <= _TIMESTAMP_TOLERANCE_SEC
         and abs(first[1] - second[1]) <= _TIMESTAMP_TOLERANCE_SEC
     )
+
+
+def _candidate_overlap_shot_ids(candidate: dict[str, Any]) -> set[str]:
+    raw_shot_ids = candidate.get("overlap_shot_ids")
+    if raw_shot_ids is None:
+        raw_shot_ids = candidate.get("source_shot_ids")
+    if not isinstance(raw_shot_ids, list):
+        return set()
+    return {
+        str(shot_id).strip()
+        for shot_id in raw_shot_ids
+        if str(shot_id).strip()
+    }
+
+
+def _candidate_duplicates_source_evidence(
+    candidate: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    candidate_shot_ids = _candidate_overlap_shot_ids(candidate)
+    existing_shot_ids = _candidate_overlap_shot_ids(existing)
+    if candidate_shot_ids and existing_shot_ids:
+        if not candidate_shot_ids.intersection(existing_shot_ids):
+            return False
+    return _ranges_overlap(
+        parse_range(candidate["timestamp"]),
+        parse_range(existing["timestamp"]),
+    )
+
+
+def _all_static_batch_source_segment_id(
+    candidates: list[dict[str, Any]],
+    static_candidates: list[dict[str, Any]],
+) -> str | None:
+    """Return the one Segment proven unusable by an all-static candidate batch."""
+
+    if not candidates or len(static_candidates) != len(candidates):
+        return None
+    assignments = {
+        tuple(str(value) for value in candidate.get("source_segment_ids") or [])
+        for candidate in candidates
+    }
+    if len(assignments) != 1:
+        return None
+    assignment = next(iter(assignments))
+    if len(assignment) != 1:
+        return None
+    return assignment[0]
+
+
+def _candidate_uses_any_source_segment(
+    candidate: dict[str, Any],
+    source_segment_ids: set[str],
+) -> bool:
+    candidate_segment_ids = {
+        str(value)
+        for value in candidate.get("source_segment_ids") or []
+        if str(value)
+    }
+    return bool(candidate_segment_ids.intersection(source_segment_ids))
+
+
+def _repair_blockers_for_exhausted_domain(
+    slots: list[dict[str, Any]],
+    failed_slot_ids: set[str],
+    current_repair_slot_ids: set[str],
+) -> tuple[dict[str, set[str]], set[str]]:
+    """Return one deterministic adjacent expansion layer for a failed domain.
+
+    The mapping is an explicit chain so Arrangement can verify that every
+    absorbed blocker is immediately adjacent.  Non-dialogue fixed candidates
+    are hard barriers.  A failed Slot with no movable boundary is returned in
+    the second tuple and is backend-unrepairable locally.
+    """
+
+    slot_ids = [str(slot["slot_id"]) for slot in slots]
+    slot_by_id = {str(slot["slot_id"]): slot for slot in slots}
+    position = {slot_id: index for index, slot_id in enumerate(slot_ids)}
+    blockers: dict[str, set[str]] = {}
+    blocked_failures: set[str] = set()
+
+    for failed_slot_id in sorted(failed_slot_ids, key=position.__getitem__):
+        found_expansion = False
+        for direction in (-1, 1):
+            current_slot_id = failed_slot_id
+            current_index = position[current_slot_id]
+            while True:
+                next_index = current_index + direction
+                if next_index < 0 or next_index >= len(slots):
+                    break
+                next_slot_id = slot_ids[next_index]
+                next_slot = slot_by_id[next_slot_id]
+                if (
+                    next_slot.get("fixed_candidate") is not None
+                    and next_slot.get("dialogue_anchor") is None
+                ):
+                    break
+                blockers.setdefault(current_slot_id, set()).add(next_slot_id)
+                if next_slot_id not in current_repair_slot_ids:
+                    found_expansion = True
+                    break
+                current_slot_id = next_slot_id
+                current_index = next_index
+        if not found_expansion:
+            blocked_failures.add(failed_slot_id)
+
+    return blockers, blocked_failures
 
 
 def _validate_candidates(
@@ -374,15 +514,12 @@ def add_visual_features(
         )
 
     def candidate_spec(candidate: dict[str, Any]) -> dict[str, Any]:
+        slot = slots_by_id[candidate["slot_id"]]
         return {
             "candidate_id": candidate["candidate_id"],
             "slot_id": candidate["slot_id"],
-            "intended_visible_content": slots_by_id[candidate["slot_id"]][
-                "content_description"
-            ],
-            "required_visible_subjects": slots_by_id[candidate["slot_id"]].get(
-                "required_visible_subjects", []
-            ),
+            "intended_visible_content": slot["content_description"],
+            "required_visible_subjects": slot.get("required_visible_subjects", []),
             "source_segment_video_descriptions": (
                 _candidate_segment_video_descriptions(
                     candidate,
@@ -556,32 +693,180 @@ def retrieve_candidates(
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError("Video description must be available before candidate retrieval")
-    rejected: list[dict[str, Any]] = []
+    planners_feedback = context.get_artifact("planners_feedback") or {}
+    unavailable_source_segment_ids = {
+        str(value)
+        for value in [
+            *(planners_feedback.get("unavailable_source_segment_ids") or []),
+            *(context.get_artifact("unavailable_source_segment_ids") or []),
+        ]
+        if str(value)
+    }
+    context.set_artifact(
+        "unavailable_source_segment_ids",
+        sorted(unavailable_source_segment_ids),
+    )
+    fixed_unavailable_slot_ids = sorted(
+        str(slot["slot_id"])
+        for slot in slots
+        if slot.get("fixed_candidate") is not None
+        and _candidate_uses_any_source_segment(
+            slot["fixed_candidate"],
+            unavailable_source_segment_ids,
+        )
+    )
+    if fixed_unavailable_slot_ids:
+        failure = {
+            "reason_code": "fixed_candidate_uses_unavailable_source_segment",
+            "failed_slot_ids": fixed_unavailable_slot_ids,
+            "unavailable_source_segment_ids": sorted(
+                unavailable_source_segment_ids
+            ),
+        }
+        context.set_artifact("retrieval_failure", failure)
+        raise ValueError(
+            "Fixed candidates use unavailable source Segments for Slots: "
+            + json.dumps(fixed_unavailable_slot_ids, ensure_ascii=False)
+        )
+    rejection_history: list[dict[str, Any]] = []
+    active_rejections: list[dict[str, Any]] = []
+    failed_slot_diagnostics_by_assignment: dict[
+        tuple[str, tuple[str, ...]], dict[str, Any]
+    ] = {}
+    seen_rejection_identities_by_assignment: dict[
+        tuple[str, tuple[str, ...]], set[str]
+    ] = {}
+
+    def record_failed_slot_diagnostic(
+        slot: dict[str, Any],
+        failure: dict[str, Any],
+        *,
+        missing_candidates: int,
+    ) -> None:
+        slot_id = str(slot["slot_id"])
+        segment_ids = tuple(
+            str(value) for value in slot.get("source_segment_ids") or []
+        )
+        key = (slot_id, segment_ids)
+        previous = failed_slot_diagnostics_by_assignment.get(key, {})
+        seen_rejections = seen_rejection_identities_by_assignment.setdefault(
+            key,
+            set(),
+        )
+        new_rejections: list[dict[str, Any]] = []
+        reason_counts = Counter(previous.get("reason_counts") or {})
+        for rejection in failure.get("candidate_rejections") or []:
+            identity = json.dumps(
+                rejection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            if identity in seen_rejections:
+                continue
+            seen_rejections.add(identity)
+            new_rejections.append(rejection)
+            reason_counts[str(rejection.get("reason_code") or "unknown")] += 1
+        if not reason_counts:
+            reason_counts[str(failure.get("reason_code") or "unknown")] += 1
+        merged_rejections = [
+            *(previous.get("candidate_rejections") or []),
+            *new_rejections,
+        ]
+        first_by_reason: dict[str, dict[str, Any]] = {}
+        last_by_reason: dict[str, dict[str, Any]] = {}
+        for rejection in merged_rejections:
+            reason_code = str(rejection.get("reason_code") or "unknown")
+            first_by_reason.setdefault(reason_code, rejection)
+            last_by_reason[reason_code] = rejection
+        representative_rejections: list[dict[str, Any]] = []
+        for reason_code in sorted(first_by_reason):
+            representative_rejections.append(first_by_reason[reason_code])
+            if last_by_reason[reason_code] is not first_by_reason[reason_code]:
+                representative_rejections.append(last_by_reason[reason_code])
+        representative_ids = {id(item) for item in representative_rejections}
+        for rejection in reversed(merged_rejections):
+            if len(representative_rejections) >= 12:
+                break
+            if id(rejection) in representative_ids:
+                continue
+            representative_rejections.append(rejection)
+            representative_ids.add(id(rejection))
+        representative_rejections = representative_rejections[:12]
+        failed_slot_diagnostics_by_assignment[key] = {
+            "slot_id": slot_id,
+            "content_description": str(slot["content_description"]),
+            "required_visible_subjects": list(
+                slot.get("required_visible_subjects") or []
+            ),
+            "source_segment_ids": list(segment_ids),
+            "missing_candidates": missing_candidates,
+            "reason_code": str(failure.get("reason_code") or ""),
+            "reason_counts": dict(sorted(reason_counts.items())),
+            "candidate_rejections": representative_rejections,
+        }
+
+    def failed_slot_diagnostics() -> list[dict[str, Any]]:
+        return list(failed_slot_diagnostics_by_assignment.values())
+
     primary_rounds = retrieval_config.retrieval_max_rounds + 1
     adjacent_rounds = 1
     total_rounds = primary_rounds + adjacent_rounds
     primary_scope_exhausted: set[str] = set()
     adjacent_scope_exhausted: set[str] = set()
-    for round_index in range(1, total_rounds + 1):
-        include_adjacent = round_index > primary_rounds
-        scope = "adjacent_segments" if include_adjacent else "planned_segments"
-        scope_round = (
-            round_index - primary_rounds
-            if include_adjacent
-            else round_index
-        )
-        exhausted_slots = (
-            adjacent_scope_exhausted
-            if include_adjacent
-            else primary_scope_exhausted
-        )
-        pending = [
-            slot
-            for slot in slots
-            if slot["slot_id"] not in fixed_slot_ids
-            if len(pool[slot["slot_id"]]) < retrieval_config.candidates_per_slot
-            if slot["slot_id"] not in exhausted_slots
-        ]
+    targeted_replan_used: set[str] = set()
+    expanded_repair_domains: set[frozenset[str]] = set()
+    terminally_exhausted: set[str] = set()
+    repair_validation_pending: set[str] = set()
+    unrepairable_diagnostics: dict[str, Any] | None = None
+    base_round_index = 1
+    round_index = 0
+    while repair_validation_pending or base_round_index <= total_rounds:
+        round_index += 1
+        slot_by_id = {str(slot["slot_id"]): slot for slot in slots}
+        repair_validation_slot_ids = set(repair_validation_pending)
+        repair_validation_pending.clear()
+        is_repair_validation = bool(repair_validation_slot_ids)
+        configured_round_index: int | None = None
+        if is_repair_validation:
+            include_adjacent = False
+            scope = "targeted_repair_validation"
+            scope_round = 1
+            pending = [
+                slot
+                for slot in slots
+                if slot["slot_id"] in repair_validation_slot_ids
+                if slot["slot_id"] not in fixed_slot_ids
+                if len(pool[slot["slot_id"]])
+                < retrieval_config.candidates_per_slot
+            ]
+        else:
+            configured_round_index = base_round_index
+            base_round_index += 1
+            include_adjacent = configured_round_index > primary_rounds
+            scope = (
+                "adjacent_segments" if include_adjacent else "planned_segments"
+            )
+            scope_round = (
+                configured_round_index - primary_rounds
+                if include_adjacent
+                else configured_round_index
+            )
+            exhausted_slots = (
+                adjacent_scope_exhausted
+                if include_adjacent
+                else primary_scope_exhausted
+            )
+            pending = [
+                slot
+                for slot in slots
+                if slot["slot_id"] not in fixed_slot_ids
+                if len(pool[slot["slot_id"]])
+                < retrieval_config.candidates_per_slot
+                if slot["slot_id"] not in exhausted_slots
+                if slot["slot_id"] not in terminally_exhausted
+            ]
         if not pending:
             if all(
                 slot["slot_id"] in fixed_slot_ids
@@ -594,20 +879,24 @@ def retrieve_candidates(
         source_segments_by_slot: dict[str, list[dict[str, Any]]] = {}
         for slot in pending:
             slot_id = str(slot["slot_id"])
-            source_segments_by_slot.update(
-                _retrieval_segment_context(
-                    video_description,
-                    [slot],
-                    include_adjacent=include_adjacent,
-                )
+            source_context = _retrieval_segment_context(
+                video_description,
+                [slot],
+                include_adjacent=include_adjacent,
             )
+            source_segments_by_slot[slot_id] = [
+                segment
+                for segment in source_context[slot_id]
+                if str(segment["segment_id"])
+                not in unavailable_source_segment_ids
+            ]
         excluded = {
             slot["slot_id"]: [
                 item["timestamp"] for item in pool[slot["slot_id"]]
             ]
             + [
                 item["timestamp"]
-                for item in rejected
+                for item in rejection_history
                 if item["slot_id"] == slot["slot_id"]
             ]
             for slot in pending
@@ -716,9 +1005,29 @@ def retrieve_candidates(
                     "WARNING",
                     "aster.timeline",
                     "validation.reject",
-                    "Slot candidate retrieval failed; expanding in the next round",
+                    (
+                        "Targeted repair validation retrieval failed; handing the "
+                        "transaction error to the outer ASTER attempt"
+                        if is_repair_validation
+                        else "Slot candidate retrieval failed; expanding in the next round"
+                    ),
                     **retrieval_failure,
                 )
+                if is_repair_validation:
+                    retrieval_failure.update(
+                        {
+                            "failed_slot_ids": [slot_id],
+                            "failed_slot_diagnostics": failed_slot_diagnostics(),
+                            "unavailable_source_segment_ids": sorted(
+                                unavailable_source_segment_ids
+                            ),
+                        }
+                    )
+                    context.set_artifact("retrieval_failure", retrieval_failure)
+                    raise ValueError(
+                        "Candidate retrieval failed while validating a targeted "
+                        f"repair for {slot_id}: {error_summary(exc)}"
+                    ) from exc
                 return slot_id, None, None
             for item_index, candidate in enumerate(slot_pool[slot_id], 1):
                 candidate["candidate_id"] = (
@@ -751,11 +1060,12 @@ def retrieve_candidates(
                 )
             )
 
-        exhausted_slots.update(
-            slot_id
-            for slot_id, _slot_pool, duration_failure in slot_results
-            if duration_failure is not None
-        )
+        if not is_repair_validation:
+            exhausted_slots.update(
+                slot_id
+                for slot_id, _slot_pool, duration_failure in slot_results
+                if duration_failure is not None
+            )
         duration_failures = [
             duration_failure
             for _slot_id, _slot_pool, duration_failure in slot_results
@@ -776,9 +1086,12 @@ def retrieve_candidates(
                 retrieval_config.motion_sample_fps,
                 retrieval_config.motion_workers,
             )
+            newly_unavailable_segment_ids: set[str] = set()
             for slot in successful_slots:
                 slot_id = str(slot["slot_id"])
+                retrieved_candidates = list(round_pool[slot_id])
                 moving_candidates: list[dict[str, Any]] = []
+                static_candidates: list[dict[str, Any]] = []
                 for candidate in round_pool[slot_id]:
                     kinetic_energy = float(candidate["kinetic_energy"])
                     static_threshold = (
@@ -797,6 +1110,12 @@ def retrieve_candidates(
                         round=round_index,
                         scope=scope,
                         scope_round=scope_round,
+                        source_segment_ids=list(
+                            candidate.get("source_segment_ids") or []
+                        ),
+                        source_shot_ids=sorted(
+                            _candidate_overlap_shot_ids(candidate)
+                        ),
                     )
                     log_event(
                         "WARNING",
@@ -805,16 +1124,221 @@ def retrieve_candidates(
                         "Candidate rejected by local motion diagnostics",
                         **static_failure,
                     )
-                    rejected.append(
+                    rejection = {
+                        **static_failure,
+                        "diagnostic_source": "local_motion",
+                        "planned_content_description": slot[
+                            "content_description"
+                        ],
+                    }
+                    rejection_history.append(rejection)
+                    active_rejections.append(rejection)
+                    static_candidates.append(candidate)
+                round_pool[slot_id] = moving_candidates
+
+                static_segment_id = _all_static_batch_source_segment_id(
+                    retrieved_candidates,
+                    static_candidates,
+                )
+                if (
+                    static_segment_id is not None
+                    and static_segment_id not in unavailable_source_segment_ids
+                ):
+                    newly_unavailable_segment_ids.add(static_segment_id)
+
+            if newly_unavailable_segment_ids:
+                unavailable_source_segment_ids.update(
+                    newly_unavailable_segment_ids
+                )
+                context.set_artifact(
+                    "unavailable_source_segment_ids",
+                    sorted(unavailable_source_segment_ids),
+                )
+                for segment_id in sorted(newly_unavailable_segment_ids):
+                    log_event(
+                        "WARNING",
+                        "aster.timeline",
+                        "validation.reject",
+                        "Source Segment permanently excluded because every "
+                        "candidate in one retrieval batch was static",
+                        source_segment_id=segment_id,
+                        confirmation_basis="all_static_candidate_batch",
+                    )
+
+                fixed_unavailable_slot_ids = sorted(
+                    slot_id
+                    for slot_id in fixed_slot_ids
+                    if any(
+                        _candidate_uses_any_source_segment(
+                            candidate,
+                            newly_unavailable_segment_ids,
+                        )
+                        for candidate in pool[slot_id]
+                    )
+                )
+                if fixed_unavailable_slot_ids:
+                    failure = {
+                        "reason_code": (
+                            "fixed_candidate_uses_unavailable_source_segment"
+                        ),
+                        "failed_slot_ids": fixed_unavailable_slot_ids,
+                        "unavailable_source_segment_ids": sorted(
+                            unavailable_source_segment_ids
+                        ),
+                    }
+                    context.set_artifact("retrieval_failure", failure)
+                    raise ValueError(
+                        "Fixed candidates use unavailable source Segments for "
+                        "Slots: "
+                        + json.dumps(
+                            fixed_unavailable_slot_ids,
+                            ensure_ascii=False,
+                        )
+                    )
+
+                def reject_invalidated_candidate(
+                    invalidated_slot_id: str,
+                    candidate: dict[str, Any],
+                ) -> None:
+                    matched_segment_ids = sorted(
                         {
-                            **static_failure,
-                            "diagnostic_source": "local_motion",
-                            "planned_content_description": slot[
-                                "content_description"
-                            ],
+                            str(segment_id)
+                            for segment_id in candidate.get(
+                                "source_segment_ids"
+                            )
+                            or []
+                            if str(segment_id)
+                            in newly_unavailable_segment_ids
                         }
                     )
-                round_pool[slot_id] = moving_candidates
+                    rejection = {
+                        "reason_code": PromptFailureCode.VISUALLY_STATIC.value,
+                        "diagnosis": (
+                            "Candidate invalidated because its Source Segment "
+                            "was excluded by an all-static retrieval batch."
+                        ),
+                        "repair_requirement": (
+                            "Retrieve the Slot from a different Source Segment."
+                        ),
+                        "slot_id": invalidated_slot_id,
+                        "candidate_id": str(candidate.get("candidate_id") or ""),
+                        "timestamp": str(candidate.get("timestamp") or ""),
+                        "source_segment_ids": list(
+                            candidate.get("source_segment_ids") or []
+                        ),
+                        "unavailable_source_segment_ids": matched_segment_ids,
+                        "diagnostic_source": "source_segment_static_batch",
+                        "planned_content_description": slot_by_id[
+                            invalidated_slot_id
+                        ]["content_description"],
+                    }
+                    rejection_history.append(rejection)
+                    active_rejections.append(rejection)
+                    log_event(
+                        "WARNING",
+                        "aster.timeline",
+                        "validation.reject",
+                        "Previously accepted candidate invalidated after its "
+                        "Source Segment was excluded",
+                        **rejection,
+                    )
+
+                for invalidated_slot_id, candidates in pool.items():
+                    retained_candidates: list[dict[str, Any]] = []
+                    for candidate in candidates:
+                        if _candidate_uses_any_source_segment(
+                            candidate,
+                            newly_unavailable_segment_ids,
+                        ):
+                            reject_invalidated_candidate(
+                                invalidated_slot_id,
+                                candidate,
+                            )
+                            continue
+                        retained_candidates.append(candidate)
+                    pool[invalidated_slot_id] = retained_candidates
+
+                for invalidated_slot_id, candidates in round_pool.items():
+                    retained_candidates = []
+                    for candidate in candidates:
+                        if _candidate_uses_any_source_segment(
+                            candidate,
+                            newly_unavailable_segment_ids,
+                        ):
+                            reject_invalidated_candidate(
+                                invalidated_slot_id,
+                                candidate,
+                            )
+                            continue
+                        retained_candidates.append(candidate)
+                    round_pool[invalidated_slot_id] = retained_candidates
+
+            for slot in successful_slots:
+                slot_id = str(slot["slot_id"])
+                moving_candidates = list(round_pool[slot_id])
+                ranked_moving_candidates = sorted(
+                    moving_candidates,
+                    key=lambda candidate: (
+                        -float(candidate["semantic_relevance"]),
+                        -float(candidate["salience"]),
+                        parse_range(candidate["timestamp"])[0],
+                    ),
+                )
+                diverse_moving_candidates: list[dict[str, Any]] = []
+                for candidate in ranked_moving_candidates:
+                    duplicate_of = next(
+                        (
+                            existing
+                            for existing in [
+                                *pool[slot_id],
+                                *diverse_moving_candidates,
+                            ]
+                            if _candidate_duplicates_source_evidence(
+                                candidate,
+                                existing,
+                            )
+                        ),
+                        None,
+                    )
+                    if duplicate_of is None:
+                        diverse_moving_candidates.append(candidate)
+                        continue
+                    duplicate_failure = build_prompt_failure(
+                        PromptFailureCode.DUPLICATE_CANDIDATE_RANGE,
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                        slot_id=slot_id,
+                        candidate_id=candidate["candidate_id"],
+                        timestamp=candidate["timestamp"],
+                        source_segment_ids=list(
+                            candidate.get("source_segment_ids") or []
+                        ),
+                        source_shot_ids=sorted(
+                            _candidate_overlap_shot_ids(candidate)
+                        ),
+                        conflicting_candidate_id=duplicate_of.get("candidate_id"),
+                        conflicting_timestamp=duplicate_of.get("timestamp"),
+                        conflicting_source_shot_ids=sorted(
+                            _candidate_overlap_shot_ids(duplicate_of)
+                        ),
+                    )
+                    rejection = {
+                        **duplicate_failure,
+                        "planned_content_description": slot["content_description"],
+                        "diagnostic_source": "source_evidence_diversity",
+                    }
+                    rejection_history.append(rejection)
+                    active_rejections.append(rejection)
+                    log_event(
+                        "WARNING",
+                        "aster.timeline",
+                        "validation.reject",
+                        "Candidate rejected before VLM because its source evidence "
+                        "duplicates another candidate",
+                        **duplicate_failure,
+                    )
+                round_pool[slot_id] = diverse_moving_candidates
 
             visual_slots = [
                 slot
@@ -859,69 +1383,90 @@ def retrieve_candidates(
                 slot_id = slot["slot_id"]
                 requires_subject = bool(slot.get("required_visible_subjects"))
                 grounded_candidates: list[dict[str, Any]] = []
+                relevance_threshold = 3
+
+                def reject_candidate(
+                    candidate: dict[str, Any],
+                    rejection_code: PromptFailureCode,
+                ) -> None:
+                    visual_failure = build_prompt_failure(
+                        rejection_code,
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                        slot_id=slot_id,
+                        candidate_id=candidate["candidate_id"],
+                        timestamp=candidate["timestamp"],
+                        required_visible_subjects=list(
+                            slot.get("required_visible_subjects") or []
+                        ),
+                        visible_subjects=list(
+                            candidate.get("visible_subjects") or []
+                        ),
+                        protagonist_visibility_likert=candidate[
+                            "protagonist_visibility_likert"
+                        ],
+                        protagonist_visibility_likert_threshold=(
+                            retrieval_config.protagonist_visibility_likert_threshold
+                        ),
+                        visual_slot_relevance_likert=candidate[
+                            "visual_slot_relevance_likert"
+                        ],
+                        visual_slot_relevance_likert_threshold=(
+                            relevance_threshold
+                        ),
+                        kinetic_energy=candidate["kinetic_energy"],
+                        visual_evidence=candidate["visual_evidence"],
+                        source_segment_ids=list(
+                            candidate.get("source_segment_ids") or []
+                        ),
+                        source_shot_ids=sorted(
+                            _candidate_overlap_shot_ids(candidate)
+                        ),
+                    )
+                    log_event(
+                        "WARNING",
+                        "aster.timeline",
+                        "validation.reject",
+                        "Candidate rejected after visual diagnostics",
+                        **visual_failure,
+                    )
+                    rejection = {
+                        **visual_failure,
+                        "planned_content_description": slot[
+                            "content_description"
+                        ],
+                        "visible_description": candidate["description"],
+                        "visual_slot_relevance_likert": candidate.get(
+                            "visual_slot_relevance_likert"
+                        ),
+                    }
+                    rejection_history.append(rejection)
+                    active_rejections.append(rejection)
+
                 for candidate in round_pool[slot_id]:
                     visibility_likert = int(
                         candidate["protagonist_visibility_likert"]
                     )
-                    duplicate = any(
-                        _same_range(
-                            parse_range(candidate["timestamp"]),
-                            parse_range(existing["timestamp"]),
-                        )
-                        for existing in pool[slot_id]
+                    relevance_likert = int(
+                        candidate["visual_slot_relevance_likert"]
                     )
                     visibility_ok = (
                         not requires_subject
                         or visibility_likert
                         >= retrieval_config.protagonist_visibility_likert_threshold
                     )
-                    if duplicate or not visibility_ok:
-                        rejection_code = (
-                            PromptFailureCode.DUPLICATE_CANDIDATE_RANGE
-                            if duplicate
-                            else PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED
+                    relevance_ok = relevance_likert >= relevance_threshold
+                    if not visibility_ok:
+                        reject_candidate(
+                            candidate,
+                            PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
                         )
-                        visual_failure = build_prompt_failure(
-                            rejection_code,
-                            round=round_index,
-                            scope=scope,
-                            scope_round=scope_round,
-                            slot_id=slot_id,
-                            candidate_id=candidate["candidate_id"],
-                            timestamp=candidate["timestamp"],
-                            required_visible_subjects=list(
-                                slot.get("required_visible_subjects") or []
-                            ),
-                            visible_subjects=list(
-                                candidate.get("visible_subjects") or []
-                            ),
-                            protagonist_visibility_likert=candidate[
-                                "protagonist_visibility_likert"
-                            ],
-                            protagonist_visibility_likert_threshold=(
-                                retrieval_config.protagonist_visibility_likert_threshold
-                            ),
-                            kinetic_energy=candidate["kinetic_energy"],
-                            visual_evidence=candidate["visual_evidence"],
-                        )
-                        log_event(
-                            "WARNING",
-                            "aster.timeline",
-                            "validation.reject",
-                            "Candidate rejected after visual diagnostics",
-                            **visual_failure,
-                        )
-                        rejected.append(
-                            {
-                                **visual_failure,
-                                "planned_content_description": slot[
-                                    "content_description"
-                                ],
-                                "visible_description": candidate["description"],
-                                "visual_slot_relevance_likert": candidate.get(
-                                    "visual_slot_relevance_likert"
-                                ),
-                            }
+                        continue
+                    if not relevance_ok:
+                        reject_candidate(
+                            candidate,
+                            PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT,
                         )
                         continue
                     candidate["selection_score"] = round(
@@ -929,19 +1474,20 @@ def retrieve_candidates(
                         6,
                     )
                     grounded_candidates.append(candidate)
-                candidates_needed = max(
-                    0,
-                    retrieval_config.candidates_per_slot - len(pool[slot_id]),
-                )
-                selected_candidates = sorted(
+                ranked_grounded_candidates = sorted(
                     grounded_candidates,
                     key=lambda candidate: (
                         -float(candidate["selection_score"]),
                         parse_range(candidate["timestamp"])[0],
                     ),
-                )[:candidates_needed]
+                )
+                candidates_needed = max(
+                    0,
+                    retrieval_config.candidates_per_slot - len(pool[slot_id]),
+                )
+                selected_candidates = ranked_grounded_candidates[:candidates_needed]
                 pool[slot_id].extend(selected_candidates)
-                if len(grounded_candidates) > len(selected_candidates):
+                if len(ranked_grounded_candidates) > len(selected_candidates):
                     log_event(
                         "INFO",
                         "aster.timeline",
@@ -951,7 +1497,7 @@ def retrieve_candidates(
                         scope=scope,
                         scope_round=scope_round,
                         slot_id=slot_id,
-                        grounded_candidates=len(grounded_candidates),
+                        grounded_candidates=len(ranked_grounded_candidates),
                         selected_candidates=len(selected_candidates),
                         selected_candidate_ids=[
                             candidate["candidate_id"]
@@ -959,35 +1505,201 @@ def retrieve_candidates(
                         ],
                     )
 
-        targeted_failures = list(duration_failures)
-        for slot in successful_slots:
-            slot_id = str(slot["slot_id"])
-            if pool[slot_id]:
-                continue
-            slot_rejections = [
-                item
-                for item in rejected
-                if item["slot_id"] == slot_id
-            ]
-            targeted_failures.append(
-                build_prompt_failure(
-                    PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
-                    slot_id=slot_id,
-                    round=round_index,
-                    scope=scope,
-                    scope_round=scope_round,
-                    source_segment_ids=list(slot["source_segment_ids"]),
-                    planned_content_description=slot["content_description"],
-                    required_visible_subjects=list(
-                        slot.get("required_visible_subjects") or []
-                    ),
-                    candidate_rejections=slot_rejections,
+        # A non-empty pool is already a usable binding, even when it has fewer
+        # than the preferred candidate count.  Empty visual results are only a
+        # repair failure once all configured base scopes have been consumed.
+        # A duration-invalid binding is the exception: repeating retrieval for
+        # the same too-short Segment cannot produce evidence, so it may repair
+        # immediately while later base rounds remain available for refilling.
+        targeted_failures = [
+            failure
+            for failure in duration_failures
+            if not pool[str(failure["slot_id"])]
+        ]
+        base_scopes_exhausted = (
+            not is_repair_validation
+            and configured_round_index == total_rounds
+        )
+        if is_repair_validation or base_scopes_exhausted:
+            failed_slot_ids_this_round = {
+                str(failure["slot_id"])
+                for failure in targeted_failures
+            }
+            for slot in slots:
+                slot_id = str(slot["slot_id"])
+                if (
+                    slot_id in fixed_slot_ids
+                    or pool[slot_id]
+                    or slot_id in failed_slot_ids_this_round
+                ):
+                    continue
+                slot_rejections = [
+                    item
+                    for item in active_rejections
+                    if item["slot_id"] == slot_id
+                ]
+                targeted_failures.append(
+                    build_prompt_failure(
+                        PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+                        slot_id=slot_id,
+                        round=round_index,
+                        scope=scope,
+                        scope_round=scope_round,
+                        source_segment_ids=list(slot["source_segment_ids"]),
+                        planned_content_description=slot["content_description"],
+                        required_visible_subjects=list(
+                            slot.get("required_visible_subjects") or []
+                        ),
+                        candidate_rejections=slot_rejections,
+                    )
                 )
+
+        slot_by_id = {str(slot["slot_id"]): slot for slot in slots}
+        for failure in targeted_failures:
+            failed_slot_id = str(failure["slot_id"])
+            record_failed_slot_diagnostic(
+                slot_by_id[failed_slot_id],
+                failure,
+                missing_candidates=(
+                    retrieval_config.candidates_per_slot
+                    - len(pool[failed_slot_id])
+                ),
+            )
+            failure["failed_source_segment_ids"] = sorted(
+                {
+                    str(segment_id)
+                    for diagnostic in failed_slot_diagnostics()
+                    if str(diagnostic.get("slot_id") or "") == failed_slot_id
+                    for segment_id in diagnostic.get("source_segment_ids") or []
+                    if str(segment_id)
+                }
             )
 
-        if replan_slots is not None and targeted_failures:
+        forced_expansion_failures: list[dict[str, Any]] | None = None
+        if is_repair_validation:
+            empty_repaired_slot_ids = {
+                str(slot["slot_id"])
+                for slot in pending
+                if not pool[str(slot["slot_id"])]
+            }
+            if empty_repaired_slot_ids:
+                may_expand_slot_ids = set(empty_repaired_slot_ids)
+                blocker_map, hard_blocked_slot_ids = (
+                    _repair_blockers_for_exhausted_domain(
+                        slots,
+                        may_expand_slot_ids,
+                        repair_validation_slot_ids,
+                    )
+                    if may_expand_slot_ids
+                    else ({}, set(empty_repaired_slot_ids))
+                )
+                strictly_new_blocker_ids = {
+                    blocker_id
+                    for blocker_ids in blocker_map.values()
+                    for blocker_id in blocker_ids
+                    if blocker_id not in repair_validation_slot_ids
+                }
+                expanded_domain = frozenset(
+                    {
+                        *repair_validation_slot_ids,
+                        *may_expand_slot_ids,
+                        *strictly_new_blocker_ids,
+                    }
+                )
+                if (
+                    replan_slots is not None
+                    and may_expand_slot_ids
+                    and not hard_blocked_slot_ids
+                    and strictly_new_blocker_ids
+                    and expanded_domain not in expanded_repair_domains
+                ):
+                    forced_expansion_failures = [
+                        dict(failure)
+                        for failure in targeted_failures
+                        if str(failure["slot_id"]) in may_expand_slot_ids
+                    ]
+                    if not forced_expansion_failures:
+                        terminally_exhausted.update(empty_repaired_slot_ids)
+                        unrepairable_diagnostics = build_prompt_failure(
+                            PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE,
+                            failed_slot_ids=sorted(empty_repaired_slot_ids),
+                            reason=(
+                                "repair validation produced no candidate evidence "
+                                "that can support a larger local repair"
+                            ),
+                            repair_slot_ids=sorted(repair_validation_slot_ids),
+                            blocker_slot_ids=sorted(strictly_new_blocker_ids),
+                            unavailable_source_segment_ids=sorted(
+                                unavailable_source_segment_ids
+                            ),
+                        )
+                        break
+                    forced_expansion_failures[0]["blocker_slot_ids_by_slot"] = {
+                        slot_id: sorted(blocker_ids)
+                        for slot_id, blocker_ids in blocker_map.items()
+                    }
+                    expanded_repair_domains.add(expanded_domain)
+                    log_event(
+                        "WARNING",
+                        "aster.arrangement",
+                        "fallback.apply",
+                        "Current repair domain has no grounded candidate; expanding "
+                        "through adjacent blocking Slots",
+                        round=round_index,
+                        failed_slot_ids=sorted(may_expand_slot_ids),
+                        blocking_slot_ids=sorted(strictly_new_blocker_ids),
+                        blocker_slot_ids_by_slot={
+                            slot_id: sorted(blocker_ids)
+                            for slot_id, blocker_ids in blocker_map.items()
+                        },
+                    )
+                else:
+                    terminally_exhausted.update(empty_repaired_slot_ids)
+                    reason = (
+                        "no movable adjacent blocking Slot remains"
+                        if hard_blocked_slot_ids or not strictly_new_blocker_ids
+                        else "the same expanded repair domain was already validated"
+                    )
+                    unrepairable_diagnostics = build_prompt_failure(
+                        PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE,
+                        failed_slot_ids=sorted(empty_repaired_slot_ids),
+                        reason=reason,
+                        repair_slot_ids=sorted(repair_validation_slot_ids),
+                        blocker_slot_ids=sorted(strictly_new_blocker_ids),
+                        unavailable_source_segment_ids=sorted(
+                            unavailable_source_segment_ids
+                        ),
+                    )
+                    log_event(
+                        "WARNING",
+                        "aster.timeline",
+                        "validation.reject",
+                        "Backend marked the targeted repair domain unrepairable; "
+                        "ending this ASTER attempt",
+                        round=round_index,
+                        **unrepairable_diagnostics,
+                    )
+                    break
+        eligible_targeted_failures = (
+            forced_expansion_failures
+            if forced_expansion_failures is not None
+            else [
+                failure
+                for failure in targeted_failures
+                if str(failure["slot_id"]) not in targeted_replan_used
+                if str(failure["slot_id"]) not in terminally_exhausted
+                if str(failure["slot_id"]) not in repair_validation_slot_ids
+            ]
+        )
+        if replan_slots is not None and eligible_targeted_failures:
             target_slot_ids = {
-                str(failure["slot_id"]) for failure in targeted_failures
+                str(failure["slot_id"])
+                for failure in eligible_targeted_failures
+            }
+            targeted_replan_used.update(target_slot_ids)
+            original_by_id = {
+                str(slot["slot_id"]): slot
+                for slot in slots
             }
             log_event(
                 "WARNING",
@@ -998,20 +1710,175 @@ def retrieve_candidates(
                 slot_ids=sorted(target_slot_ids),
                 reasons={
                     failure["slot_id"]: failure["reason_code"]
-                    for failure in targeted_failures
+                    for failure in eligible_targeted_failures
                 },
             )
-            redesigned_slots, replanned_slot_ids = replan_slots(
-                slots,
-                targeted_failures,
-            )
-            slots[:] = redesigned_slots
+            failed_source_segment_ids_by_slot: dict[str, set[str]] = {}
+            for diagnostic in failed_slot_diagnostics():
+                diagnostic_slot_id = str(diagnostic.get("slot_id") or "")
+                if not diagnostic_slot_id:
+                    continue
+                failed_source_segment_ids_by_slot.setdefault(
+                    diagnostic_slot_id,
+                    set(),
+                ).update(
+                    str(segment_id)
+                    for segment_id in diagnostic.get("source_segment_ids") or []
+                    if str(segment_id)
+                )
+            failed_source_segment_ids_by_slot_payload = {
+                slot_id: sorted(segment_ids)
+                for slot_id, segment_ids in sorted(
+                    failed_source_segment_ids_by_slot.items()
+                )
+                if segment_ids
+            }
+            for failure in eligible_targeted_failures:
+                failure["failed_source_segment_ids_by_slot"] = (
+                    failed_source_segment_ids_by_slot_payload
+                )
+            try:
+                redesigned_slots, replanned_slot_ids = replan_slots(
+                    slots,
+                    eligible_targeted_failures,
+                )
+            except TargetedRepairUnrepairableError as exc:
+                redesign_failure = build_prompt_failure(
+                    PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE,
+                    **exc.diagnostics,
+                )
+                redesign_failure.update(
+                    {
+                        "failed_slot_diagnostics": failed_slot_diagnostics(),
+                        "unavailable_source_segment_ids": sorted(
+                            unavailable_source_segment_ids
+                        ),
+                    }
+                )
+                context.set_artifact("retrieval_failure", redesign_failure)
+                log_event(
+                    "WARNING",
+                    "aster.arrangement",
+                    "validation.reject",
+                    "Backend rejected an unrepairable local domain before model "
+                    "invocation; handing evidence to the complete Arrangement",
+                    **redesign_failure,
+                )
+                raise ValueError(str(exc)) from exc
+            except Exception as exc:
+                redesign_failure = build_prompt_failure(
+                    PromptFailureCode.TARGETED_SLOT_REDESIGN_FAILED,
+                    failed_slot_ids=sorted(target_slot_ids),
+                    error_type=type(exc).__name__,
+                    error_message=error_summary(exc),
+                    failed_slot_diagnostics=failed_slot_diagnostics(),
+                    unavailable_source_segment_ids=sorted(
+                        unavailable_source_segment_ids
+                    ),
+                )
+                context.set_artifact("retrieval_failure", redesign_failure)
+                log_event(
+                    "ERROR",
+                    "aster.arrangement",
+                    "validation.reject",
+                    "Targeted Slot redesign failed; handing diagnostics to the "
+                    "outer ASTER attempt",
+                    **redesign_failure,
+                )
+                raise ValueError(
+                    "Targeted Slot redesign failed: "
+                    f"{error_summary(exc)}"
+                ) from exc
             redesigned_by_id = {
                 str(slot["slot_id"]): slot
                 for slot in redesigned_slots
             }
-            for slot_id in replanned_slot_ids:
-                fixed_candidate = redesigned_by_id[slot_id].get(
+            if set(redesigned_by_id) != set(original_by_id):
+                raise ValueError(
+                    "Targeted Slot redesign must preserve the complete Slot ID set"
+                )
+            reported_replanned_slot_ids = {
+                str(slot_id)
+                for slot_id in replanned_slot_ids
+                if str(slot_id) in original_by_id
+            }
+            changed_slot_ids = {
+                slot_id
+                for slot_id in reported_replanned_slot_ids
+                if _slot_retrieval_signature(original_by_id[slot_id])
+                != _slot_retrieval_signature(redesigned_by_id[slot_id])
+            }
+            meaningful_target_slot_ids = changed_slot_ids & target_slot_ids
+            duration_failure_slot_ids = {
+                str(failure["slot_id"])
+                for failure in eligible_targeted_failures
+                if failure["reason_code"]
+                == PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT.value
+            }
+            for slot_id in duration_failure_slot_ids:
+                if (
+                    original_by_id[slot_id].get("source_segment_ids")
+                    == redesigned_by_id[slot_id].get("source_segment_ids")
+                ):
+                    meaningful_target_slot_ids.discard(slot_id)
+
+            if not meaningful_target_slot_ids:
+                terminally_exhausted.update(target_slot_ids)
+                if forced_expansion_failures is not None:
+                    unrepairable_diagnostics = build_prompt_failure(
+                        PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE,
+                        failed_slot_ids=sorted(target_slot_ids),
+                        reason=(
+                            "the expanded adjacent repair made no material "
+                            "change to the failed retrieval constraints"
+                        ),
+                        repair_slot_ids=sorted(reported_replanned_slot_ids),
+                        blocker_slot_ids=sorted(
+                            {
+                                blocker_id
+                                for failure in forced_expansion_failures
+                                for blocker_ids in (
+                                    failure.get("blocker_slot_ids_by_slot") or {}
+                                ).values()
+                                for blocker_id in blocker_ids
+                            }
+                        ),
+                        unavailable_source_segment_ids=sorted(
+                            unavailable_source_segment_ids
+                        ),
+                    )
+                log_event(
+                    "WARNING",
+                    "aster.arrangement",
+                    "validation.reject",
+                    "Targeted Slot redesign made no material change to the failed "
+                    "retrieval constraints; stopping local retries",
+                    round=round_index,
+                    failed_slot_ids=sorted(target_slot_ids),
+                    reported_slot_ids=sorted(reported_replanned_slot_ids),
+                )
+                if forced_expansion_failures is not None:
+                    break
+                continue
+
+            accepted_changed_slot_ids = changed_slot_ids
+            # Only reported, materially changed Slots are applied.  Collateral
+            # neighbours whose retrieval contract did not change keep both their
+            # binding and every already grounded candidate.
+            slots[:] = [
+                (
+                    redesigned_by_id[str(slot["slot_id"])]
+                    if str(slot["slot_id"]) in accepted_changed_slot_ids
+                    else original_by_id[str(slot["slot_id"])]
+                )
+                for slot in slots
+            ]
+            applied_by_id = {
+                str(slot["slot_id"]): slot
+                for slot in slots
+            }
+            for slot_id in accepted_changed_slot_ids:
+                fixed_candidate = applied_by_id[slot_id].get(
                     "fixed_candidate"
                 )
                 pool[slot_id] = (
@@ -1021,17 +1888,27 @@ def retrieve_candidates(
                 )
                 primary_scope_exhausted.discard(slot_id)
                 adjacent_scope_exhausted.discard(slot_id)
+                terminally_exhausted.discard(slot_id)
+            active_rejections = [
+                item
+                for item in active_rejections
+                if item["slot_id"] not in accepted_changed_slot_ids
+            ]
             fixed_slot_ids.clear()
             fixed_slot_ids.update(
                 str(slot["slot_id"])
-                for slot in redesigned_slots
+                for slot in slots
                 if slot.get("fixed_candidate") is not None
             )
-            rejected = [
-                item
-                for item in rejected
-                if item["slot_id"] not in replanned_slot_ids
-            ]
+            repair_validation_pending.update(
+                slot_id
+                for slot_id in accepted_changed_slot_ids
+                if slot_id not in fixed_slot_ids
+                if len(pool[slot_id]) < retrieval_config.candidates_per_slot
+            )
+            terminally_exhausted.update(
+                target_slot_ids - meaningful_target_slot_ids
+            )
             log_event(
                 "INFO",
                 "aster.arrangement",
@@ -1039,7 +1916,11 @@ def retrieve_candidates(
                 "Targeted Slot redesign completed; retrying redesigned Slots",
                 round=round_index,
                 failed_slot_ids=sorted(target_slot_ids),
-                slot_ids=sorted(replanned_slot_ids),
+                slot_ids=sorted(accepted_changed_slot_ids),
+                validation_slot_ids=sorted(repair_validation_pending),
+                preserved_slot_ids=sorted(
+                    reported_replanned_slot_ids - accepted_changed_slot_ids
+                ),
             )
             continue
     shortages = {
@@ -1048,34 +1929,81 @@ def retrieve_candidates(
         if slot_id not in fixed_slot_ids
         if len(candidates) < retrieval_config.candidates_per_slot
     }
-    context.set_artifact("candidate_rejections", rejected)
+    context.set_artifact("candidate_rejections", active_rejections)
+    context.set_artifact("candidate_rejection_history", rejection_history)
     if shortages:
-        failure = build_prompt_failure(
-            PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
-            shortages=shortages,
-            planned_segment_rounds=primary_rounds,
-            adjacent_expansion_rounds=adjacent_rounds,
-        )
-        context.set_artifact("retrieval_failure", failure)
         empty_slots = [
             slot_id
             for slot_id in shortages
             if not pool[slot_id]
         ]
+        slot_by_id = {str(slot["slot_id"]): slot for slot in slots}
+        for slot_id in empty_slots:
+            slot = slot_by_id[slot_id]
+            current_segment_ids = tuple(
+                str(value) for value in slot.get("source_segment_ids") or []
+            )
+            if (slot_id, current_segment_ids) in (
+                failed_slot_diagnostics_by_assignment
+            ):
+                continue
+            current_rejections = [
+                rejection
+                for rejection in rejection_history
+                if str(rejection.get("slot_id") or "") == slot_id
+                if tuple(
+                    str(value)
+                    for value in rejection.get("source_segment_ids") or []
+                )
+                == current_segment_ids
+            ]
+            terminal_failure = build_prompt_failure(
+                PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+                slot_id=slot_id,
+                source_segment_ids=list(current_segment_ids),
+                candidate_rejections=current_rejections,
+            )
+            record_failed_slot_diagnostic(
+                slot,
+                terminal_failure,
+                missing_candidates=shortages[slot_id],
+            )
         if empty_slots:
+            failure_details: dict[str, Any] = {
+                "shortages": shortages,
+                "failed_slot_ids": empty_slots,
+                "failed_slot_diagnostics": failed_slot_diagnostics(),
+                "unavailable_source_segment_ids": sorted(
+                    unavailable_source_segment_ids
+                ),
+                "planned_segment_rounds": primary_rounds,
+                "adjacent_expansion_rounds": adjacent_rounds,
+            }
+            if unrepairable_diagnostics is not None:
+                failure_details["unrepairable"] = unrepairable_diagnostics
+            failure = build_prompt_failure(
+                PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
+                **failure_details,
+            )
+            context.set_artifact("retrieval_failure", failure)
             raise ValueError(
                 "No usable candidate remains after visual diagnostics for Slots: "
                 + json.dumps(empty_slots, ensure_ascii=False)
             )
+        context.set_artifact("candidate_shortages", shortages)
+        context.set_artifact("retrieval_failure", None)
         log_event(
-            "ERROR",
+            "WARNING",
             "aster.timeline",
-            "validation.reject",
+            "fallback.apply",
             "Candidate retrieval exhausted; continuing with smaller candidate pools",
             shortages=shortages,
             planned_segment_rounds=primary_rounds,
             adjacent_expansion_rounds=adjacent_rounds,
         )
+    else:
+        context.set_artifact("candidate_shortages", {})
+        context.set_artifact("retrieval_failure", None)
     for slot_id, candidates in pool.items():
         candidates.sort(key=lambda item: parse_range(item["timestamp"])[0])
         for index, candidate in enumerate(candidates, 1):

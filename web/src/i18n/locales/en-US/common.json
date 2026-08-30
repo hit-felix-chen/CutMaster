@@ -433,7 +433,13 @@
     "runContext": "{{project}} · Run {{sequence}}",
     "renderContext": "{{project}} · Run {{runSequence}} · Edit {{editVersion}} · {{audioMode}}",
     "loadMore": "Load more activity",
-    "loadingMore": "Loading more activity"
+    "loadingMore": "Loading more activity",
+    "manage": "Manage",
+    "selectAll": "Select all",
+    "clearSelection": "Clear selection",
+    "clearSelected": "Clear ({{count}})",
+    "doneManaging": "Done",
+    "selectAttempt": "Select {{attempt}}"
   },
   "executionFailures": {
     "materialAnalysis": {

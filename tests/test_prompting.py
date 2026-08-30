@@ -17,6 +17,8 @@ from cutmaster.workflow.prompting.failure_catalog import (
     build_prompt_failure,
 )
 from cutmaster.workflow.prompting.planners import (
+    CandidateRetrievalDetails,
+    CandidateVisualScoringDetails,
     DialogueAnchorSelectionDetails,
     SlotArrangementDetails,
 )
@@ -115,6 +117,9 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
             existing_slots=[],
             target_slot_constraints={},
             rejection_feedback=[],
+            hard_forbidden_assignments={
+                "slot_02": [["segment_0002"]],
+            },
         ),
     )
     slots_schema = package.response_contract.schema["properties"]["slots"]
@@ -140,12 +145,17 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
     assert "reserve sufficient chronological Segment space" in package.user_prompt
     assert "source Segment must be longer" in package.user_prompt
     assert "alternative candidates may overlap" in package.user_prompt
-    assert package.prompt_version == "3.4"
+    assert (
+        '<hard_forbidden_assignments>\n{"slot_02": [["segment_0002"]]}\n'
+        '</hard_forbidden_assignments>'
+    ) in package.user_prompt
+    assert "same slot_id must not repeat" in package.user_prompt
+    assert "first array item is slot_01" in package.user_prompt
+    assert package.prompt_version == "3.5"
     assert package.context_keys == (
         "request",
         "music_profile",
         "source_story_context",
-        "planners_feedback",
     )
 
 
@@ -215,9 +225,140 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     )
     assert "distribute source_segment_ids as\nevenly as practical" in package.user_prompt
     assert "do not push a replacement toward an\ninterval boundary" in package.user_prompt
-    assert package.prompt_version == "3.4"
+    assert "Collateral/blocker Slots" in package.user_prompt
+    assert "keep their previous_source_segment_ids" in package.user_prompt
+    assert "strictly increasing source order" in package.user_prompt
+    assert package.prompt_version == "3.6"
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
+
+
+def test_targeted_slot_arrangement_contract_preserves_requirements_by_failure_kind() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
+            target_duration_sec=8.0,
+            target_clip_duration_sec=4.0,
+            allowed_segment_ids=[],
+            retry_note="",
+            mode="targeted",
+            existing_slots=[{"slot_id": "slot_01"}],
+            target_slot_constraints={
+                "slot_01": {
+                    "desired_duration_sec": 4.0,
+                    "planned_duration_sec": 4.0,
+                    "allowed_segment_ids": ["segment_0001", "segment_0002"],
+                }
+            },
+            rejection_feedback=[
+                build_prompt_failure(
+                    PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
+                    slot_id="slot_01",
+                    candidate_id="candidate_01",
+                    timestamp="00:00:01,000-00:00:05,000",
+                    required_visible_subjects=["goalkeeper"],
+                    visual_evidence="The goalkeeper is outside the selected window.",
+                )
+            ],
+        ),
+    )
+
+    prompt_text = " ".join(package.user_prompt.split())
+    assert "Local repair never changes required_visible_subjects" in prompt_text
+    assert "keep the original required_visible_subjects" in prompt_text
+    assert "visually_static" in prompt_text
+    assert "source_segments_too_short" in prompt_text
+    assert "visual_slot_not_relevant" in prompt_text
+
+
+def test_candidate_retrieval_uses_each_slot_as_the_only_editorial_target() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_RETRIEVAL,
+        CandidateRetrievalDetails(
+            operation="Candidate retrieval round 1 slot slot_01",
+            candidates_per_slot=1,
+            slots=[
+                {
+                    "slot_id": "slot_01",
+                    "content_description": "A child fan carries a trophy toward the stadium.",
+                    "required_visible_subjects": ["child fan", "trophy"],
+                    "planned_duration_sec": 4.0,
+                    "source_segment_ids": ["segment_0001"],
+                }
+            ],
+            confirmed_candidates={"slot_01": []},
+            excluded_ranges={"slot_01": []},
+            source_segments_by_slot={
+                "slot_01": [
+                    {
+                        "segment_id": "segment_0001",
+                        "time_range": {"start_sec": 0.0, "end_sec": 10.0},
+                        "shots": [],
+                    }
+                ]
+            },
+        ),
+    )
+
+    assert package.prompt_version == "2.3"
+    assert package.response_contract.version == "1.2"
+    assert package.context_keys == ("video_summary",)
+    assert "sole editorial target" in package.user_prompt
+    assert "Slot contract" in package.user_prompt
+    assert "maintained request" not in package.user_prompt
+    prompt_text = " ".join(package.user_prompt.split())
+    assert "different source Shots are independent" in prompt_text
+    assert "Small timestamp displacements or overlapping windows" in prompt_text
+    assert "same Shot is allowed when its time window does not overlap" in prompt_text
+    assert "candidates for the same Slot may overlap" not in package.user_prompt
+
+
+def test_candidate_visual_scoring_is_strictly_slot_local_with_legacy_shape() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_VISUAL_SCORING,
+        CandidateVisualScoringDetails(
+            operation="Visual candidate validation round 1 slot slot_01",
+            candidates=[
+                {
+                    "candidate_id": "candidate_01",
+                    "slot_id": "slot_01",
+                    "intended_visible_content": (
+                        "A child fan carries a trophy toward the stadium."
+                    ),
+                    "required_visible_subjects": ["child fan", "trophy"],
+                    "source_segment_video_descriptions": [],
+                }
+            ],
+        ),
+    )
+    item_schema = package.response_contract.schema["properties"]["items"]["items"]
+
+    assert package.prompt_version == "2.1"
+    assert package.response_contract.version == "2.2"
+    assert package.context_keys == ()
+    assert item_schema["required"] == [
+        "candidate_id",
+        "visible_description",
+        "visible_subjects",
+        "required_subject_visibility",
+        "visual_slot_relevance",
+        "visual_evidence",
+    ]
+    assert set(item_schema["properties"]) == set(item_schema["required"])
+    prompt_text = " ".join(
+        (package.system_prompt + "\n" + package.user_prompt).split()
+    )
+    assert "weakest required subject" in prompt_text
+    assert "current Slot's required_visible_subjects" in prompt_text
+    assert "only against intended_visible_content" in prompt_text
+    assert "maintained request" not in prompt_text
+    assert "requested focal subject" not in prompt_text
+    assert "source title" not in prompt_text
+    assert "match_mode" not in prompt_text
+    assert "match_mode" not in json.dumps(package.response_contract.schema)
 
 
 def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
@@ -376,6 +517,20 @@ def test_prompt_failure_catalog_covers_every_reason_code() -> None:
         item.repair_requirement.strip()
         for item in PROMPT_FAILURE_CATALOG.values()
     )
+
+
+def test_visual_slot_relevance_failure_has_independent_repair_requirement() -> None:
+    failure = build_prompt_failure(
+        PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT,
+        candidate_id="candidate_01",
+        timestamp="00:00:01,000-00:00:05,000",
+        visual_slot_relevance_likert=2,
+        visual_slot_relevance_likert_threshold=3,
+        visual_evidence="The goalkeeper is visible but no save occurs.",
+    )
+
+    assert failure["reason_code"] == "visual_slot_not_relevant"
+    assert "Subject presence alone" in failure["repair_requirement"]
 
 
 def test_prompt_failure_requires_template_details() -> None:

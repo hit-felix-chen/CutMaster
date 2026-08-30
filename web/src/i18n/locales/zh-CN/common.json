@@ -432,7 +432,13 @@
     "runContext": "{{project}} · 剪辑运行 {{sequence}}",
     "renderContext": "{{project}} · 剪辑运行 {{runSequence}} · Edit {{editVersion}} · {{audioMode}}",
     "loadMore": "加载更多活动记录",
-    "loadingMore": "正在加载更多活动记录"
+    "loadingMore": "正在加载更多活动记录",
+    "manage": "管理",
+    "selectAll": "全选",
+    "clearSelection": "取消全选",
+    "clearSelected": "清空（{{count}}）",
+    "doneManaging": "完成",
+    "selectAttempt": "选择{{attempt}}"
   },
   "executionFailures": {
     "materialAnalysis": {

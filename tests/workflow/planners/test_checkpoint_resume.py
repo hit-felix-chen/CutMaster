@@ -65,6 +65,253 @@ def _config(tmp_path: Path) -> AppConfig:
     )
 
 
+def test_failed_slot_diagnostics_only_include_final_zero_candidate_failures() -> None:
+    assert planners_module._failed_slot_ids_from_diagnostics(
+        {
+            "shortages": {"slot_01": 2},
+            "failed_slot_id": "slot_02",
+            "failed_slot_ids": ["slot_03", "slot_04"],
+            "failed_slot_diagnostics": [
+                {
+                    "slot_id": "slot_03",
+                    "source_segment_ids": ["segment_0003"],
+                    "missing_candidates": 3,
+                },
+                {
+                    "slot_id": "slot_04",
+                    "source_segment_ids": ["segment_0004"],
+                    "missing_candidates": 2,
+                },
+                {
+                    "slot_id": "slot_05",
+                    "source_segment_ids": ["segment_0005"],
+                    "missing_candidates": 3,
+                }
+            ],
+        },
+        candidates_per_slot=3,
+    ) == {"slot_03"}
+
+
+def test_failed_slot_feedback_preserves_producer_history_and_adds_terminal_fallback() -> None:
+    slots = [
+        {
+            "slot_id": "slot_02",
+            "content_description": "Current repaired assignment",
+            "source_segment_ids": ["segment_0011"],
+        }
+    ]
+    diagnostics = {
+        "shortages": {"slot_02": 3},
+        "failed_slot_ids": ["slot_02"],
+        "failed_slot_diagnostics": [
+            {
+                "slot_id": "slot_02",
+                "content_description": "Initial assignment",
+                "source_segment_ids": ["segment_0010"],
+                "missing_candidates": 3,
+                "reason_code": "no_candidate_passed_visual_diagnostics",
+                "candidate_rejections": [
+                    {
+                        "reason_code": "required_subject_not_visually_confirmed",
+                        "visual_evidence": "Only a title card is visible.",
+                    }
+                ],
+            }
+        ],
+    }
+
+    failed_slots = planners_module._failed_slot_feedback_from_diagnostics(
+        slots,
+        diagnostics,
+        candidates_per_slot=3,
+    )
+
+    assert [
+        (item["slot_id"], item["source_segment_ids"])
+        for item in failed_slots
+    ] == [
+        ("slot_02", ["segment_0010"]),
+        ("slot_02", ["segment_0011"]),
+    ]
+    assert failed_slots[0]["candidate_rejections"][0][
+        "visual_evidence"
+    ] == "Only a title card is visible."
+
+
+def test_failed_slot_feedback_keeps_zero_pool_history_without_marking_successful_repair() -> None:
+    failed_slots = planners_module._failed_slot_feedback_from_diagnostics(
+        [
+            {
+                "slot_id": "slot_02",
+                "content_description": "Successful repaired assignment",
+                "source_segment_ids": ["segment_0011"],
+            }
+        ],
+        {
+            "shortages": {},
+            "failed_slot_ids": [],
+            "failed_slot_diagnostics": [
+                {
+                    "slot_id": "slot_02",
+                    "content_description": "Failed initial assignment",
+                    "source_segment_ids": ["segment_0010"],
+                    "missing_candidates": 3,
+                    "candidate_rejections": [
+                        {
+                            "reason_code": "visually_static",
+                            "visual_evidence": "The initial window was static.",
+                        }
+                    ],
+                }
+            ],
+        },
+        candidates_per_slot=3,
+    )
+
+    assert [item["source_segment_ids"] for item in failed_slots] == [
+        ["segment_0010"]
+    ]
+
+
+def test_legacy_shortages_only_promote_zero_candidate_slots() -> None:
+    failed_slots = planners_module._failed_slot_feedback_from_diagnostics(
+        [
+            {
+                "slot_id": "slot_01",
+                "content_description": "Empty legacy assignment",
+                "source_segment_ids": ["segment_0001"],
+            },
+            {
+                "slot_id": "slot_02",
+                "content_description": "Underfilled legacy assignment",
+                "source_segment_ids": ["segment_0002"],
+            },
+        ],
+        {"shortages": {"slot_01": 3, "slot_02": 2}},
+        candidates_per_slot=3,
+    )
+
+    assert [item["slot_id"] for item in failed_slots] == ["slot_01"]
+    assert failed_slots[0]["hard_failure"] is True
+
+
+def test_explicit_partial_shortage_is_not_a_failed_assignment() -> None:
+    failed_slots = planners_module._failed_slot_feedback_from_diagnostics(
+        [
+            {
+                "slot_id": "slot_06",
+                "content_description": "One viable candidate remains",
+                "source_segment_ids": ["segment_0006"],
+            }
+        ],
+        {
+            "shortages": {"slot_06": 2},
+            "failed_slot_ids": ["slot_06"],
+            "failed_slot_diagnostics": [
+                {
+                    "slot_id": "slot_06",
+                    "source_segment_ids": ["segment_0006"],
+                    "missing_candidates": 2,
+                }
+            ],
+        },
+        candidates_per_slot=3,
+    )
+
+    assert failed_slots == []
+
+
+def test_explicit_failed_slot_without_zero_candidate_evidence_is_not_forbidden() -> None:
+    diagnostics = {
+        "failed_slot_ids": ["slot_06"],
+        "failed_slot_diagnostics": [],
+    }
+
+    assert planners_module._failed_slot_ids_from_diagnostics(
+        diagnostics,
+        candidates_per_slot=3,
+    ) == set()
+    assert planners_module._failed_slot_feedback_from_diagnostics(
+        [
+            {
+                "slot_id": "slot_06",
+                "content_description": "The retrieval transaction failed",
+                "source_segment_ids": ["segment_0006"],
+            }
+        ],
+        diagnostics,
+        candidates_per_slot=3,
+    ) == []
+
+
+def test_checkpoint_feedback_does_not_promote_legacy_forbidden_segments() -> None:
+    assert planners_module._checkpoint_feedback(
+        {
+            "attempt": 2,
+            "failed_slots": [
+                {
+                    "slot_id": "slot_01",
+                    "source_segment_ids": ["segment_0001"],
+                    "missing_candidates": 2,
+                },
+                {
+                    "slot_id": "slot_02",
+                    "source_segment_ids": ["segment_0002"],
+                    "missing_candidates": 3,
+                },
+            ],
+            "failure_history": [
+                {
+                    "attempt": 1,
+                    "error": "legacy mixed shortage",
+                    "diagnostics": {"shortages": {"slot_01": 2}},
+                    "failed_slots": [
+                        {
+                            "slot_id": "slot_01",
+                            "source_segment_ids": ["segment_0001"],
+                            "missing_candidates": 2,
+                        },
+                        {
+                            "slot_id": "slot_02",
+                            "source_segment_ids": ["segment_0002"],
+                            "missing_candidates": 3,
+                        },
+                    ],
+                }
+            ],
+            "forbidden_segment_ids": ["segment_0098"],
+            "instruction": "legacy prompt-like retry instruction",
+        },
+        candidates_per_slot=3,
+    ) == {
+        "attempt": 2,
+        "failed_slots": [
+            {
+                "slot_id": "slot_02",
+                "source_segment_ids": ["segment_0002"],
+                "missing_candidates": 3,
+                "hard_failure": True,
+            }
+        ],
+        "failure_history": [
+            {
+                "attempt": 1,
+                "error": "legacy mixed shortage",
+                "failed_slot_ids": ["slot_02"],
+                "hard_failure_only": True,
+            }
+        ],
+    }
+    assert planners_module._checkpoint_feedback(
+        {
+            "unavailable_source_segment_ids": [],
+            "forbidden_segment_ids": ["segment_0098"],
+        },
+        candidates_per_slot=3,
+    ) == {"unavailable_source_segment_ids": []}
+
+
 def _request(tmp_path: Path) -> PlannersRequest:
     video_source = (tmp_path / "video.mp4").resolve()
     music_source = (tmp_path / "music.wav").resolve()
@@ -259,15 +506,22 @@ def _install_fake_workflow(
     calls: list[str],
     *,
     fail_first_composition: bool = False,
+    explicit_unavailable_on_composition_failure: list[str] | None = None,
+    explicit_unavailable_after_scout: list[str] | None = None,
+    use_real_record_failure: bool = False,
+    arrangement_feedback_seen: list[dict[str, Any] | None] | None = None,
 ) -> None:
+    real_record_failure = planners_module.ASTERTeam.record_failure
+
     class _Team:
         def __init__(
             self,
             _video,
             _segment_cache_directory,
-            _config,
+            config,
             context,
         ) -> None:
+            self.config = config
             self.context = context
 
         def profile_music(self, music_memory, target_duration_sec, output_path):
@@ -278,6 +532,11 @@ def _install_fake_workflow(
 
         def arrange(self, *_args):
             calls.append("arrangement_architect")
+            if arrangement_feedback_seen is not None:
+                feedback = self.context.get_artifact("planners_feedback")
+                arrangement_feedback_seen.append(
+                    None if feedback is None else dict(feedback)
+                )
             return [{"slot_id": "slot_01", "content_description": "setup"}]
 
         def anchor_story(self, slots):
@@ -287,6 +546,11 @@ def _install_fake_workflow(
 
         def scout(self, _slots):
             calls.append("timeline_scout")
+            if explicit_unavailable_after_scout is not None:
+                self.context.set_artifact(
+                    "unavailable_source_segment_ids",
+                    explicit_unavailable_after_scout,
+                )
             return {
                 "slot_01": [
                     {
@@ -302,6 +566,11 @@ def _install_fake_workflow(
         def compose(self, _slots, pool):
             calls.append("edit_composer")
             if fail_first_composition and calls.count("edit_composer") == 1:
+                if explicit_unavailable_on_composition_failure is not None:
+                    self.context.set_artifact(
+                        "unavailable_source_segment_ids",
+                        explicit_unavailable_on_composition_failure,
+                    )
                 raise NoFeasiblePathError(
                     "slot_01",
                     {"failed_slot_id": "slot_01", "shortages": {}},
@@ -321,8 +590,11 @@ def _install_fake_workflow(
             calls.append("revision_editor")
             return script, []
 
-        def record_failure(self, *, attempt, **_kwargs) -> None:
+        def record_failure(self, *, attempt, **kwargs) -> None:
             calls.append("record_failure")
+            if use_real_record_failure:
+                real_record_failure(self, attempt=attempt, **kwargs)
+                return
             self.context.set_artifact(
                 "planners_feedback",
                 {
@@ -422,16 +694,65 @@ def test_resume_skips_every_completed_aster_agent_boundary(
     assert calls.count("compile_render_plan") == 1
 
 
+@pytest.mark.parametrize(
+    "stage",
+    [
+        PlannersCheckpointStage.EDIT,
+        PlannersCheckpointStage.REVISION,
+    ],
+)
+def test_resume_discards_derived_state_using_unavailable_source_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: PlannersCheckpointStage,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls)
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, stage)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    contaminated = store.latest.to_dict()
+    contaminated["candidate_pool"]["slot_01"][0][
+        "source_segment_ids"
+    ] = ["segment_0099"]
+    contaminated["planners_feedback"] = {
+        "unavailable_source_segment_ids": ["segment_0099"]
+    }
+    store.latest = PlannersCheckpoint.from_dict(contaminated)
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("timeline_scout") == 2
+    assert calls.count("validate_composition") == 2
+
+
 def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(tmp_path)
     calls: list[str] = []
+    arrangement_feedback_seen: list[dict[str, Any] | None] = []
     _install_fake_workflow(
         monkeypatch,
         calls,
         fail_first_composition=True,
+        arrangement_feedback_seen=arrangement_feedback_seen,
     )
     token = _BoundaryToken()
     store = _MemoryCheckpointStore(
@@ -451,6 +772,20 @@ def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
     assert store.latest.aster_attempt == 2
     assert store.latest.planners_feedback is not None
     assert "instruction" not in store.latest.planners_feedback
+
+    # Simulate a checkpoint written by the legacy contract, where any failed
+    # assignment could be placed in forbidden_segment_ids without proof that
+    # its Source Segment was intrinsically unavailable.
+    legacy_checkpoint = store.latest.to_dict()
+    assert legacy_checkpoint["planners_feedback"] is not None
+    legacy_checkpoint["planners_feedback"]["forbidden_segment_ids"] = [
+        "segment_0098"
+    ]
+    legacy_checkpoint["planners_feedback"].pop(
+        "unavailable_source_segment_ids",
+        None,
+    )
+    store.latest = PlannersCheckpoint.from_dict(legacy_checkpoint)
     token.cancelled = False
 
     result = Planners(_config(tmp_path)).plan(
@@ -462,6 +797,115 @@ def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
     assert result.status == "success"
     assert calls.count("arrangement_architect") == 2
     assert calls.count("edit_composer") == 2
+    assert arrangement_feedback_seen == [
+        None,
+        {
+            "attempt": 1,
+            "failed_slots": [],
+        },
+    ]
+
+
+def test_explicit_unavailable_segments_survive_composer_failure_checkpoint_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    arrangement_feedback_seen: list[dict[str, Any] | None] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_first_composition=True,
+        explicit_unavailable_on_composition_failure=["segment_0099"],
+        use_real_record_failure=True,
+        arrangement_feedback_seen=arrangement_feedback_seen,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.REPLAN_PENDING,
+        stop_attempt=2,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+    assert store.latest is not None
+    assert store.latest.completed_stage is PlannersCheckpointStage.REPLAN_PENDING
+    assert store.latest.planners_feedback is not None
+    assert store.latest.planners_feedback["unavailable_source_segment_ids"] == [
+        "segment_0099"
+    ]
+    assert "forbidden_segment_ids" not in store.latest.planners_feedback
+    assert "instruction" not in store.latest.planners_feedback
+
+    token.cancelled = False
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert arrangement_feedback_seen[0] is None
+    assert arrangement_feedback_seen[1] is not None
+    assert arrangement_feedback_seen[1]["unavailable_source_segment_ids"] == [
+        "segment_0099"
+    ]
+
+
+def test_timeline_checkpoint_persists_unavailable_before_later_composer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    arrangement_feedback_seen: list[dict[str, Any] | None] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_first_composition=True,
+        explicit_unavailable_after_scout=["segment_0099"],
+        use_real_record_failure=True,
+        arrangement_feedback_seen=arrangement_feedback_seen,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.TIMELINE,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+    assert store.latest is not None
+    assert store.latest.planners_feedback is not None
+    assert store.latest.planners_feedback["unavailable_source_segment_ids"] == [
+        "segment_0099"
+    ]
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert arrangement_feedback_seen[0] is None
+    assert arrangement_feedback_seen[1] is not None
+    assert arrangement_feedback_seen[1]["unavailable_source_segment_ids"] == [
+        "segment_0099"
+    ]
 
 
 def test_checkpoint_contract_rejects_non_string_nested_keys() -> None:

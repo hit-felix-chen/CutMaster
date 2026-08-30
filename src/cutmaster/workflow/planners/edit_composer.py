@@ -339,6 +339,53 @@ def validate_chronological_path(
         )
 
 
+def validate_source_segment_availability(
+    slots: list[dict[str, Any]],
+    pool: dict[str, list[dict[str, Any]]],
+    unavailable_source_segment_ids: set[str],
+) -> None:
+    """Reject candidate pools that still reference globally unavailable media."""
+
+    if not unavailable_source_segment_ids:
+        return
+    for slot in slots:
+        slot_id = str(slot["slot_id"])
+        invalid_candidates = [
+            candidate
+            for candidate in pool[slot_id]
+            if {
+                str(segment_id)
+                for segment_id in candidate.get("source_segment_ids") or []
+                if str(segment_id)
+            }.intersection(unavailable_source_segment_ids)
+        ]
+        if not invalid_candidates:
+            continue
+        raise NoFeasiblePathError(
+            slot_id,
+            {
+                "reason_code": "candidate_uses_unavailable_source_segment",
+                "failed_slot_id": slot_id,
+                "failed_slot_ids": [slot_id],
+                "candidate_ids": [
+                    str(candidate.get("candidate_id") or "")
+                    for candidate in invalid_candidates
+                ],
+                "source_segment_ids": sorted(
+                    {
+                        str(segment_id)
+                        for candidate in invalid_candidates
+                        for segment_id in candidate.get("source_segment_ids") or []
+                        if str(segment_id) in unavailable_source_segment_ids
+                    }
+                ),
+                "unavailable_source_segment_ids": sorted(
+                    unavailable_source_segment_ids
+                ),
+            },
+        )
+
+
 def select_paths(
     media: SegmentMediaReader,
     slots: list[dict[str, Any]],
@@ -550,6 +597,23 @@ class EditComposerAgent:
         slots: list[dict[str, Any]],
         candidate_space: dict[str, list[dict[str, Any]]],
     ) -> None:
+        planners_feedback = self.context.get_artifact("planners_feedback") or {}
+        unavailable_source_segment_ids = {
+            str(segment_id)
+            for segment_id in [
+                *(planners_feedback.get("unavailable_source_segment_ids") or []),
+                *(
+                    self.context.get_artifact("unavailable_source_segment_ids")
+                    or []
+                ),
+            ]
+            if str(segment_id)
+        }
+        validate_source_segment_availability(
+            slots,
+            candidate_space,
+            unavailable_source_segment_ids,
+        )
         validate_chronological_path(slots, candidate_space)
 
     def compose(

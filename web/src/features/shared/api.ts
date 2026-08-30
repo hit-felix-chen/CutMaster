@@ -962,6 +962,15 @@ export const api = {
             }).toString()}`
       return apiRequest<ActivityCollection>(path)
     },
+    dismiss: (attemptIds: string[]) =>
+      apiRequest<{ attempt_ids: string[]; dismissed: number }>(
+        '/api/activity/dismiss',
+        {
+          method: 'POST',
+          headers: commandHeaders(),
+          body: JSON.stringify({ attempt_ids: attemptIds }),
+        },
+      ),
   },
   attempts: {
     logs: (attemptId: string) =>

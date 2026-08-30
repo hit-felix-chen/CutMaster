@@ -9,12 +9,17 @@ import {
   CheckCircle2,
   Clock3,
   LoaderCircle,
+  ListChecks,
   Play,
   Radio,
   RefreshCcw,
   Rows3,
   Square,
+  SquareCheckBig,
+  Trash2,
+  X,
 } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 
@@ -30,22 +35,46 @@ import { hasActiveActivity } from '@/features/shared/execution-state'
 
 const groups = [
   {
+    id: 'running',
     key: 'activity.running',
     statuses: ['running', 'retrying', 'stopping'],
     icon: Radio,
   },
-  { key: 'activity.queued', statuses: ['queued'], icon: Clock3 },
-  { key: 'activity.attention', statuses: ['failed', 'interrupted'], icon: AlertCircle },
+  { id: 'queued', key: 'activity.queued', statuses: ['queued'], icon: Clock3 },
   {
+    id: 'attention',
+    key: 'activity.attention',
+    statuses: ['failed', 'interrupted'],
+    icon: AlertCircle,
+    manageable: true,
+  },
+  {
+    id: 'recent',
     key: 'activity.recent',
     statuses: ['complete', 'completed', 'reused'],
     icon: CheckCircle2,
+    manageable: true,
   },
 ] as const
+
+type ManageableGroup = 'attention' | 'recent'
 
 export function ActivityBoard() {
   const { t, i18n } = useTranslation('common')
   const { isConnected } = useEventStream()
+  const queryClient = useQueryClient()
+  const [managingGroup, setManagingGroup] = useState<ManageableGroup | null>(null)
+  const [selectedAttemptIds, setSelectedAttemptIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const dismiss = useMutation({
+    mutationFn: (attemptIds: string[]) => api.activity.dismiss(attemptIds),
+    onSuccess: async () => {
+      setSelectedAttemptIds(new Set())
+      setManagingGroup(null)
+      await queryClient.invalidateQueries({ queryKey: ['activity'] })
+    },
+  })
   const activity = useInfiniteQuery({
     queryKey: ['activity'],
     initialPageParam: 0,
@@ -88,17 +117,98 @@ export function ActivityBoard() {
         </section>
       ) : null}
       <div className="activity-groups">
-        {groups.map(({ key, statuses, icon: Icon }) => {
+        {groups.map(({ id, key, statuses, icon: Icon, ...group }) => {
           const values = attempts.filter(({ attempt }) =>
             statuses.includes(attempt.status.toLowerCase() as never),
           )
           if (values.length === 0) return null
+          const manageable = 'manageable' in group && group.manageable
+          const isManaging = manageable && managingGroup === id
+          const valueIds = values.map(({ attempt }) => attempt.attempt_id)
+          const allSelected =
+            valueIds.length > 0 &&
+            valueIds.every((attemptId) => selectedAttemptIds.has(attemptId))
           return (
             <section className="activity-group" key={key}>
               <header>
                 <Icon size={17} />
                 <h2>{t(key)}</h2>
-                <span>{values.length}</span>
+                <span className="activity-group__count">{values.length}</span>
+                {manageable ? (
+                  <div className="activity-group__management">
+                    {isManaging ? (
+                      <>
+                        <button
+                          className="button button--secondary"
+                          type="button"
+                          onClick={() => {
+                            setSelectedAttemptIds((current) => {
+                              const next = new Set(current)
+                              if (allSelected) {
+                                valueIds.forEach((attemptId) => next.delete(attemptId))
+                              } else {
+                                valueIds.forEach((attemptId) => next.add(attemptId))
+                              }
+                              return next
+                            })
+                          }}
+                        >
+                          <SquareCheckBig size={14} aria-hidden="true" />
+                          {t(
+                            allSelected
+                              ? 'activity.clearSelection'
+                              : 'activity.selectAll',
+                          )}
+                        </button>
+                        <button
+                          className="button button--danger"
+                          type="button"
+                          disabled={selectedAttemptIds.size === 0 || dismiss.isPending}
+                          onClick={() => dismiss.mutate([...selectedAttemptIds])}
+                        >
+                          {dismiss.isPending ? (
+                            <LoaderCircle
+                              className="spin"
+                              size={14}
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Trash2 size={14} aria-hidden="true" />
+                          )}
+                          {t('activity.clearSelected', {
+                            count: selectedAttemptIds.size,
+                          })}
+                        </button>
+                        <button
+                          className="button button--secondary"
+                          type="button"
+                          disabled={dismiss.isPending}
+                          onClick={() => {
+                            setSelectedAttemptIds(new Set())
+                            setManagingGroup(null)
+                            dismiss.reset()
+                          }}
+                        >
+                          <X size={14} aria-hidden="true" />
+                          {t('activity.doneManaging')}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="button button--secondary"
+                        type="button"
+                        onClick={() => {
+                          setSelectedAttemptIds(new Set())
+                          setManagingGroup(id as ManageableGroup)
+                          dismiss.reset()
+                        }}
+                      >
+                        <ListChecks size={14} aria-hidden="true" />
+                        {t('activity.manage')}
+                      </button>
+                    )}
+                  </div>
+                ) : null}
               </header>
               <div>
                 {values.map((item) => (
@@ -106,9 +216,22 @@ export function ActivityBoard() {
                     key={item.attempt.attempt_id}
                     item={item}
                     locale={i18n.language}
+                    managing={isManaging}
+                    selected={selectedAttemptIds.has(item.attempt.attempt_id)}
+                    onSelectionChange={(selected) => {
+                      setSelectedAttemptIds((current) => {
+                        const next = new Set(current)
+                        if (selected) next.add(item.attempt.attempt_id)
+                        else next.delete(item.attempt.attempt_id)
+                        return next
+                      })
+                    }}
                   />
                 ))}
               </div>
+              {isManaging && dismiss.isError ? (
+                <OperationProblem error={dismiss.error} />
+              ) : null}
             </section>
           )
         })}
@@ -211,7 +334,19 @@ async function refreshActivityItem(queryClient: QueryClient, item: ActivityItem)
   await Promise.all(requests)
 }
 
-function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
+function AttemptRow({
+  item,
+  locale,
+  managing = false,
+  selected = false,
+  onSelectionChange,
+}: {
+  item: ActivityItem
+  locale: string
+  managing?: boolean
+  selected?: boolean
+  onSelectionChange?: (selected: boolean) => void
+}) {
   const { t } = useTranslation('common')
   const queryClient = useQueryClient()
   const { attempt } = item
@@ -268,8 +403,10 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
             })
           : t('activity.ownerUnavailable')
   return (
-    <article className={`activity-row${destination ? ' activity-row--linked' : ''}`}>
-      {destination ? (
+    <article
+      className={`activity-row${destination && !managing ? ' activity-row--linked' : ''}${managing ? ' activity-row--managing' : ''}`}
+    >
+      {destination && !managing ? (
         <Link
           className="activity-row__link"
           to={destination}
@@ -277,6 +414,18 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
             owner: `${ownerLabel} · ${ownerContext}`,
           })}
         />
+      ) : null}
+      {managing ? (
+        <label className="activity-row__selector">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(event) => onSelectionChange?.(event.target.checked)}
+            aria-label={t('activity.selectAttempt', {
+              attempt: `${ownerLabel} · ${ownerContext}`,
+            })}
+          />
+        </label>
       ) : null}
       <div className="activity-row__identity">
         <strong>
@@ -296,7 +445,7 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
           timeStyle: 'short',
         }).format(new Date(attempt.updated_at))}
       </time>
-      {stoppable ? (
+      {stoppable && !managing ? (
         <button
           className="button button--secondary activity-row__action"
           type="button"
@@ -314,7 +463,7 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
           {t('activity.stopAttempt')}
         </button>
       ) : null}
-      {recoveryAction && recoverySupported ? (
+      {recoveryAction && recoverySupported && !managing ? (
         <button
           className="button button--secondary activity-row__action"
           type="button"

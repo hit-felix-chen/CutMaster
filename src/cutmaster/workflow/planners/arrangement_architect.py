@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,14 @@ from cutmaster.workflow.planners.tools.music_analysis import (
     compact_music_profile,
     write_music_profile,
 )
+from cutmaster.workflow.planners.tools.errors import (
+    TargetedRepairUnrepairableError,
+)
+from cutmaster.workflow.planners.tools.planners_feedback import (
+    is_hard_failed_slot_record,
+)
 from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registry
+from cutmaster.workflow.prompting.failure_catalog import PromptFailureCode
 from cutmaster.workflow.prompting.planners import SlotArrangementDetails
 from cutmaster.infrastructure.observability.logging import log_event
 from cutmaster.workflow.shared.execution_context import WorkflowContext
@@ -21,6 +30,404 @@ MAX_MUSIC_BOUNDARY_SHIFT_SEC = 0.75
 MAX_TARGET_DURATION_RATIO = 1.5
 MAX_AVERAGE_TARGET_ERROR_RATIO = 0.125
 DURATION_TOLERANCE_SEC = 1e-6
+
+_TARGETED_ALWAYS_PRESERVED_FIELDS = (
+    "narrative_role",
+    "target_emotion",
+    "target_emotional_intensity",
+    "target_kinetic_energy",
+    "required_visible_subjects",
+)
+_TARGETED_EVENT_FIELDS = (
+    "content_description",
+    "continuity_from_previous",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RepairDomainAssessment:
+    """Deterministic result of deciding which Slots may join a local repair.
+
+    ``unrepairable`` is backend control state.  It is intentionally absent from
+    the Arrangement Architect response contract: an impossible local domain is
+    rejected before another model request is made.
+    """
+
+    original_slot_ids: frozenset[str]
+    repair_slot_ids: frozenset[str]
+    blocker_slot_ids: frozenset[str]
+    unrepairable_slot_ids: frozenset[str]
+    reason: str | None = None
+
+    @property
+    def unrepairable(self) -> bool:
+        return bool(self.unrepairable_slot_ids)
+
+
+def assess_repair_domain(
+    slots: list[dict[str, Any]],
+    target_slot_ids: set[str],
+    *,
+    blocker_slot_ids_by_slot: Mapping[str, Iterable[str]] | None = None,
+    intrinsically_unrepairable_slot_ids: set[str] | None = None,
+    video_description: dict[str, Any] | None = None,
+    unavailable_source_segment_ids: set[str] | None = None,
+    failed_source_segment_ids_by_slot: Mapping[str, Iterable[str]] | None = None,
+) -> RepairDomainAssessment:
+    """Expand a local repair through an explicit chain of adjacent blockers.
+
+    A caller that proves a Slot's current chronological interval has no
+    semantically usable Segment can identify the immediate neighbouring Slot
+    that blocks access to a wider interval.  Every blocker edge must join two
+    immediately adjacent Slots.  The closure therefore grows only through a
+    continuous chain and never silently absorbs the Slots between a target and
+    a distant blocker.
+
+    A non-dialogue ``fixed_candidate`` is a hard boundary.  A dialogue anchor
+    remains eligible because the existing Story refresh invalidates and
+    reselects anchors after the repaired source assignment changes.
+    """
+
+    ordered_slot_ids = [str(slot.get("slot_id") or "") for slot in slots]
+    if any(not slot_id for slot_id in ordered_slot_ids):
+        raise ValueError("Every Slot must have a non-empty slot_id")
+    if len(set(ordered_slot_ids)) != len(ordered_slot_ids):
+        raise ValueError("Slot IDs must be unique when assessing a repair domain")
+
+    slot_index = {
+        slot_id: index for index, slot_id in enumerate(ordered_slot_ids)
+    }
+    unknown_targets = set(target_slot_ids) - set(slot_index)
+    if unknown_targets:
+        raise ValueError(
+            "Repair domain contains unknown target Slots: "
+            f"{sorted(unknown_targets)}"
+        )
+
+    original_slot_ids = frozenset(str(slot_id) for slot_id in target_slot_ids)
+    repair_slot_ids = set(original_slot_ids)
+    blocker_slot_ids: set[str] = set()
+    unrepairable_slot_ids = {
+        str(slot_id)
+        for slot_id in intrinsically_unrepairable_slot_ids or set()
+    }
+    reasons: list[str] = []
+    if unrepairable_slot_ids:
+        reasons.append(
+            "intrinsically unrepairable Slots: "
+            f"{sorted(unrepairable_slot_ids)}"
+        )
+    unknown_intrinsic = unrepairable_slot_ids - set(slot_index)
+    if unknown_intrinsic:
+        reasons.append(
+            "intrinsically unrepairable Slots are unknown: "
+            f"{sorted(unknown_intrinsic)}"
+        )
+    non_target_intrinsic = unrepairable_slot_ids - set(original_slot_ids)
+    if non_target_intrinsic:
+        reasons.append(
+            "intrinsically unrepairable Slots are not repair targets: "
+            f"{sorted(non_target_intrinsic)}"
+        )
+
+    blockers_by_slot = {
+        str(slot_id): {
+            str(blocker_id)
+            for blocker_id in blocker_ids
+        }
+        for slot_id, blocker_ids in (blocker_slot_ids_by_slot or {}).items()
+    }
+    slot_by_id = {
+        str(slot["slot_id"]): slot
+        for slot in slots
+    }
+    pending = list(sorted(original_slot_ids, key=slot_index.__getitem__))
+    visited: set[str] = set()
+    while pending:
+        slot_id = pending.pop(0)
+        if slot_id in visited:
+            continue
+        visited.add(slot_id)
+        for blocker_id in sorted(
+            blockers_by_slot.get(slot_id, set()),
+            key=lambda value: slot_index.get(value, len(slot_index)),
+        ):
+            blocker_slot_ids.add(blocker_id)
+            if blocker_id not in slot_index:
+                unrepairable_slot_ids.add(slot_id)
+                reasons.append(
+                    f"{slot_id} names unknown blocker {blocker_id}"
+                )
+                continue
+            if abs(slot_index[blocker_id] - slot_index[slot_id]) != 1:
+                unrepairable_slot_ids.add(slot_id)
+                reasons.append(
+                    f"blocker {blocker_id} is not adjacent to {slot_id}"
+                )
+                continue
+            blocker = slot_by_id[blocker_id]
+            if (
+                blocker.get("fixed_candidate") is not None
+                and blocker.get("dialogue_anchor") is None
+            ):
+                unrepairable_slot_ids.add(slot_id)
+                reasons.append(
+                    f"{blocker_id} has a non-dialogue fixed candidate and blocks "
+                    f"repair of {slot_id}"
+                )
+                continue
+            if blocker_id in repair_slot_ids:
+                continue
+            repair_slot_ids.add(blocker_id)
+            pending.append(blocker_id)
+
+    if video_description is not None and not unrepairable_slot_ids:
+        segment_index = {
+            str(segment["segment_id"]): index
+            for index, segment in enumerate(video_description["segments"])
+        }
+        segment_duration = {
+            str(segment["segment_id"]): (
+                float(segment["time_range"]["end_sec"])
+                - float(segment["time_range"]["start_sec"])
+            )
+            for segment in video_description["segments"]
+        }
+        attempted_issue_reasons: list[str] = []
+
+        while True:
+            try:
+                constraints = _targeted_slot_constraints(
+                    slots,
+                    repair_slot_ids,
+                    video_description,
+                    failed_slot_ids=set(original_slot_ids),
+                    failed_source_segment_ids_by_slot=(
+                        failed_source_segment_ids_by_slot
+                    ),
+                    unavailable_source_segment_ids=(
+                        unavailable_source_segment_ids or set()
+                    ),
+                )
+            except ValueError as exc:
+                issue_slot_ids = set(original_slot_ids)
+                issue_reasons = [str(exc)]
+            else:
+                issue_slot_ids: set[str] = set()
+                issue_reasons: list[str] = []
+                previous_index = -1
+                for slot_id in ordered_slot_ids:
+                    if slot_id not in repair_slot_ids:
+                        continue
+                    constraint = constraints[slot_id]
+                    planned_duration = float(constraint["planned_duration_sec"])
+                    eligible_positions = sorted(
+                        segment_index[segment_id]
+                        for segment_id in constraint["allowed_segment_ids"]
+                        if segment_duration[segment_id]
+                        > planned_duration + DURATION_TOLERANCE_SEC
+                    )
+                    next_position = next(
+                        (
+                            position
+                            for position in eligible_positions
+                            if position > previous_index
+                        ),
+                        None,
+                    )
+                    if next_position is None:
+                        issue_slot_ids.add(slot_id)
+                        if eligible_positions:
+                            issue_reasons.append(
+                                "no strictly increasing source-Segment assignment "
+                                f"remains for {slot_id} after earlier repair Slots"
+                            )
+                        else:
+                            issue_reasons.append(
+                                f"no available source Segment for {slot_id} is longer "
+                                f"than planned_duration_sec={planned_duration:.6f}"
+                            )
+                        continue
+                    previous_index = next_position
+
+            if not issue_slot_ids:
+                break
+            attempted_issue_reasons.extend(issue_reasons)
+
+            issue_positions = sorted(slot_index[slot_id] for slot_id in issue_slot_ids)
+            repair_positions = {
+                slot_index[slot_id] for slot_id in repair_slot_ids
+            }
+            boundary_slot_ids: set[str] = set()
+            for issue_position in issue_positions:
+                component = {issue_position}
+                while min(component) - 1 in repair_positions:
+                    component.add(min(component) - 1)
+                while max(component) + 1 in repair_positions:
+                    component.add(max(component) + 1)
+                for candidate_position in (min(component) - 1, max(component) + 1):
+                    if candidate_position < 0 or candidate_position >= len(slots):
+                        continue
+                    candidate_slot_id = ordered_slot_ids[candidate_position]
+                    if candidate_slot_id in repair_slot_ids:
+                        continue
+                    candidate_slot = slot_by_id[candidate_slot_id]
+                    if (
+                        candidate_slot.get("fixed_candidate") is not None
+                        and candidate_slot.get("dialogue_anchor") is None
+                    ):
+                        continue
+                    boundary_slot_ids.add(candidate_slot_id)
+
+            if not boundary_slot_ids:
+                unrepairable_slot_ids.update(original_slot_ids)
+                reasons.extend(attempted_issue_reasons)
+                break
+            repair_slot_ids.update(boundary_slot_ids)
+            blocker_slot_ids.update(boundary_slot_ids)
+
+    reason = "; ".join(dict.fromkeys(reasons)) or None
+    return RepairDomainAssessment(
+        original_slot_ids=original_slot_ids,
+        repair_slot_ids=frozenset(repair_slot_ids),
+        blocker_slot_ids=frozenset(blocker_slot_ids),
+        unrepairable_slot_ids=frozenset(unrepairable_slot_ids),
+        reason=reason,
+    )
+
+
+def _targeted_failure_reasons_by_slot(
+    failures: list[dict[str, Any]] | None,
+) -> dict[str, set[str]]:
+    reasons_by_slot: dict[str, set[str]] = {}
+    for failure in failures or []:
+        slot_id = str(failure.get("slot_id") or "")
+        if not slot_id:
+            continue
+        reasons = reasons_by_slot.setdefault(slot_id, set())
+        reason_code = str(failure.get("reason_code") or "")
+        if reason_code:
+            reasons.add(reason_code)
+        candidate_rejections = failure.get("candidate_rejections") or []
+        if not isinstance(candidate_rejections, list):
+            continue
+        for rejection in candidate_rejections:
+            if not isinstance(rejection, dict):
+                continue
+            rejection_code = str(rejection.get("reason_code") or "")
+            if rejection_code:
+                reasons.add(rejection_code)
+    return reasons_by_slot
+
+
+def _repair_blocker_slot_ids_by_slot(
+    failures: list[dict[str, Any]],
+) -> dict[str, set[str]]:
+    """Merge direct and batched blocker evidence emitted by Timeline Scout."""
+
+    blockers_by_slot: dict[str, set[str]] = {}
+    for failure in failures:
+        nested = failure.get("blocker_slot_ids_by_slot")
+        if isinstance(nested, Mapping):
+            for raw_slot_id, raw_blocker_ids in nested.items():
+                slot_id = str(raw_slot_id)
+                if isinstance(raw_blocker_ids, str):
+                    blocker_ids = [raw_blocker_ids]
+                elif isinstance(raw_blocker_ids, Iterable):
+                    blocker_ids = raw_blocker_ids
+                else:
+                    continue
+                blockers_by_slot.setdefault(slot_id, set()).update(
+                    str(blocker_id)
+                    for blocker_id in blocker_ids
+                    if str(blocker_id)
+                )
+
+        slot_id = str(failure.get("slot_id") or "")
+        direct = failure.get("repair_blocker_slot_ids")
+        if not slot_id or direct is None:
+            continue
+        if isinstance(direct, str):
+            direct_ids = [direct]
+        elif isinstance(direct, Iterable):
+            direct_ids = direct
+        else:
+            continue
+        blockers_by_slot.setdefault(slot_id, set()).update(
+            str(blocker_id)
+            for blocker_id in direct_ids
+            if str(blocker_id)
+        )
+    return blockers_by_slot
+
+
+def _failed_source_segment_ids_by_slot(
+    failures: list[dict[str, Any]],
+) -> dict[str, set[str]]:
+    """Collect Slot-scoped failed Segment history from direct and batched fields."""
+
+    failed_by_slot: dict[str, set[str]] = {}
+    for failure in failures:
+        nested = failure.get("failed_source_segment_ids_by_slot")
+        if isinstance(nested, Mapping):
+            for raw_slot_id, raw_segment_ids in nested.items():
+                slot_id = str(raw_slot_id)
+                if not slot_id:
+                    continue
+                if isinstance(raw_segment_ids, str):
+                    segment_ids = [raw_segment_ids]
+                elif isinstance(raw_segment_ids, Iterable):
+                    segment_ids = raw_segment_ids
+                else:
+                    continue
+                failed_by_slot.setdefault(slot_id, set()).update(
+                    str(segment_id)
+                    for segment_id in segment_ids
+                    if str(segment_id)
+                )
+
+        slot_id = str(failure.get("slot_id") or "")
+        direct = failure.get("failed_source_segment_ids")
+        if not slot_id or direct is None:
+            continue
+        if isinstance(direct, str):
+            direct_ids = [direct]
+        elif isinstance(direct, Iterable):
+            direct_ids = direct
+        else:
+            continue
+        failed_by_slot.setdefault(slot_id, set()).update(
+            str(segment_id)
+            for segment_id in direct_ids
+            if str(segment_id)
+        )
+    return failed_by_slot
+
+
+def _targeted_retry_note(
+    slot_ids: set[str],
+    failures: list[dict[str, Any]],
+) -> str:
+    reasons_by_slot = _targeted_failure_reasons_by_slot(failures)
+    policies: list[str] = []
+    relevance_code = PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT.value
+    for slot_id in sorted(slot_ids):
+        reasons = reasons_by_slot.get(slot_id, set())
+        mutable = ["source_segment_ids"]
+        if relevance_code in reasons:
+            mutable.extend(_TARGETED_EVENT_FIELDS)
+        reason_text = ", ".join(sorted(reasons)) or "collateral chronology repair"
+        policies.append(
+            f"{slot_id}: reasons=[{reason_text}]; mutable_fields={mutable}"
+        )
+    return (
+        "Executable targeted-repair policy (this overrides broader redesign advice): "
+        + "; ".join(policies)
+        + ". Preserve every other field exactly. In particular, never delete, rename, "
+        "replace, or weaken required_visible_subjects. Failed Slots must move off their "
+        "previous source Segment assignment; changing prose is not a repair for missing "
+        "subjects, static footage, or insufficient duration."
+    )
 
 
 def _request_metadata(request: PlannersRequest) -> dict[str, Any]:
@@ -84,8 +491,11 @@ def _validate_slots(
     target_duration_sec: float,
     target_clip_duration_sec: float,
     video_description: dict[str, Any],
-    forbidden_segment_ids: set[str],
-    failed_segment_assignments: set[tuple[str, ...]],
+    unavailable_source_segment_ids: set[str],
+    hard_forbidden_assignments: Mapping[
+        str,
+        Iterable[Iterable[str]],
+    ],
 ) -> list[dict[str, Any]]:
     raw = parsed.get("slots")
     if not isinstance(raw, list) or not raw:
@@ -105,6 +515,7 @@ def _validate_slots(
     }
     previous_segment_end_index = -1
     for index, item in enumerate(raw, 1):
+        slot_id = f"slot_{index:02d}"
         if not isinstance(item, dict):
             raise ValueError(f"Slot {index} must be an object")
         description = str(item.get("content_description") or "").strip()
@@ -135,10 +546,31 @@ def _validate_slots(
             segment_id not in segment_order for segment_id in segment_ids
         ):
             raise ValueError(f"Slot {index} must reference valid source Segment IDs")
-        if any(segment_id in forbidden_segment_ids for segment_id in segment_ids):
+        if any(
+            segment_id in unavailable_source_segment_ids
+            for segment_id in segment_ids
+        ):
             raise ValueError(f"Slot {index} reuses a visually disproven source Segment")
-        if tuple(segment_ids) in failed_segment_assignments:
-            raise ValueError(f"Slot {index} repeats a failed source-Segment assignment")
+        segment_positions = [segment_order[segment_id] for segment_id in segment_ids]
+        if len(set(segment_positions)) != len(segment_positions):
+            raise ValueError(f"Slot {index} repeats a source Segment ID")
+        if segment_positions != sorted(segment_positions):
+            raise ValueError(
+                f"Slot {index} source_segment_ids must follow source order"
+            )
+        forbidden_for_slot = {
+            tuple(str(segment_id) for segment_id in assignment)
+            for assignment in hard_forbidden_assignments.get(slot_id, ())
+        }
+        if tuple(segment_ids) in forbidden_for_slot:
+            forbidden_display = [
+                list(assignment)
+                for assignment in sorted(forbidden_for_slot)
+            ]
+            raise ValueError(
+                f"Slot {index} ({slot_id}) attempted assignment={segment_ids!r}; "
+                f"forbidden assignments={forbidden_display!r}"
+            )
         if not any(
             segment_duration_by_id[segment_id] > duration + DURATION_TOLERANCE_SEC
             for segment_id in segment_ids
@@ -168,7 +600,7 @@ def _validate_slots(
         ]
         slots.append(
             {
-                "slot_id": f"slot_{index:02d}",
+                "slot_id": slot_id,
                 "narrative_role": str(item["narrative_role"]),
                 "content_description": description,
                 "target_emotion": str(item["target_emotion"]),
@@ -212,6 +644,7 @@ def plan_edit_slots(
     context: WorkflowContext,
     *,
     target_clip_duration_sec: float,
+    candidates_per_slot: int = 3,
 ) -> list[dict[str, Any]]:
     prime_arrangement_context(request, music_profile, context)
     return _plan_edit_slots_from_context(
@@ -220,6 +653,7 @@ def plan_edit_slots(
         config,
         context,
         target_clip_duration_sec=target_clip_duration_sec,
+        candidates_per_slot=candidates_per_slot,
     )
 
 
@@ -255,6 +689,7 @@ def _plan_edit_slots_from_context(
     context: WorkflowContext,
     *,
     target_clip_duration_sec: float,
+    candidates_per_slot: int = 3,
 ) -> list[dict[str, Any]]:
     video_description = context.get_artifact("video_description")
     if video_description is None:
@@ -263,22 +698,61 @@ def _plan_edit_slots_from_context(
     if video_summary is None:
         raise RuntimeError("Video summary must be available before Slot arrangement")
     planners_feedback = context.get_artifact("planners_feedback")
-    forbidden_segment_ids = {
+    unavailable_source_segment_ids = {
         str(value)
-        for value in (planners_feedback or {}).get("forbidden_segment_ids") or []
+        for value in (
+            (planners_feedback or {}).get("unavailable_source_segment_ids") or []
+        )
     }
-    failed_segment_assignments = {
-        tuple(str(value) for value in failed.get("source_segment_ids") or [])
-        for failed in (planners_feedback or {}).get("failed_slots") or []
-        if failed.get("source_segment_ids")
+    unavailable_source_segment_ids.update(
+        str(value)
+        for value in (
+            context.get_artifact("unavailable_source_segment_ids") or []
+        )
+    )
+    excluded_segment_ids = unavailable_source_segment_ids
+    segment_order = {
+        str(segment["segment_id"]): index
+        for index, segment in enumerate(video_description["segments"])
+    }
+    hard_forbidden_assignments: dict[str, set[tuple[str, ...]]] = {}
+    for failed in (planners_feedback or {}).get("failed_slots") or []:
+        if not is_hard_failed_slot_record(
+            failed,
+            candidates_per_slot=candidates_per_slot,
+        ):
+            continue
+        slot_id = str(failed.get("slot_id") or "")
+        assignment = tuple(
+            sorted(
+                (
+                    str(value)
+                    for value in failed.get("source_segment_ids") or []
+                    if str(value)
+                ),
+                key=lambda segment_id: segment_order.get(
+                    segment_id,
+                    len(segment_order),
+                ),
+            )
+        )
+        if not slot_id or not assignment:
+            continue
+        hard_forbidden_assignments.setdefault(slot_id, set()).add(assignment)
+    prompt_forbidden_assignments = {
+        slot_id: [
+            list(assignment)
+            for assignment in sorted(assignments)
+        ]
+        for slot_id, assignments in sorted(hard_forbidden_assignments.items())
     }
     retry_note = ""
     if planners_feedback:
         retry_note = (
             "\nThis is a redesign after an infeasible candidate path. Correct the failure using "
-            "the maintained planners_feedback. Never use a Segment in forbidden_segment_ids. "
-            "Do not repeat any exact source_segment_ids assignment listed in failed_slots; "
-            "choose different visual source evidence while preserving chronology.\n"
+            "the compact hard_forbidden_assignments table. Never use a Segment omitted "
+            "from the allowed domain. A partial candidate shortage is diagnostic only and "
+            "does not forbid its assignment. Preserve chronology.\n"
         )
     package = prompt_registry.build(
         PromptStage.PLANNERS,
@@ -289,13 +763,14 @@ def _plan_edit_slots_from_context(
             allowed_segment_ids=[
                 str(segment["segment_id"])
                 for segment in video_description["segments"]
-                if str(segment["segment_id"]) not in forbidden_segment_ids
+                if str(segment["segment_id"]) not in excluded_segment_ids
             ],
             retry_note=retry_note,
             mode="full",
             existing_slots=[],
             target_slot_constraints={},
             rejection_feedback=[],
+            hard_forbidden_assignments=prompt_forbidden_assignments,
         ),
     )
     return context.call_prompt(
@@ -306,8 +781,8 @@ def _plan_edit_slots_from_context(
             request.target_output_length_sec,
             target_clip_duration_sec,
             video_description,
-            forbidden_segment_ids,
-            failed_segment_assignments,
+            excluded_segment_ids,
+            hard_forbidden_assignments,
         ),
     )
 
@@ -316,6 +791,10 @@ def _targeted_slot_constraints(
     slots: list[dict[str, Any]],
     target_slot_ids: set[str],
     video_description: dict[str, Any],
+    *,
+    failed_slot_ids: set[str] | None = None,
+    unavailable_source_segment_ids: set[str] | None = None,
+    failed_source_segment_ids_by_slot: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     source_segments = video_description["segments"]
     segment_ids = [str(segment["segment_id"]) for segment in source_segments]
@@ -336,6 +815,18 @@ def _targeted_slot_constraints(
         )
 
     constraints: dict[str, dict[str, Any]] = {}
+    failed_slot_ids = failed_slot_ids or set()
+    unavailable_source_segment_ids = unavailable_source_segment_ids or set()
+    failed_source_segments = {
+        str(slot_id): {
+            str(segment_id)
+            for segment_id in segment_ids
+            if str(segment_id)
+        }
+        for slot_id, segment_ids in (
+            failed_source_segment_ids_by_slot or {}
+        ).items()
+    }
     for index, slot in enumerate(slots):
         slot_id = str(slot["slot_id"])
         if slot_id not in target_slot_ids:
@@ -366,10 +857,22 @@ def _targeted_slot_constraints(
             raise ValueError(
                 f"No chronological Segment interval remains for {slot_id}"
             )
+        forbidden_for_slot = set(failed_source_segments.get(slot_id, set()))
+        if slot_id in failed_slot_ids:
+            forbidden_for_slot.update(
+                str(value)
+                for value in slot.get("source_segment_ids") or []
+                if str(value)
+            )
         constraints[slot_id] = {
             "desired_duration_sec": float(slot["desired_duration_sec"]),
             "planned_duration_sec": float(slot["planned_duration_sec"]),
-            "allowed_segment_ids": segment_ids[lower : upper + 1],
+            "allowed_segment_ids": [
+                segment_id
+                for segment_id in segment_ids[lower : upper + 1]
+                if segment_id not in unavailable_source_segment_ids
+                if segment_id not in forbidden_for_slot
+            ],
             "previous_fixed_slot": (
                 {
                     "slot_id": previous_slot["slot_id"],
@@ -389,86 +892,8 @@ def _targeted_slot_constraints(
                 else None
             ),
             "previous_source_segment_ids": list(slot["source_segment_ids"]),
-            "forbidden_segment_assignments": [],
         }
     return constraints
-
-
-def _expand_degenerate_target_slot_ids(
-    slots: list[dict[str, Any]],
-    target_slot_ids: set[str],
-    video_description: dict[str, Any],
-) -> set[str]:
-    constraints = _targeted_slot_constraints(
-        slots,
-        target_slot_ids,
-        video_description,
-    )
-    degenerate_slot_ids = {
-        slot_id
-        for slot_id, constraint in constraints.items()
-        if len(constraint["allowed_segment_ids"]) == 1
-    }
-    if not degenerate_slot_ids:
-        return set(target_slot_ids)
-
-    segment_order = {
-        str(segment["segment_id"]): index
-        for index, segment in enumerate(video_description["segments"])
-    }
-
-    def source_bounds(slot: dict[str, Any]) -> tuple[int, int]:
-        positions = [
-            segment_order[str(segment_id)]
-            for segment_id in slot["source_segment_ids"]
-        ]
-        return min(positions), max(positions)
-
-    expanded_slot_ids = set(target_slot_ids)
-    blocked_slot_ids: list[str] = []
-    for index, slot in enumerate(slots):
-        slot_id = str(slot["slot_id"])
-        if slot_id not in degenerate_slot_ids:
-            continue
-        current_start, current_end = source_bounds(slot)
-        neighbors: list[tuple[dict[str, Any], bool]] = []
-        if index > 0:
-            previous_slot = slots[index - 1]
-            _, previous_end = source_bounds(previous_slot)
-            neighbors.append((previous_slot, previous_end + 1 == current_start))
-        if index + 1 < len(slots):
-            next_slot = slots[index + 1]
-            next_start, _ = source_bounds(next_slot)
-            neighbors.append((next_slot, current_end + 1 == next_start))
-        movable_neighbors = [
-            neighbor
-            for neighbor, is_source_contiguous in neighbors
-            if is_source_contiguous
-            and neighbor.get("fixed_candidate") is None
-            and neighbor.get("dialogue_anchor") is None
-        ]
-        anchor_neighbors = [
-            neighbor
-            for neighbor, is_source_contiguous in neighbors
-            if is_source_contiguous
-            and neighbor.get("dialogue_anchor") is not None
-        ]
-        selected_neighbors = movable_neighbors or anchor_neighbors
-        if not selected_neighbors:
-            blocked_slot_ids.append(slot_id)
-            continue
-        expanded_slot_ids.update(
-            str(neighbor["slot_id"]) for neighbor in selected_neighbors
-        )
-
-    if blocked_slot_ids:
-        raise ValueError(
-            "Targeted Slot redesign has a one-Segment interval for "
-            f"{', '.join(sorted(blocked_slot_ids))}, but no source-contiguous "
-            "neighbor can participate in the repair; "
-            "full Slot arrangement is required"
-        )
-    return expanded_slot_ids
 
 
 def _validate_targeted_slots(
@@ -476,11 +901,16 @@ def _validate_targeted_slots(
     slots: list[dict[str, Any]],
     constraints: dict[str, dict[str, Any]],
     video_description: dict[str, Any],
+    *,
+    failures: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     raw_slots = parsed.get("slots")
     if not isinstance(raw_slots, list):
         raise ValueError("Targeted Slot redesign must contain a slots array")
     expected_ids = set(constraints)
+    original_by_id = {str(slot["slot_id"]): slot for slot in slots}
+    reasons_by_slot = _targeted_failure_reasons_by_slot(failures)
+    relevance_code = PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT.value
     replacements: dict[str, dict[str, Any]] = {}
     for item in raw_slots:
         if not isinstance(item, dict):
@@ -511,10 +941,6 @@ def _validate_targeted_slots(
             raise ValueError(
                 f"Targeted redesign placed {slot_id} outside its chronological interval"
             )
-        if segment_ids in constraint["forbidden_segment_assignments"]:
-            raise ValueError(
-                f"Targeted redesign repeated a forbidden Segment assignment for {slot_id}"
-            )
         required_subjects = [
             str(value).strip()
             for value in item.get("required_visible_subjects") or []
@@ -539,6 +965,45 @@ def _validate_targeted_slots(
         }
         if not replacement["content_description"]:
             raise ValueError(f"Targeted redesign left {slot_id} without visible content")
+        if failures is not None:
+            original = original_by_id[slot_id]
+            preserved_fields = list(_TARGETED_ALWAYS_PRESERVED_FIELDS)
+            if relevance_code not in reasons_by_slot.get(slot_id, set()):
+                preserved_fields.extend(_TARGETED_EVENT_FIELDS)
+            for field_name in preserved_fields:
+                replacement_value: Any = replacement[field_name]
+                original_value: Any = original[field_name]
+                if field_name == "required_visible_subjects":
+                    original_value = [
+                        str(value).strip()
+                        for value in original_value or []
+                        if str(value).strip()
+                    ]
+                if field_name in {
+                    "target_emotional_intensity",
+                    "target_kinetic_energy",
+                }:
+                    unchanged = (
+                        abs(float(replacement_value) - float(original_value))
+                        <= DURATION_TOLERANCE_SEC
+                    )
+                else:
+                    unchanged = replacement_value == original_value
+                if not unchanged:
+                    raise ValueError(
+                        f"Targeted redesign changed protected {field_name} for "
+                        f"{slot_id}; repair the reported source evidence instead"
+                    )
+            if reasons_by_slot.get(slot_id):
+                previous_segment_ids = {
+                    str(value)
+                    for value in constraint["previous_source_segment_ids"]
+                }
+                if previous_segment_ids.intersection(segment_ids):
+                    raise ValueError(
+                        f"Targeted redesign must move {slot_id} to a different source "
+                        "Segment after its previous evidence failed"
+                    )
         replacements[slot_id] = replacement
     if set(replacements) != expected_ids:
         raise ValueError(
@@ -607,22 +1072,71 @@ def redesign_edit_slots(
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError("Video description must be available for targeted Slot redesign")
-    expanded_slot_ids = _expand_degenerate_target_slot_ids(
+    planners_feedback = context.get_artifact("planners_feedback")
+    unavailable_source_segment_ids = {
+        str(value)
+        for value in (
+            (planners_feedback or {}).get("unavailable_source_segment_ids") or []
+        )
+    }
+    unavailable_source_segment_ids.update(
+        str(value)
+        for value in (
+            context.get_artifact("unavailable_source_segment_ids") or []
+        )
+    )
+    failed_source_segment_ids_by_slot: dict[str, set[str]] = {
+        str(slot["slot_id"]): {
+            str(segment_id)
+            for segment_id in slot.get("source_segment_ids") or []
+        }
+        for slot in slots
+        if str(slot["slot_id"]) in target_slot_ids
+    }
+    for slot_id, segment_ids in _failed_source_segment_ids_by_slot(
+        failures
+    ).items():
+        failed_source_segment_ids_by_slot.setdefault(slot_id, set()).update(
+            segment_ids
+        )
+    repair_domain = assess_repair_domain(
         slots,
         target_slot_ids,
-        video_description,
+        blocker_slot_ids_by_slot=_repair_blocker_slot_ids_by_slot(failures),
+        video_description=video_description,
+        unavailable_source_segment_ids=unavailable_source_segment_ids,
+        failed_source_segment_ids_by_slot=failed_source_segment_ids_by_slot,
     )
+    if repair_domain.unrepairable:
+        raise TargetedRepairUnrepairableError(
+            {
+                "reason": repair_domain.reason,
+                "failed_slot_ids": sorted(repair_domain.original_slot_ids),
+                "repair_slot_ids": sorted(repair_domain.repair_slot_ids),
+                "blocker_slot_ids": sorted(repair_domain.blocker_slot_ids),
+                "unrepairable_slot_ids": sorted(
+                    repair_domain.unrepairable_slot_ids
+                ),
+                "unavailable_source_segment_ids": sorted(
+                    unavailable_source_segment_ids
+                ),
+            }
+        )
+    expanded_slot_ids = set(repair_domain.repair_slot_ids)
     constraints = _targeted_slot_constraints(
         slots,
         expanded_slot_ids,
         video_description,
+        failed_slot_ids=target_slot_ids,
+        unavailable_source_segment_ids=unavailable_source_segment_ids,
+        failed_source_segment_ids_by_slot=failed_source_segment_ids_by_slot,
     )
     if expanded_slot_ids != target_slot_ids:
         log_event(
             "WARNING",
             "aster.arrangement",
             "fallback.apply",
-            "Expanded a one-Segment retry interval to source-contiguous Slots",
+            "Expanded a backend-validated repair domain to adjacent Slots",
             failed_slot_ids=sorted(target_slot_ids),
             replanned_slot_ids=sorted(expanded_slot_ids),
             allowed_segment_ids=sorted(
@@ -645,11 +1159,12 @@ def redesign_edit_slots(
                 / len(slots)
             ),
             allowed_segment_ids=[],
-            retry_note="",
+            retry_note=_targeted_retry_note(expanded_slot_ids, failures),
             mode="targeted",
             existing_slots=slots,
             target_slot_constraints=constraints,
             rejection_feedback=failures,
+            hard_forbidden_assignments={},
         ),
     )
     redesigned = context.call_prompt(
@@ -660,6 +1175,7 @@ def redesign_edit_slots(
             slots,
             constraints,
             video_description,
+            failures=failures,
         ),
     )
     context.set_artifact("edit_plan", redesigned)
@@ -847,6 +1363,9 @@ class ArrangementArchitectAgent:
             target_clip_duration_sec=(
                 self.config.planners.arrangement_architect.target_clip_duration_sec
             ),
+            candidates_per_slot=(
+                self.config.planners.candidate_retrieval.candidates_per_slot
+            ),
         )
         return align_slots_to_music(
             slots,
@@ -869,4 +1388,8 @@ class ArrangementArchitectAgent:
         )
 
 
-__all__ = ["ArrangementArchitectAgent"]
+__all__ = [
+    "ArrangementArchitectAgent",
+    "RepairDomainAssessment",
+    "assess_repair_domain",
+]

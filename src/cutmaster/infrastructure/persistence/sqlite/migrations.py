@@ -310,6 +310,18 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=6,
+        statements=(
+            """
+            CREATE TABLE activity_dismissals (
+                attempt_id TEXT PRIMARY KEY
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                dismissed_at TEXT NOT NULL
+            ) STRICT
+            """,
+        ),
+    ),
 )
 
 
