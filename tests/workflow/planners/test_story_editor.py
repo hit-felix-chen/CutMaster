@@ -1,8 +1,10 @@
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from cutmaster.configuration.schema import DialogueAnchorConfig, LLMConfig
+from cutmaster.infrastructure.models.openai_compatible import ModelResponse
 from cutmaster.workflow.planners.story_editor import (
     StoryEditorAgent,
     _apply_planning_partitions,
@@ -526,7 +528,7 @@ def test_anchor_sequence_reports_both_overlapping_audio_ranges() -> None:
     assert "[8.000, 12.000)" in message
 
 
-def test_selection_keeps_preserved_anchor_and_records_filtered_overlap() -> None:
+def test_selection_rejects_new_anchor_overlapping_preserved_anchor() -> None:
     video_description = _partition_video_description(end_sec=40.0)
     video_description["segments"][0]["shots"][0]["time_range"]["end_sec"] = 40.0
     video_description["segments"][0]["shots"][0]["dialogue"] = [
@@ -560,39 +562,16 @@ def test_selection_keeps_preserved_anchor_and_records_filtered_overlap() -> None
         first_dialogue_id="21",
         last_dialogue_id="21",
     )
-    rejections: list[dict] = []
-
-    selected = _validate_selection(
-        {"anchors": [first, second]},
-        slots,
-        video_description,
-        dialogues,
-        _constraints(slots, video_description, dialogues),
-        _config(),
-        required_anchor_slot_ids={"slot_01"},
-        overlap_rejections=rejections,
-    )
-
-    assert [anchor["slot_id"] for anchor in selected] == ["slot_01"]
-    assert rejections == [
-        {
-            "reason_code": "anchor_audio_overlap_filtered",
-            "slot_id": "slot_02",
-            "output_audio_start_sec": 4.0,
-            "output_audio_end_sec": 10.0,
-            "conflicts_with_kept_anchors": [
-                {
-                    "slot_id": "slot_01",
-                    "output_audio_start_sec": 0.0,
-                    "output_audio_end_sec": 6.0,
-                }
-            ],
-            "diagnosis": (
-                "Proposed Anchor slot_02 was excluded from the final Anchor subset "
-                "because its output audio overlaps a kept Anchor."
-            ),
-        }
-    ]
+    with pytest.raises(ValueError, match="L-cut audio ranges overlap"):
+        _validate_selection(
+            {"anchors": [first, second]},
+            slots,
+            video_description,
+            dialogues,
+            _constraints(slots, video_description, dialogues),
+            _config(),
+            required_anchor_slot_ids={"slot_01"},
+        )
 
 
 def test_preserved_anchor_filters_conflicting_prompt_passages_and_maps() -> None:
@@ -656,7 +635,10 @@ def test_preserved_anchor_filters_conflicting_prompt_passages_and_maps() -> None
     ]
 
 
-def test_story_selection_accepts_best_legal_subset_without_model_retry() -> None:
+def test_story_selection_retries_whole_response_when_anchors_conflict(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     video_description = _partition_video_description(end_sec=40.0)
     video_description["segments"][0]["shots"][0]["time_range"]["end_sec"] = 40.0
     video_description["segments"][0]["shots"][0]["dialogue"] = [
@@ -690,40 +672,130 @@ def test_story_selection_accepts_best_legal_subset_without_model_retry() -> None
         last_dialogue_id="21",
     )
 
-    class StubContext:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.artifacts = {
-                "video_description": video_description,
-                "video_summary": {"story": "Mia chooses the stronger line."},
-            }
+    responses = iter(
+        [
+            {"anchors": [first, second]},
+            {"anchors": [second]},
+        ]
+    )
+    prompts: list[str] = []
 
-        def get_artifact(self, key, default=None):
-            return self.artifacts.get(key, default)
+    def generate(prompt, *_args, **_kwargs):
+        prompts.append(prompt)
+        return ModelResponse(
+            content=json.dumps(next(responses)),
+            usage=None,
+        )
 
-        def set_artifact(self, key, value) -> None:
-            self.artifacts[key] = value
-
-        def call_prompt(self, *, validate_business, **_kwargs):
-            self.calls += 1
-            return validate_business({"anchors": [first, second]})
-
-    context = StubContext()
+    monkeypatch.setattr(
+        "cutmaster.workflow.shared.execution_context.generate_text",
+        generate,
+    )
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("video_description", video_description)
+    context.set_artifact(
+        "video_summary",
+        {"story": "Mia chooses the stronger line."},
+    )
     result = select_dialogue_anchors(
         slots,
-        LLMConfig(model="test", base_url="", api_key="test"),
+        LLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_retries=1,
+        ),
         _config(),
-        context,  # type: ignore[arg-type]
+        context,
     )
 
-    assert context.calls == 1
+    assert len(prompts) == 2
+    assert "L-cut audio ranges overlap" in prompts[1]
     assert [
         slot["slot_id"] for slot in result if slot.get("dialogue_anchor") is not None
     ] == ["slot_02"]
-    assert context.artifacts["anchor_overlap_rejections"][0]["slot_id"] == "slot_01"
-    assert context.artifacts["anchor_overlap_rejections"][0][
-        "conflicts_with_kept_anchors"
-    ][0]["slot_id"] == "slot_02"
+
+
+def test_story_selection_retries_whole_response_when_one_anchor_is_malformed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_description = _partition_video_description(end_sec=40.0)
+    video_description["segments"][0]["shots"][0]["time_range"]["end_sec"] = 40.0
+    video_description["segments"][0]["shots"][0]["dialogue"] = [
+        {
+            "dialogue_id": 20,
+            "time_range": {"start_sec": 11.0, "end_sec": 17.0},
+            "speaker": "Mia",
+            "text": "The first meaningful passage lasts six seconds.",
+        },
+        {
+            "dialogue_id": 21,
+            "time_range": {"start_sec": 21.0, "end_sec": 27.0},
+            "speaker": "Sebastian",
+            "text": "The second meaningful passage also lasts six seconds.",
+        },
+    ]
+    slots = [_partition_slot(index, duration_ms=4000) for index in range(1, 4)]
+    malformed = _anchor(
+        slot_id="slot_01",
+        first_dialogue_id="20",
+        last_dialogue_id="20",
+    )
+    malformed.pop("standalone_meaning")
+    valid = _anchor(
+        slot_id="slot_02",
+        first_dialogue_id="21",
+        last_dialogue_id="21",
+    )
+    responses = iter(
+        [
+            {"anchors": [malformed, valid]},
+            {"anchors": [valid]},
+        ]
+    )
+    requests = 0
+
+    def generate(_prompt, *_args, **_kwargs):
+        nonlocal requests
+        requests += 1
+        return ModelResponse(
+            content=json.dumps(next(responses)),
+            usage=None,
+        )
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.shared.execution_context.generate_text",
+        generate,
+    )
+    monkeypatch.setattr(
+        "cutmaster.infrastructure.models.openai_compatible.time.sleep",
+        lambda _delay: None,
+    )
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("video_description", video_description)
+    context.set_artifact("video_summary", {"story": "Mia chooses the stronger line."})
+
+    result = select_dialogue_anchors(
+        slots,
+        LLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_retries=1,
+        ),
+        _config(),
+        context,
+    )
+
+    assert requests == 2
+    assert [
+        slot["slot_id"] for slot in result if slot.get("dialogue_anchor") is not None
+    ] == ["slot_02"]
 
 
 def _partition_video_description(*, end_sec: float = 30.0) -> dict:
@@ -822,7 +894,7 @@ def _with_picture_anchor(slot: dict, start_sec: float) -> dict:
     return item
 
 
-def test_equal_value_anchor_subset_prefers_the_more_even_segment_split() -> None:
+def test_selection_rejects_conflicting_anchors_instead_of_balancing_a_subset() -> None:
     video_description = _partition_video_description()
     video_description["segments"][0]["shots"][0]["dialogue"] = [
         {
@@ -842,36 +914,28 @@ def test_equal_value_anchor_subset_prefers_the_more_even_segment_split() -> None
     dialogues = _dialogues_by_segment(video_description)
     constraints = _constraints(slots, video_description, dialogues)
 
-    selected = _validate_selection(
-        {
-            "anchors": [
-                _anchor(
-                    slot_id="slot_02",
-                    first_dialogue_id="20",
-                    last_dialogue_id="20",
-                ),
-                _anchor(
-                    slot_id="slot_03",
-                    first_dialogue_id="21",
-                    last_dialogue_id="21",
-                ),
-            ]
-        },
-        slots,
-        video_description,
-        dialogues,
-        constraints,
-        _config(),
-    )
-
-    assert [anchor["slot_id"] for anchor in selected] == ["slot_03"]
-    assert constraints["slot_03"]["preferred_anchor_picture_range"] == {
-        "source_segment_id": "segment_0001",
-        "start_sec": 18.0,
-        "end_sec": 22.0,
-        "left_slot_count": 2,
-        "right_slot_count": 2,
-    }
+    with pytest.raises(ValueError, match="L-cut audio ranges overlap"):
+        _validate_selection(
+            {
+                "anchors": [
+                    _anchor(
+                        slot_id="slot_02",
+                        first_dialogue_id="20",
+                        last_dialogue_id="20",
+                    ),
+                    _anchor(
+                        slot_id="slot_03",
+                        first_dialogue_id="21",
+                        last_dialogue_id="21",
+                    ),
+                ]
+            },
+            slots,
+            video_description,
+            dialogues,
+            constraints,
+            _config(),
+        )
 
 
 def test_single_anchor_splits_one_group_into_before_and_after_regions() -> None:
@@ -1001,7 +1065,7 @@ def test_anchor_partition_capacity_failure_reports_group_and_milliseconds() -> N
         )
 
 
-def test_selection_keeps_more_balanced_anchor_when_pair_starves_middle_group() -> None:
+def test_selection_rejects_anchor_pair_that_starves_middle_group() -> None:
     video_description = _partition_video_description()
     video_description["segments"][0]["shots"][0]["dialogue"] = [
         {
@@ -1037,23 +1101,17 @@ def test_selection_keeps_more_balanced_anchor_when_pair_starves_middle_group() -
         },
     ]
 
-    rejections: list[dict] = []
-    selected = _validate_selection(
-        {"anchors": anchors},
-        slots,
-        video_description,
-        dialogues,
-        constraints,
-        _config(),
-        overlap_rejections=rejections,
-    )
+    with pytest.raises(ValueError, match="infeasible child group") as raised:
+        _validate_selection(
+            {"anchors": anchors},
+            slots,
+            video_description,
+            dialogues,
+            constraints,
+            _config(),
+        )
 
-    assert [anchor["slot_id"] for anchor in selected] == ["slot_04"]
-    assert rejections[0]["reason_code"] == "anchor_combination_invalid_filtered"
-    assert rejections[0]["slot_id"] == "slot_02"
-    assert "failed_group_id=group_001_02" in rejections[0][
-        "combination_failure"
-    ]
+    assert "failed_group_id=group_001_02" in str(raised.value)
 
 
 def test_business_validation_rejects_two_anchors_for_one_slot() -> None:

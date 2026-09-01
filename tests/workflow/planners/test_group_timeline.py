@@ -197,13 +197,9 @@ def _two_group_slots() -> list[dict[str, Any]]:
 
 
 def _raw_item(slot_id: str, start_ms: int) -> dict[str, Any]:
-    end_ms = start_ms + 2000
     return {
         "slot_id": slot_id,
-        "timestamp": (
-            f"00:00:{start_ms // 1000:02d},000-"
-            f"00:00:{end_ms // 1000:02d},000"
-        ),
+        "source_start_ms": start_ms,
         "description": f"Visible content for {slot_id}",
         "semantic_relevance": 0.8,
         "emotional_intensity": 0.5,
@@ -378,6 +374,7 @@ def test_source_segments_cannot_reverse_across_an_anchor() -> None:
 
 def test_trajectory_response_is_complete_and_app_identified() -> None:
     slots = _slots()
+    slots[1]["planned_duration_ms"] = 3000
     parsed = {
         "trajectories": [
             {
@@ -412,28 +409,25 @@ def test_trajectory_response_is_complete_and_app_identified() -> None:
         for item in trajectory["items"]
     )
     assert all(item["source_segment_id"] == "segment_0001" for item in trajectory["items"])
+    assert [item["timestamp"] for item in trajectory["items"]] == [
+        "00:00:01,000-00:00:03,000",
+        "00:00:03,000-00:00:06,000",
+    ]
 
 
-@pytest.mark.parametrize(
-    "items, message",
-    [
-        (
-            [_raw_item("slot_02", 1000), _raw_item("slot_01", 3000)],
-            "exact group order",
-        ),
-        (
-            [_raw_item("slot_01", 2000), _raw_item("slot_02", 3000)],
-            "overlaps or reverses",
-        ),
-    ],
-)
-def test_trajectory_response_rejects_broken_group_path(
-    items: list[dict[str, Any]],
-    message: str,
-) -> None:
-    with pytest.raises(ValueError, match=message):
+def test_trajectory_response_rejects_broken_group_path() -> None:
+    with pytest.raises(ValueError, match="exact group order"):
         _validate_trajectory_response(
-            {"trajectories": [{"items": items}]},
+            {
+                "trajectories": [
+                    {
+                        "items": [
+                            _raw_item("slot_02", 1000),
+                            _raw_item("slot_01", 3000),
+                        ]
+                    }
+                ]
+            },
             group=_planning_groups()[0],
             slots=_slots(),
             planning_segment=_planning_segments()[0],
@@ -443,6 +437,34 @@ def test_trajectory_response_rejects_broken_group_path(
             excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
             known_signatures=set(),
         )
+
+
+def test_trajectory_response_deterministically_repairs_invalid_starts() -> None:
+    result = _validate_trajectory_response(
+        {
+            "trajectories": [
+                {
+                    "items": [
+                        _raw_item("slot_01", 19000),
+                        _raw_item("slot_02", 19000),
+                    ]
+                }
+            ]
+        },
+        group=_planning_groups()[0],
+        slots=_slots(),
+        planning_segment=_planning_segments()[0],
+        source_segment=_video_description()["segments"][0],
+        round_index=1,
+        requested_count=1,
+        excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
+        known_signatures=set(),
+    )
+
+    assert [item["timestamp"] for item in result[0]["items"]] == [
+        "00:00:16,000-00:00:18,000",
+        "00:00:18,000-00:00:20,000",
+    ]
 
 
 def test_trajectory_response_rejects_nonfinite_scores() -> None:
@@ -515,6 +537,11 @@ def test_underfilled_nonempty_group_continues(
         "correction",
         "supplement",
     ]
+    confirmed_context = context.packages[1].user_prompt.split(
+        "<confirmed_trajectories>", 1
+    )[1].split("</confirmed_trajectories>", 1)[0]
+    assert '"source_start_ms": 0' in confirmed_context
+    assert '"timestamp"' not in confirmed_context
 
 
 def test_early_stop_counts_only_globally_viable_trajectories(

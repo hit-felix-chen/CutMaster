@@ -64,7 +64,9 @@ def _trajectory(index: int, *, suffix: str) -> dict:
     }
 
 
-def test_partial_replan_reuses_only_exact_healthy_candidate_groups(tmp_path) -> None:
+def test_partial_replan_reuses_exact_candidates_even_for_affected_parent(
+    tmp_path,
+) -> None:
     slots = [_slot(1), _slot(2)]
     planning_groups = [_planning_group(1), _planning_group(2)]
     planning_segments = [_planning_segment(1), _planning_segment(2)]
@@ -72,32 +74,13 @@ def test_partial_replan_reuses_only_exact_healthy_candidate_groups(tmp_path) -> 
         "group_001": [_trajectory(1, suffix="old")],
         "group_002": [_trajectory(2, suffix="old")],
     }
-    new_second = _trajectory(2, suffix="new")
     context = WorkflowContext(tmp_path / "history.json")
     context.set_artifact("planning_groups", planning_groups)
     context.set_artifact("planning_segments", planning_segments)
 
     class Scout:
-        def scout(
-            self,
-            received_slots,
-            _cancellation_token=None,
-            *,
-            target_group_ids=None,
-            seed_candidate_pool=None,
-        ):
-            assert received_slots == slots
-            assert target_group_ids == {"group_002"}
-            assert seed_candidate_pool == {"group_001": old_pool["group_001"]}
-            assert context.get_artifact("planning_groups") == planning_groups
-            assert context.get_artifact("planning_segments") == planning_segments
-            complete_pool = {
-                "group_001": old_pool["group_001"],
-                "group_002": [new_second],
-            }
-            context.set_artifact("candidate_pool", complete_pool)
-            context.set_artifact("retrieval_summary", {"rounds_completed": 1})
-            return complete_pool
+        def scout(self, *_args, **_kwargs):
+            pytest.fail("an unchanged complete contract must be reused")
 
     team = ASTERTeam.__new__(ASTERTeam)
     team.context = context
@@ -120,10 +103,7 @@ def test_partial_replan_reuses_only_exact_healthy_candidate_groups(tmp_path) -> 
         affected_parent_group_ids={"group_002"},
     )
 
-    assert result == {
-        "group_001": old_pool["group_001"],
-        "group_002": [new_second],
-    }
+    assert result == old_pool
     assert context.get_artifact("planning_groups") == planning_groups
     assert context.get_artifact("planning_segments") == planning_segments
     assert context.get_artifact("candidate_pool") == result
@@ -182,6 +162,8 @@ def test_partial_retrieval_failure_does_not_restore_changed_group_candidates(
     tmp_path,
 ) -> None:
     slots = [_slot(1), _slot(2)]
+    old_slots = [_slot(1), _slot(2)]
+    old_slots[1]["content_description"] = "old event 2"
     planning_groups = [_planning_group(1), _planning_group(2)]
     planning_segments = [_planning_segment(1), _planning_segment(2)]
     old_pool = {
@@ -227,7 +209,7 @@ def test_partial_retrieval_failure_does_not_restore_changed_group_candidates(
         team.scout_with_reuse(
             slots,
             previous_candidate_pool=old_pool,
-            previous_slots=slots,
+            previous_slots=old_slots,
             previous_planning_groups=planning_groups,
             previous_planning_segments=planning_segments,
             affected_parent_group_ids={"group_002"},

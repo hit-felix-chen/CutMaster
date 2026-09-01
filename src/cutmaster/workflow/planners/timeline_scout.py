@@ -60,6 +60,58 @@ def _ranges_overlap(
     return first[0] < second[1] and second[0] < first[1]
 
 
+def _normalize_candidate_ranges(
+    proposed_starts: list[int],
+    durations: list[int],
+    *,
+    planning_start_ms: int,
+    planning_end_ms: int,
+) -> list[tuple[int, int]]:
+    if len(proposed_starts) != len(durations):
+        raise ValueError("Candidate starts and Slot durations do not align")
+    if sum(durations) > planning_end_ms - planning_start_ms:
+        raise ValueError("Slot Group does not fit inside its Planning Segment")
+
+    ranges: list[list[int]] = []
+    previous_end_ms = planning_start_ms
+    for proposed_start_ms, duration_ms in zip(
+        proposed_starts,
+        durations,
+        strict=True,
+    ):
+        latest_start_ms = planning_end_ms - duration_ms
+        start_ms = min(
+            max(proposed_start_ms, planning_start_ms),
+            latest_start_ms,
+        )
+        start_ms = max(start_ms, previous_end_ms)
+        end_ms = start_ms + duration_ms
+        ranges.append([start_ms, end_ms])
+        previous_end_ms = end_ms
+
+    if ranges and ranges[-1][1] > planning_end_ms:
+        next_start_ms = planning_end_ms
+        for index in range(len(ranges) - 1, -1, -1):
+            duration_ms = durations[index]
+            start_ms = min(ranges[index][0], next_start_ms - duration_ms)
+            ranges[index] = [start_ms, start_ms + duration_ms]
+            next_start_ms = start_ms
+
+    normalized = [(start_ms, end_ms) for start_ms, end_ms in ranges]
+    previous_end_ms = planning_start_ms
+    for start_ms, end_ms in normalized:
+        if (
+            start_ms < planning_start_ms
+            or end_ms > planning_end_ms
+            or start_ms < previous_end_ms
+        ):
+            raise ValueError(
+                "Could not place Slot Group inside its Planning Segment"
+            )
+        previous_end_ms = end_ms
+    return normalized
+
+
 def _trajectory_signature(items: list[dict[str, Any]]) -> str:
     return json.dumps(
         [
@@ -452,11 +504,18 @@ def _validate_trajectory_response(
             f"{group_id}_round_{round_index:02d}_"
             f"trajectory_{trajectory_index:02d}"
         )
-        items: list[dict[str, Any]] = []
-        previous_end_ms: int | None = None
+        proposed_starts: list[int] = []
+        planned_durations: list[int] = []
         for slot, raw in zip(slots, raw_items, strict=True):
             slot_id = str(slot["slot_id"])
-            start_ms, end_ms = _range_ms(str(raw.get("timestamp") or ""))
+            source_start_ms = raw.get("source_start_ms")
+            if isinstance(source_start_ms, bool) or not isinstance(
+                source_start_ms,
+                int,
+            ):
+                raise ValueError(
+                    f"Candidate for {slot_id} has invalid source_start_ms"
+                )
             planned_duration_ms = slot.get("planned_duration_ms")
             if (
                 isinstance(planned_duration_ms, bool)
@@ -464,24 +523,26 @@ def _validate_trajectory_response(
                 or planned_duration_ms <= 0
             ):
                 raise ValueError(f"Slot {slot_id} has invalid planned_duration_ms")
-            if end_ms - start_ms != planned_duration_ms:
-                raise ValueError(
-                    f"Candidate for {slot_id} must last exactly "
-                    f"{planned_duration_ms} ms"
-                )
-            if start_ms < planning_start_ms or end_ms > planning_end_ms:
-                raise ValueError(
-                    f"Candidate for {slot_id} exceeds Planning Segment "
-                    f"{planning_segment_id}"
-                )
-            if previous_end_ms is not None and start_ms < previous_end_ms:
-                raise ValueError(
-                    f"Trajectory for {group_id} overlaps or reverses source time"
-                )
+            proposed_starts.append(source_start_ms)
+            planned_durations.append(planned_duration_ms)
+        normalized_ranges = _normalize_candidate_ranges(
+            proposed_starts,
+            planned_durations,
+            planning_start_ms=planning_start_ms,
+            planning_end_ms=planning_end_ms,
+        )
+
+        items: list[dict[str, Any]] = []
+        for slot, raw, candidate_range in zip(
+            slots,
+            raw_items,
+            normalized_ranges,
+            strict=True,
+        ):
+            slot_id = str(slot["slot_id"])
+            start_ms, end_ms = candidate_range
             if (start_ms, end_ms) in excluded.get(slot_id, set()):
                 raise ValueError(f"Candidate range for {slot_id} was already used")
-            previous_end_ms = end_ms
-            candidate_range = (start_ms, end_ms)
             source_shot_ids = [
                 str(shot["shot_id"])
                 for shot in source_segment["shots"]
@@ -1126,7 +1187,9 @@ def retrieve_candidates(
                         {
                             "slot_id": item["slot_id"],
                             "candidate_id": item["candidate_id"],
-                            "timestamp": item["timestamp"],
+                            "source_start_ms": _range_ms(
+                                str(item["timestamp"])
+                            )[0],
                             "visible_description": item["description"],
                             "visual_evidence": item["visual_evidence"],
                         }

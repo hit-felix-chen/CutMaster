@@ -341,13 +341,11 @@ class ASTERTeam:
         retrieve_group_ids: set[str] = set()
         for group in current_groups:
             group_id = str(group["group_id"])
-            parent_group_id = str(group["parent_group_id"])
             current_contract = current_contracts.get(group_id)
             old_contract = previous_contracts.get(group_id)
             trajectories = previous_candidate_pool.get(group_id)
             if (
-                parent_group_id not in affected_parent_group_ids
-                and current_contract is not None
+                current_contract is not None
                 and old_contract == current_contract
                 and _candidate_trajectories_match(
                     group_id,
@@ -431,6 +429,7 @@ class ASTERTeam:
             "aster.timeline",
             "fallback.apply",
             "Reused unchanged candidate trajectories after group repair",
+            affected_parent_group_ids=sorted(affected_parent_group_ids),
             reused_group_ids=sorted(reusable),
             retrieved_group_ids=sorted(retrieve_group_ids),
         )

@@ -528,14 +528,17 @@ _Avoid_: Candidate count, parent Segment duration, search allowance
 The redesign of a failed **Slot Group** when a completed Timeline Scout round
 leaves it without one valid Group Candidate Trajectory. The group may remain on
 its source Segment when corrected content and visible-subject requirements can
-produce a valid trajectory; a failed retrieval does not ban the Segment. When
-several failed groups are repaired together, Arrangement uses their smallest
-contiguous window of complete groups and never repairs a partial group. Timeline
-Scout never widens an individual Slot into another Segment. Redesign reruns
-Story Editor and Timeline Scout only for changed complete groups. Unaffected
-groups may retain Anchors and Group Candidate Trajectories only when their full
-Slot Group and Planning Segment contracts are unchanged and still validate;
-the merged result is validated globally before composition.
+produce a valid trajectory; a failed retrieval does not ban the Segment. Each
+failed group is repaired independently and never as a partial group. When the
+failed group alone has no feasible alternative Segment, Arrangement adds the
+complete groups immediately to its left and right, then expands both sides one
+level at a time until the failed group can move in one strictly increasing
+Segment assignment. Repair windows stay separate unless their expansions meet,
+at which point they are validated together. Timeline Scout never widens an
+individual Slot into another Segment. Redesign reruns Story Editor and Timeline
+Scout only for changed complete contracts. An exact unchanged contract may
+retain its Anchors and Group Candidate Trajectories even when it was included as
+repair context; the merged result is validated globally before composition.
 _Avoid_: single-Slot patch, adjacent-Segment retrieval, Guided Revision
 
 **Music Memory**:
@@ -561,7 +564,10 @@ Group bound to the corresponding Planning Segment. Empty runs create no group.
 When an Anchor shares its source Segment with other Slots, equally strong Anchor
 choices prefer the picture placement that divides the Segment's free picture
 regions most evenly. Multiple Anchors in one Segment are judged as one combined
-partition. Planning Segment Capacity remains a hard prerequisite.
+partition. The complete returned Anchor set must satisfy source order, dialogue
+reuse, audio non-overlap, and partition capacity together; CutMaster never drops
+one conflicting proposal and silently accepts the remainder. Planning Segment
+Capacity remains a hard prerequisite.
 _Avoid_: Subtitle, voice-over
 
 **Candidate Space**:
@@ -575,7 +581,10 @@ _Avoid_: Search results, retrieved clips
 One indivisible candidate for a **Slot Group**, containing exactly one source
 clip for every member Slot in Slot order. Its clips lie within the group's
 Planning Segment and are ordered and non-overlapping. Edit Composer selects the
-whole trajectory and never combines clips from different trajectories. The
+whole trajectory and never combines clips from different trajectories. Timeline
+Scout asks the model only for each clip's integer source start; the application
+derives its end from the authoritative planned Slot duration and fits the whole
+trajectory inside the Planning Segment before visual validation. The
 configured `target_trajectories_per_group` count is an early-stop target, not a
 success requirement. If any completed round leaves a group with zero valid
 trajectories, Timeline Scout immediately triggers Targeted Arrangement for that

@@ -255,17 +255,18 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     assert "Every member of that\ngroup must choose the same source_segment_id" in (
         package.user_prompt
     )
-    assert "combined duration must not exceed the Segment's complete source duration" in (
+    assert "duration must not exceed the Segment's complete source duration" in (
         package.user_prompt
     )
-    assert "capacity check is for the whole resulting group" in package.user_prompt
+    assert "capacity check is for the whole group" in package.user_prompt
+    assert "Distinct original groups must use different Segments" in package.user_prompt
     assert "Source quality and relevance to the maintained request always take priority" in (
         package.user_prompt
     )
     assert "runs Story Editor again" in package.user_prompt
     assert "distribute source_segment_id" not in package.user_prompt
     assert "one complete planned clip" not in package.user_prompt
-    assert package.prompt_version == "4.1"
+    assert package.prompt_version == "4.2"
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
     assert "planners_feedback" not in package.context_keys
@@ -506,8 +507,8 @@ def test_candidate_retrieval_contract_returns_indivisible_group_trajectories() -
     trajectories = package.response_contract.schema["properties"]["trajectories"]
     items = trajectories["items"]["properties"]["items"]
 
-    assert package.response_contract.version == "2.0"
-    assert package.prompt_version == "3.1"
+    assert package.response_contract.version == "2.1"
+    assert package.prompt_version == "3.2"
     assert trajectories["minItems"] == 2
     assert trajectories["maxItems"] == 2
     assert items["minItems"] == 2
@@ -516,11 +517,20 @@ def test_candidate_retrieval_contract_returns_indivisible_group_trajectories() -
         schema["properties"]["slot_id"]["const"]
         for schema in items["items"]["oneOf"]
     } == {"slot_01", "slot_02"}
+    assert all(
+        schema["properties"]["source_start_ms"] == {"type": "integer"}
+        for schema in items["items"]["oneOf"]
+    )
+    assert all(
+        "timestamp" not in schema["properties"]
+        for schema in items["items"]["oneOf"]
+    )
     assert "one indivisible choice" in package.user_prompt
     assert "exactly one item for every supplied Slot" in package.user_prompt
     assert "one supplied Planning Segment" in package.user_prompt
     assert "internally ordered and non-overlapping" in package.user_prompt
-    assert "planned_duration_ms to millisecond precision" in package.user_prompt
+    assert "Return only source_start_ms" in package.user_prompt
+    assert "derives each end" in package.user_prompt
     assert "initial phase" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
 

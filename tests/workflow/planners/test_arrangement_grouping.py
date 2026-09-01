@@ -12,9 +12,11 @@ from cutmaster.workflow.planners.arrangement_architect import (
     _expand_target_group_slot_ids,
     _plan_edit_slots_from_context,
     _repair_window_slot_ids,
+    _targeted_slot_constraints,
     _validate_and_align_slots,
     _validate_group_capacity,
     _validate_slots,
+    _validate_targeted_slots,
     align_slots_to_music,
 )
 
@@ -198,11 +200,12 @@ def test_capacity_is_checked_after_music_alignment() -> None:
 
 
 def test_targeted_replan_expands_one_slot_to_its_complete_group() -> None:
+    video_description = _video_description()
     slots = _validate_and_align_slots(
         _raw_slots([10, 10, 11], [2.0, 2.0, 2.0]),
         6.0,
         2.0,
-        _video_description(),
+        video_description,
         {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
         1000,
     )
@@ -211,11 +214,16 @@ def test_targeted_replan_expands_one_slot_to_its_complete_group() -> None:
         "slot_01",
         "slot_02",
     }
+    assert _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        video_description,
+    ) == {"slot_01", "slot_02"}
 
 
 def test_targeted_replan_keeps_the_smallest_feasible_group_window() -> None:
     slots = _validate_and_align_slots(
-        _raw_slots([1, 2, 3, 4], [2.0, 2.0, 2.0, 2.0]),
+        _raw_slots([1, 3, 5, 7], [2.0, 2.0, 2.0, 2.0]),
         8.0,
         2.0,
         _video_description(),
@@ -233,6 +241,153 @@ def test_targeted_replan_keeps_the_smallest_feasible_group_window() -> None:
     )
 
     assert selected == {"slot_02"}
+
+
+def test_targeted_replan_keeps_disjoint_failed_groups_separate() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5, 7, 9], [2.0] * 5),
+        10.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0, 8.0],
+            "beats_sec": [2.0, 4.0, 6.0, 8.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_02", "slot_04"}
+
+
+def test_targeted_replan_adds_both_neighbors_when_segment_cannot_change() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 5], [2.0] * 4),
+        8.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03"}
+
+
+def test_adjacent_failed_groups_must_change_in_one_shared_assignment() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 4, 5], [2.0] * 4),
+        8.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_03"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03", "slot_04"}
+
+
+def test_overlapping_repair_windows_share_one_compatible_assignment() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 5, 6], [2.0] * 5),
+        10.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0, 8.0],
+            "beats_sec": [2.0, 4.0, 6.0, 8.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        _video_description(),
+    )
+
+    assert selected == {
+        "slot_01",
+        "slot_02",
+        "slot_03",
+        "slot_04",
+        "slot_05",
+    }
+
+
+def test_individually_blocked_run_can_merge_with_next_failed_run() -> None:
+    video_description = _video_description()
+    video_description["segments"] = video_description["segments"][:5]
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 4], [2.0] * 4),
+        8.0,
+        2.0,
+        video_description,
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        video_description,
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03", "slot_04"}
+
+
+def test_targeted_replan_cannot_merge_distinct_arrangement_groups() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_01", "slot_02"},
+        video_description,
+    )
+    replacements = [
+        {**slot, "source_segment_id": "segment_0002"}
+        for slot in slots[:2]
+    ]
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _validate_targeted_slots(
+            {"slots": replacements},
+            slots,
+            constraints,
+            video_description,
+        )
 
 
 def test_alignment_publishes_milliseconds_as_authoritative_duration() -> None:

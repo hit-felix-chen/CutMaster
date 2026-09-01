@@ -185,11 +185,11 @@ def _slot_arrangement(details: SlotArrangementDetails) -> PromptPackage:
     )
     retry_note = f"\n{details.retry_note.strip()}\n" if details.retry_note else ""
     if targeted:
-        instructions = f"""Repair the specified Slot Groups inside one local, contiguous window
-of an existing plan. This is not a new timeline. target_slot_constraints contains every Slot in
-the failed groups and may also contain complete adjacent groups needed to make a chronological
-repair feasible. Return exactly one replacement for every listed Slot in a single response. Do
-not return or modify a Slot outside this window.
+        instructions = f"""Repair the specified Slot Groups inside one or more independent local
+windows of an existing plan. This is not a new timeline. target_slot_constraints contains every
+Slot in each failed group and includes its complete adjacent groups only when the failed group
+cannot move to another legal Segment by itself. Return exactly one replacement for every listed
+Slot in a single response. Do not return or modify any unlisted Slot.
 
 Preserve every target slot_id and its exact desired_duration_sec and planned_duration_ms. The
 planned_duration_ms values are authoritative because they already incorporate beat-aligned
@@ -199,15 +199,14 @@ Use the maintained request, compact music profile, and original structured sourc
 from the first Arrangement Architect call. Treat existing_slot_plan as authoritative for all
 unaffected Slots. Redesign all members of an original_group_id together. Every member of that
 group must choose the same source_segment_id, and each replacement may use only its own
-allowed_segment_ids. Adjacent original groups in the
-repair window may choose the same Segment and thereby become one new group. Otherwise, group
-Segment identifiers must be strictly increasing. Never return to an earlier or already-used
+allowed_segment_ids. Distinct original groups must use different Segments, with Segment identifiers
+strictly increasing in Slot order. Never merge groups, return to an earlier Segment, or reuse a
 Segment after the plan has moved forward.
 
-For every Segment selected in the repair window, add the planned_duration_ms of all returned Slots
-assigned to it. That combined duration must not exceed the Segment's complete source duration.
-This capacity check is for the whole resulting group, not for one Slot in isolation. Leave enough
-ordered, non-overlapping source time for one complete trajectory containing every group Slot.
+For every Segment selected in a repair window, add the planned_duration_ms of all returned Slots
+in its original group. That duration must not exceed the Segment's complete source duration. This
+capacity check is for the whole group, not for one Slot in isolation. Leave enough ordered,
+non-overlapping source time for one complete trajectory containing every group Slot.
 
 The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
 static imagery, no complete group trajectory survived validation, or the assigned Segment lacked
@@ -221,11 +220,11 @@ or source evidence. Role, team, and object subjects do not require a named-perso
 precise required subjects that the source descriptions can visibly establish.
 
 Source quality and relevance to the maintained request always take priority. Preserve enough
-chronological room between the fixed groups immediately before and after the repair window. When
+chronological room between the fixed groups immediately before and after each repair window. When
 an adjacent group was included only to open a feasible assignment, change no more of its visible
 intent than necessary.
 
-Dialogue anchors are not part of this response. After applying the complete repair window, the
+Dialogue anchors are not part of this response. After applying all listed repair windows, the
 application discards the old Anchor split and runs Story Editor again. Do not preserve a poor
 Segment assignment merely because existing_slot_plan shows an Anchor there. Do not use title cards,
 opening or end credits, production logos, legal cards, or blank frames unless explicitly required
@@ -286,7 +285,7 @@ requires them.
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.SLOT_ARRANGEMENT,
-        prompt_version="4.1" if targeted else "4.0",
+        prompt_version="4.2" if targeted else "4.0",
         operation=(
             "Arrangement Architect targeted repair"
             if targeted
@@ -323,20 +322,14 @@ def _candidate_item_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "timestamp",
+            "source_start_ms",
             "description",
             "semantic_relevance",
             "emotional_intensity",
             "salience",
         ],
         "properties": {
-            "timestamp": {
-                "type": "string",
-                "pattern": (
-                    r"^\d{2}:\d{2}:\d{2},\d{3}-"
-                    r"\d{2}:\d{2}:\d{2},\d{3}$"
-                ),
-            },
+            "source_start_ms": {"type": "integer"},
             "description": {"type": "string", "minLength": 1},
             "semantic_relevance": SCORE_SCHEMA,
             "emotional_intensity": SCORE_SCHEMA,
@@ -658,7 +651,7 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
         },
     }
     contract = ResponseContract(
-        version="2.0",
+        version="2.1",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -679,14 +672,16 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
 trajectories for the supplied Slot Group. A trajectory is one indivisible choice: it must contain
 exactly one item for every supplied Slot, in the same Slot order. All item windows must lie inside
 the one supplied Planning Segment, follow source time, and never overlap. Equality between one
-item's end and the next item's start is allowed. Each item's duration must equal its Slot's
-planned_duration_ms to millisecond precision.
+item's end and the next item's start is allowed. Return only source_start_ms as an integer number
+of milliseconds for each item; do not return a timestamp range or an end time. The application
+derives each end as source_start_ms + planned_duration_ms. Choose every start so the derived whole
+trajectory stays inside the Planning Segment, ordered, and non-overlapping.
 
 Use only the supplied structured source Segment and its Shot-level visual annotations. A window
 may start or end inside a Shot. Do not return Shot IDs; the application derives them from the
-validated timestamps. Describe only visible content supported by overlapping Shot annotations.
+derived time windows. Describe only visible content supported by overlapping Shot annotations.
 Use the maintained video summary only for plot context. Never invent visuals, identity, action,
-dialogue, or timestamps.
+dialogue, or source start times.
 
 Confirmed trajectories already passed all checks and are retained. Return new whole trajectories;
 do not duplicate a confirmed trajectory, any rejected trajectory signature, or an excluded Slot
@@ -723,13 +718,14 @@ over a more ambitious but uncertain visual choice.
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_RETRIEVAL,
-        prompt_version="3.1",
+        prompt_version="3.2",
         operation=details.operation,
         system_prompt=(
             "You are CutMaster's Timeline Scout. Scout real source-video passages from a "
             "structured VideoDescription whose Segment timeline and Shot annotations are "
             "authoritative. Return complete, ordered, non-overlapping Slot Group trajectories "
-            "inside one Planning Segment. Never invent timestamps or visuals. Return strict JSON only."
+            "inside one Planning Segment. Return source_start_ms only for time placement. "
+            "Never invent source times or visuals. Return strict JSON only."
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,

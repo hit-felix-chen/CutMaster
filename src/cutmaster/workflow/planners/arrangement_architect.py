@@ -485,7 +485,7 @@ def _repair_window_slot_ids(
     target_slot_ids: set[str],
     video_description: dict[str, Any],
 ) -> set[str]:
-    """Expand to the smallest contiguous group window with a feasible assignment."""
+    """Select the smallest independent repair window for each failed group run."""
 
     groups = _arrangement_groups(slots)
     group_index = {
@@ -494,10 +494,11 @@ def _repair_window_slot_ids(
     slot_to_group = {
         str(slot["slot_id"]): str(slot["group_id"]) for slot in slots
     }
-    requested_groups = {slot_to_group[slot_id] for slot_id in target_slot_ids}
+    expanded_target_ids = _expand_target_group_slot_ids(slots, target_slot_ids)
+    requested_groups = {
+        slot_to_group[slot_id] for slot_id in expanded_target_ids
+    }
     requested_indices = sorted(group_index[group_id] for group_id in requested_groups)
-    initial_left = requested_indices[0]
-    initial_right = requested_indices[-1]
     segment_order, segment_durations = _segment_metadata(video_description)
     segment_ids = [
         str(segment["segment_id"]) for segment in video_description["segments"]
@@ -511,7 +512,11 @@ def _repair_window_slot_ids(
         for group in groups
     }
 
-    def feasible(left: int, right: int) -> bool:
+    def allows_failed_groups_to_change(
+        left: int,
+        right: int,
+        target_indices: tuple[int, ...],
+    ) -> bool:
         lower = (
             segment_order[str(groups[left - 1]["source_segment_id"])] + 1
             if left > 0
@@ -524,7 +529,12 @@ def _repair_window_slot_ids(
         )
         if lower > upper:
             return False
-        states: set[tuple[int, int]] = set()
+        target_bits = {
+            target_index: 1 << offset
+            for offset, target_index in enumerate(target_indices)
+        }
+        all_targets_changed = (1 << len(target_bits)) - 1
+        states: set[tuple[int, int]] = {(-1, 0)}
         for position in range(left, right + 1):
             group = groups[position]
             group_id = str(group["group_id"])
@@ -532,47 +542,129 @@ def _repair_window_slot_ids(
             next_states: set[tuple[int, int]] = set()
             for candidate_index in range(lower, upper + 1):
                 capacity_ms = segment_durations[segment_ids[candidate_index]]
-                if not states:
-                    if required_ms <= capacity_ms:
-                        next_states.add((candidate_index, required_ms))
+                if required_ms > capacity_ms:
                     continue
-                for previous_index, previous_required_ms in states:
-                    if candidate_index < previous_index:
+                for previous_index, changed_targets in states:
+                    if candidate_index <= previous_index:
                         continue
-                    combined_ms = (
-                        previous_required_ms + required_ms
-                        if candidate_index == previous_index
-                        else required_ms
+                    changed = changed_targets
+                    if (
+                        position in target_bits
+                        and candidate_index
+                        != segment_order[str(group["source_segment_id"])]
+                    ):
+                        changed |= target_bits[position]
+                    next_states.add(
+                        (
+                            candidate_index,
+                            changed,
+                        )
                     )
-                    if combined_ms <= capacity_ms:
-                        next_states.add((candidate_index, combined_ms))
             states = next_states
             if not states:
                 return False
-        return bool(states)
+        return any(
+            changed_targets == all_targets_changed
+            for _, changed_targets in states
+        )
 
-    maximum_expansion = initial_left + len(groups) - 1 - initial_right
-    for expansion in range(maximum_expansion + 1):
-        for left_expansion in range(expansion + 1):
-            right_expansion = expansion - left_expansion
-            left = initial_left - left_expansion
-            right = initial_right + right_expansion
-            if left < 0 or right >= len(groups):
+    requested_runs: list[tuple[int, int]] = []
+    for index in requested_indices:
+        if requested_runs and index == requested_runs[-1][1] + 1:
+            requested_runs[-1] = (requested_runs[-1][0], index)
+        else:
+            requested_runs.append((index, index))
+
+    repair_windows: list[tuple[int, int, tuple[int, ...]]] = []
+    for run_number, (initial_left, initial_right) in enumerate(requested_runs):
+        minimum_left = (
+            requested_runs[run_number - 1][1] + 1
+            if run_number > 0
+            else 0
+        )
+        maximum_right = (
+            requested_runs[run_number + 1][0] - 1
+            if run_number + 1 < len(requested_runs)
+            else len(groups) - 1
+        )
+        maximum_expansion = max(
+            initial_left - minimum_left,
+            maximum_right - initial_right,
+        )
+        selected_window: tuple[int, int] | None = None
+        for expansion in range(maximum_expansion + 1):
+            left = max(minimum_left, initial_left - expansion)
+            right = min(maximum_right, initial_right + expansion)
+            if allows_failed_groups_to_change(
+                left,
+                right,
+                tuple(range(initial_left, initial_right + 1)),
+            ):
+                selected_window = (left, right)
+                break
+        if selected_window is None:
+            selected_window = (minimum_left, maximum_right)
+        repair_windows.append(
+            (
+                selected_window[0],
+                selected_window[1],
+                tuple(range(initial_left, initial_right + 1)),
+            )
+        )
+
+    def merge_repair_windows(
+        windows: list[tuple[int, int, tuple[int, ...]]],
+    ) -> list[tuple[int, int, tuple[int, ...]]]:
+        merged: list[tuple[int, int, tuple[int, ...]]] = []
+        for left, right, targets in sorted(windows):
+            if not merged or left > merged[-1][1] + 1:
+                merged.append((left, right, targets))
                 continue
-            if feasible(left, right):
-                selected_group_ids = {
-                    str(group["group_id"])
-                    for group in groups[left : right + 1]
-                }
-                return {
-                    str(slot["slot_id"])
-                    for slot in slots
-                    if str(slot["group_id"]) in selected_group_ids
-                }
-    raise ValueError(
-        "No contiguous Arrangement group window has a feasible "
-        "source-Segment assignment"
-    )
+            previous_left, previous_right, previous_targets = merged[-1]
+            merged[-1] = (
+                previous_left,
+                max(previous_right, right),
+                tuple(sorted(set(previous_targets) | set(targets))),
+            )
+        return merged
+
+    repair_windows = merge_repair_windows(repair_windows)
+    while True:
+        all_windows_feasible = True
+        expanded_windows: list[tuple[int, int, tuple[int, ...]]] = []
+        for left, right, targets in repair_windows:
+            if allows_failed_groups_to_change(left, right, targets):
+                expanded_windows.append((left, right, targets))
+                continue
+            expanded_left = max(0, left - 1)
+            expanded_right = min(len(groups) - 1, right + 1)
+            if expanded_left == left and expanded_right == right:
+                raise ValueError(
+                    "No Arrangement group repair window permits all failed groups "
+                    "to change Segments in one assignment"
+                )
+            expanded_windows.append(
+                (expanded_left, expanded_right, targets)
+            )
+            all_windows_feasible = False
+        repair_windows = merge_repair_windows(expanded_windows)
+        if all_windows_feasible:
+            break
+
+    selected_indices = {
+        index
+        for left, right, _targets in repair_windows
+        for index in range(left, right + 1)
+    }
+
+    selected_group_ids = {
+        str(groups[index]["group_id"]) for index in selected_indices
+    }
+    return {
+        str(slot["slot_id"])
+        for slot in slots
+        if str(slot["group_id"]) in selected_group_ids
+    }
 
 
 def _validate_targeted_slots(
@@ -663,6 +755,28 @@ def _validate_targeted_slots(
                 f"Targeted redesign split Source Group {original_group_id} "
                 "across multiple Segments"
             )
+
+    segment_order, _ = _segment_metadata(video_description)
+    merged_by_slot_id = {str(slot["slot_id"]): slot for slot in merged}
+    previous_segment_index = -1
+    for original_group in _arrangement_groups(slots):
+        group_segment_ids = {
+            str(merged_by_slot_id[slot_id]["source_segment_id"])
+            for slot_id in original_group["slot_ids"]
+        }
+        if len(group_segment_ids) != 1:
+            raise ValueError(
+                f"Targeted redesign split Source Group "
+                f"{original_group['group_id']} across multiple Segments"
+            )
+        segment_id = next(iter(group_segment_ids))
+        segment_index = segment_order[segment_id]
+        if segment_index <= previous_segment_index:
+            raise ValueError(
+                "Arrangement group Segments must remain strictly increasing; "
+                "distinct groups cannot merge onto one Segment"
+            )
+        previous_segment_index = segment_index
 
     grouped = _assign_source_groups(merged, video_description)
     _validate_group_capacity(grouped, video_description)

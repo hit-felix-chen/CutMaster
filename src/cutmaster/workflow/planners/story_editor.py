@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from itertools import combinations
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, DialogueAnchorConfig, LLMConfig
@@ -281,43 +280,6 @@ def _build_partition_layout(
     return layout
 
 
-def _anchor_partition_balance_error_ms(
-    slots: list[dict[str, Any]],
-    anchor_ranges_by_slot: dict[str, tuple[int, int]],
-    video_description: dict[str, Any],
-) -> int:
-    """Measure how unevenly Anchor pictures divide their source Segments."""
-
-    segments = {
-        str(segment["segment_id"]): segment
-        for segment in video_description["segments"]
-    }
-    total_error_ms = 0
-    for _group_id, source_segment_id, group_slots in _grouped_slots(slots):
-        if len(group_slots) <= 1:
-            continue
-        anchor_ranges = [
-            anchor_ranges_by_slot[str(slot["slot_id"])]
-            for slot in group_slots
-            if str(slot["slot_id"]) in anchor_ranges_by_slot
-        ]
-        if not anchor_ranges:
-            continue
-        segment_start_ms, segment_end_ms = _segment_bounds_ms(
-            segments[source_segment_id]
-        )
-        free_region_lengths_ms: list[int] = []
-        cursor_ms = segment_start_ms
-        for anchor_start_ms, anchor_end_ms in anchor_ranges:
-            free_region_lengths_ms.append(anchor_start_ms - cursor_ms)
-            cursor_ms = anchor_end_ms
-        free_region_lengths_ms.append(segment_end_ms - cursor_ms)
-        total_error_ms += max(free_region_lengths_ms) - min(
-            free_region_lengths_ms
-        )
-    return total_error_ms
-
-
 def _overlaps(
     first: tuple[float, float],
     second: tuple[float, float],
@@ -480,168 +442,6 @@ def _validate_anchor_sequence(
                 "non-overlapping in Slot order"
             )
     return anchors
-
-
-def _select_non_overlapping_anchor_subset(
-    anchors: list[dict[str, Any]],
-    *,
-    required_slot_ids: set[str],
-    slots: list[dict[str, Any]],
-    video_description: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Keep immutable Anchors and choose the strongest fully legal subset."""
-
-    anchors_by_slot = {str(anchor["slot_id"]): anchor for anchor in anchors}
-    missing_required = required_slot_ids - anchors_by_slot.keys()
-    if missing_required:
-        raise ValueError(
-            "Required preserved dialogue Anchors are missing: "
-            + ", ".join(sorted(missing_required))
-        )
-    required = [
-        anchor
-        for anchor in anchors
-        if str(anchor["slot_id"]) in required_slot_ids
-    ]
-
-    def ordered_selection(
-        selectable_subset: tuple[dict[str, Any], ...],
-    ) -> list[dict[str, Any]]:
-        selected_slot_ids = {
-            str(anchor["slot_id"])
-            for anchor in [*required, *selectable_subset]
-        }
-        return [
-            anchor
-            for anchor in anchors
-            if str(anchor["slot_id"]) in selected_slot_ids
-        ]
-
-    def validate_subset(
-        selectable_subset: tuple[dict[str, Any], ...],
-    ) -> list[dict[str, Any]]:
-        selected = ordered_selection(selectable_subset)
-        _validate_anchor_sequence(selected)
-        _build_partition_layout(
-            slots,
-            {
-                str(anchor["slot_id"]): _time_range_ms(
-                    anchor["source_window"]
-                )
-                for anchor in selected
-            },
-            video_description,
-        )
-        return selected
-
-    validate_subset(())
-
-    selectable = [
-        anchor
-        for anchor in anchors
-        if str(anchor["slot_id"]) not in required_slot_ids
-        and not any(_audio_ranges_overlap(anchor, kept) for kept in required)
-    ]
-    best: tuple[dict[str, Any], ...] = ()
-    best_key = (-1, -1, -10**18)
-    for size in range(len(selectable) + 1):
-        for subset in combinations(selectable, size):
-            try:
-                selected = validate_subset(subset)
-            except ValueError:
-                continue
-            anchor_ranges_by_slot = {
-                str(anchor["slot_id"]): _time_range_ms(
-                    anchor["source_window"]
-                )
-                for anchor in selected
-            }
-            key = (
-                sum(
-                    int(anchor["importance_likert"])
-                    + int(anchor["coherence_likert"])
-                    for anchor in subset
-                ),
-                len(subset),
-                -_anchor_partition_balance_error_ms(
-                    slots,
-                    anchor_ranges_by_slot,
-                    video_description,
-                ),
-            )
-            if key > best_key:
-                best = subset
-                best_key = key
-
-    kept = validate_subset(best)
-    kept_slot_ids = {str(anchor["slot_id"]) for anchor in kept}
-    rejected: list[dict[str, Any]] = []
-    for anchor in anchors:
-        slot_id = str(anchor["slot_id"])
-        if slot_id in kept_slot_ids:
-            continue
-        start_sec, end_sec = _output_audio_range(anchor)
-        conflicts = []
-        for selected in kept:
-            if not _audio_ranges_overlap(anchor, selected):
-                continue
-            selected_start, selected_end = _output_audio_range(selected)
-            conflicts.append(
-                {
-                    "slot_id": str(selected["slot_id"]),
-                    "output_audio_start_sec": round(selected_start, 6),
-                    "output_audio_end_sec": round(selected_end, 6),
-                }
-            )
-        if conflicts:
-            rejected.append(
-                {
-                    "reason_code": "anchor_audio_overlap_filtered",
-                    "slot_id": slot_id,
-                    "output_audio_start_sec": round(start_sec, 6),
-                    "output_audio_end_sec": round(end_sec, 6),
-                    "conflicts_with_kept_anchors": conflicts,
-                    "diagnosis": (
-                        f"Proposed Anchor {slot_id} was excluded from the final "
-                        "Anchor subset because its output audio overlaps a kept "
-                        "Anchor."
-                    ),
-                }
-            )
-            continue
-
-        trial_subset = tuple(
-            candidate
-            for candidate in anchors
-            if str(candidate["slot_id"]) not in required_slot_ids
-            and (
-                str(candidate["slot_id"]) in kept_slot_ids
-                or str(candidate["slot_id"]) == slot_id
-            )
-        )
-        try:
-            validate_subset(trial_subset)
-        except ValueError as exc:
-            combination_failure = str(exc)
-        else:
-            combination_failure = (
-                "The proposal was incompatible with a stronger legal Anchor subset."
-            )
-        rejected.append(
-            {
-                "reason_code": "anchor_combination_invalid_filtered",
-                "slot_id": slot_id,
-                "output_audio_start_sec": round(start_sec, 6),
-                "output_audio_end_sec": round(end_sec, 6),
-                "combination_failure": combination_failure,
-                "diagnosis": (
-                    f"Proposed Anchor {slot_id} was excluded because the combined "
-                    "Anchor selection violates source order, dialogue reuse, or "
-                    "picture-partition capacity."
-                ),
-            }
-        )
-    return kept, rejected
 
 
 def _dialogues_by_segment(
@@ -914,7 +714,6 @@ def _validate_selection(
     *,
     require_anchor: bool = True,
     required_anchor_slot_ids: set[str] | None = None,
-    overlap_rejections: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     slots_by_id = {
         str(slot["slot_id"]): slot
@@ -1110,16 +909,12 @@ def _validate_selection(
             }
         )
     selected.sort(key=lambda item: slot_order[item["slot_id"]])
-    selected, rejected_overlaps = _select_non_overlapping_anchor_subset(
-        selected,
-        required_slot_ids=set(required_anchor_slot_ids or set()),
-        slots=slots,
-        video_description=video_description,
-    )
-    if overlap_rejections is not None:
-        overlap_rejections.extend(rejected_overlaps)
-    if require_anchor and not selected:
-        raise ValueError("No legal dialogue Anchor subset remains")
+    missing_required = set(required_anchor_slot_ids or set()) - selected_slot_ids
+    if missing_required:
+        raise ValueError(
+            "Required preserved dialogue Anchors are missing: "
+            + ", ".join(sorted(missing_required))
+        )
     _validate_anchor_sequence(selected)
     _build_partition_layout(
         slots,
@@ -1395,10 +1190,7 @@ def select_dialogue_anchors(
             for constraint in selectable_constraints.values()
         )
     )
-    overlap_rejections: list[dict[str, Any]] = []
-
     def validate_combined(parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        overlap_rejections.clear()
         new_selections = list(parsed.get("anchors") or [])
         return _validate_selection(
             {"anchors": [*preserved, *new_selections]},
@@ -1408,7 +1200,6 @@ def select_dialogue_anchors(
             dialogue_constraints_by_slot,
             anchor_config,
             required_anchor_slot_ids=preserved_slot_ids,
-            overlap_rejections=overlap_rejections,
         )
 
     if should_request:
@@ -1460,18 +1251,6 @@ def select_dialogue_anchors(
                 "No eligible dialogue passage can satisfy the current Arrangement capacity"
             )
         selected = validate_combined({"anchors": []})
-    context.set_artifact(
-        "anchor_overlap_rejections",
-        list(overlap_rejections),
-    )
-    for rejection in overlap_rejections:
-        log_event(
-            "WARNING",
-            "aster.story",
-            "validation.reject",
-            "Excluded overlapping dialogue Anchor proposal",
-            **rejection,
-        )
     _warn_for_anchors_outside_preferred_picture_ranges(
         selected,
         dialogue_constraints_by_slot,
