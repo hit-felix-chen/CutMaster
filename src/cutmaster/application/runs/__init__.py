@@ -1,7 +1,6 @@
 """ASTER Run Application use cases."""
 
 from cutmaster.application.runs.commands import (
-    CandidateReplacement,
     CompleteRunCommand,
     CreateRevisionCommand,
     CreateRunCommand,
@@ -9,6 +8,7 @@ from cutmaster.application.runs.commands import (
     RecoverRunCommand,
     RunAgainCommand,
     SaveGuidedRevisionCommand,
+    TrajectoryReplacement,
 )
 from cutmaster.application.runs.execution import (
     ExecuteRunPlanningCommand,
@@ -31,7 +31,6 @@ from cutmaster.application.runs.views import (
 
 __all__ = [
     "AttemptUsageView",
-    "CandidateReplacement",
     "CompleteRunCommand",
     "CompletedRunView",
     "CreateRevisionCommand",
@@ -52,4 +51,5 @@ __all__ = [
     "RunPlanningExecutor",
     "RunsService",
     "SaveGuidedRevisionCommand",
+    "TrajectoryReplacement",
 ]

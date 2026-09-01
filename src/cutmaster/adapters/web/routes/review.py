@@ -35,8 +35,8 @@ from cutmaster.application.renders import (
 )
 from cutmaster.application.errors import RenderDispatchFailedError
 from cutmaster.application.runs import (
-    CandidateReplacement,
     SaveGuidedRevisionCommand,
+    TrajectoryReplacement,
 )
 from cutmaster.domain.ids import FrozenEditId, ProjectId, RenderVariantId
 
@@ -203,15 +203,15 @@ class _LeasedFileResponse(FileResponse):
         )
 
 
-class CandidateReplacementPayload(BaseModel):
+class TrajectoryReplacementPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    slot_id: str = Field(min_length=1, max_length=200)
-    candidate_id: str = Field(min_length=1, max_length=300)
+    group_id: str = Field(min_length=1, max_length=200)
+    trajectory_id: str = Field(min_length=1, max_length=300)
 
 
 class SaveRevisionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    replacements: list[CandidateReplacementPayload] = Field(
+    replacements: list[TrajectoryReplacementPayload] = Field(
         min_length=1,
         max_length=500,
     )
@@ -249,7 +249,7 @@ def save_guided_revision(
             command_id=command_id,
             source_edit_id=source_id,
             replacements=tuple(
-                CandidateReplacement(item.slot_id, item.candidate_id)
+                TrajectoryReplacement(item.group_id, item.trajectory_id)
                 for item in payload.replacements
             ),
         )

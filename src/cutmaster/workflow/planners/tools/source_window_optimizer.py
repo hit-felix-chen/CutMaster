@@ -30,6 +30,30 @@ class SourceWindowOptimization:
     fallback_level: int
 
 
+def _is_trajectory_locked(item: dict[str, Any]) -> bool:
+    group_id = item.get("group_id")
+    trajectory_id = item.get("trajectory_id")
+    has_group = isinstance(group_id, str) and bool(group_id.strip())
+    has_trajectory = isinstance(trajectory_id, str) and bool(trajectory_id.strip())
+    if has_group != has_trajectory:
+        raise ValueError(
+            "Source-window optimization requires both group_id and trajectory_id"
+        )
+    return has_group
+
+
+def _lock_trajectory_item(item: dict[str, Any]) -> dict[str, Any]:
+    result = dict(item)
+    result["cut_optimization"] = {
+        "mode": "trajectory_locked",
+        "source_shift_sec": 0.0,
+        "num_internal_cuts": 0,
+        "fallback_level": 0,
+        "max_beat_distance_sec": 0.0,
+    }
+    return result
+
+
 def _merge_intervals(
     intervals: list[tuple[float, float]],
 ) -> list[tuple[float, float]]:
@@ -68,7 +92,7 @@ def _detect_used_segment_cuts(
         tuple[dict[str, Any], Path, list[tuple[float, float]]],
     ] = {}
     for item in items:
-        if item.get("dialogue_anchor") is not None:
+        if item.get("dialogue_anchor") is not None or _is_trajectory_locked(item):
             continue
         source_start, source_end = parse_range(str(item["timestamp"]))
         detection_end = min(
@@ -300,6 +324,8 @@ def _optimize_item(
     output_fps: int,
     optimization_config: SourceWindowOptimizationConfig,
 ) -> dict[str, Any]:
+    if _is_trajectory_locked(item):
+        return _lock_trajectory_item(item)
     if item.get("dialogue_anchor") is not None:
         result = dict(item)
         result["cut_optimization"] = {
@@ -390,6 +416,10 @@ def optimize_script_source_windows(
 ) -> list[dict[str, Any]]:
     if not items:
         return []
+
+    locked = [_is_trajectory_locked(item) for item in items]
+    if all(locked):
+        return [_lock_trajectory_item(item) for item in items]
 
     source_cuts, frame_rate, source_duration_sec = _detect_used_segment_cuts(
         source_video,

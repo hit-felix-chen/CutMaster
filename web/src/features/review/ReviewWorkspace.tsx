@@ -41,6 +41,7 @@ import {
   type ReviewCandidate,
   type ReviewRenderVariant,
   type ReviewSlot,
+  type ReviewTrajectory,
 } from '@/features/shared/api'
 import { ExecutionFailure } from '@/features/shared/ExecutionFailure'
 
@@ -117,18 +118,23 @@ function scoreLabel(value: number | null) {
   return `${Math.round(Math.max(0, Math.min(1, normalized)) * 100)}%`
 }
 
-function selectedCandidate(
+function selectedTrajectory(
   data: FrozenEditReview,
   slot: ReviewSlot,
   draft: RevisionDraft,
 ) {
-  const candidateId = draft[slot.slot_id] ?? slot.selected_candidate_id
-  return data.candidates[slot.slot_id]?.find(
-    (candidate) => candidate.candidate_id === candidateId,
+  const trajectoryId = draft[slot.group_id] ?? slot.selected_trajectory_id
+  return data.candidates[slot.group_id]?.find(
+    (trajectory) => trajectory.trajectory_id === trajectoryId,
   )
 }
 
+function trajectoryCandidate(trajectory: ReviewTrajectory | undefined, slotId: string) {
+  return trajectory?.items.find((candidate) => candidate.slot_id === slotId)
+}
+
 function CandidateCard({
+  trajectory,
   candidate,
   active,
   original,
@@ -136,6 +142,7 @@ function CandidateCard({
   onPreview,
   onChoose,
 }: {
+  trajectory: ReviewTrajectory
   candidate: ReviewCandidate
   active: boolean
   original: boolean
@@ -148,7 +155,7 @@ function CandidateCard({
     <article className={`review-candidate${active ? ' is-active' : ''}`}>
       <header>
         <div>
-          <strong>{candidate.candidate_id}</strong>
+          <strong>{trajectory.trajectory_id}</strong>
           <span>{candidate.source_timestamp}</span>
         </div>
         {active ? <Check size={16} aria-label={t('review.currentChoice')} /> : null}
@@ -180,10 +187,10 @@ function CandidateCard({
           <button
             className="button button--primary"
             type="button"
-            disabled={disabled || active || !candidate.eligible_for_replacement}
+            disabled={disabled || active || !trajectory.eligible_for_replacement}
             onClick={onChoose}
           >
-            {t('review.useCandidate')}
+            {t('review.useTrajectory')}
           </button>
         ) : null}
       </footer>
@@ -195,7 +202,7 @@ function SlotInspector({
   data,
   slot,
   draft,
-  previewCandidateId,
+  previewTrajectoryId,
   onPreview,
   onChoose,
   onUndo,
@@ -203,14 +210,14 @@ function SlotInspector({
   data: FrozenEditReview
   slot: ReviewSlot
   draft: RevisionDraft
-  previewCandidateId: string | null
-  onPreview: (candidate: ReviewCandidate) => void
-  onChoose: (candidate: ReviewCandidate) => void
+  previewTrajectoryId: string | null
+  onPreview: (trajectory: ReviewTrajectory) => void
+  onChoose: (trajectory: ReviewTrajectory) => void
   onUndo: () => void
 }) {
   const { t } = useTranslation('common')
-  const candidates = data.candidates[slot.slot_id] ?? []
-  const currentId = draft[slot.slot_id] ?? slot.selected_candidate_id
+  const trajectories = data.candidates[slot.group_id] ?? []
+  const currentId = draft[slot.group_id] ?? slot.selected_trajectory_id
   const dialogueText =
     slot.dialogue_anchor && typeof slot.dialogue_anchor.text === 'string'
       ? slot.dialogue_anchor.text
@@ -250,12 +257,12 @@ function SlotInspector({
         <header>
           <div>
             <h3>{t('review.candidateSpace')}</h3>
-            <p>{t('review.candidateCount', { count: candidates.length })}</p>
+            <p>{t('review.trajectoryCount', { count: trajectories.length })}</p>
           </div>
-          {draft[slot.slot_id] ? (
+          {draft[slot.group_id] ? (
             <button className="button button--secondary" type="button" onClick={onUndo}>
               <Undo2 size={14} aria-hidden="true" />
-              {t('review.undoSlot')}
+              {t('review.undoGroup')}
             </button>
           ) : null}
         </header>
@@ -266,21 +273,25 @@ function SlotInspector({
           </div>
         ) : null}
         <div className="review-candidate-list">
-          {candidates.map((candidate) => (
-            <CandidateCard
-              key={candidate.candidate_id}
-              candidate={candidate}
-              active={candidate.candidate_id === currentId}
-              original={candidate.candidate_id === slot.selected_candidate_id}
-              disabled={slot.is_anchor}
-              onPreview={() => onPreview(candidate)}
-              onChoose={() => onChoose(candidate)}
-            />
-          ))}
+          {trajectories.map((trajectory) => {
+            const candidate = trajectoryCandidate(trajectory, slot.slot_id)
+            return candidate ? (
+              <CandidateCard
+                key={trajectory.trajectory_id}
+                trajectory={trajectory}
+                candidate={candidate}
+                active={trajectory.trajectory_id === currentId}
+                original={trajectory.trajectory_id === slot.selected_trajectory_id}
+                disabled={slot.is_anchor}
+                onPreview={() => onPreview(trajectory)}
+                onChoose={() => onChoose(trajectory)}
+              />
+            ) : null
+          })}
         </div>
-        {previewCandidateId ? (
+        {previewTrajectoryId ? (
           <span className="review-previewing">
-            {t('review.previewingCandidate', { candidate: previewCandidateId })}
+            {t('review.previewingTrajectory', { trajectory: previewTrajectoryId })}
           </span>
         ) : null}
       </section>
@@ -439,7 +450,7 @@ function ReviewTimeline({
               return (
                 <button
                   key={slot.slot_id}
-                  className={`review-slot${selectedSlotId === slot.slot_id ? ' is-active' : ''}${draft[slot.slot_id] ? ' is-dirty' : ''}`}
+                  className={`review-slot${selectedSlotId === slot.slot_id ? ' is-active' : ''}${draft[slot.group_id] ? ' is-dirty' : ''}`}
                   type="button"
                   style={{ width: `${width}%` }}
                   onClick={() => onSelectSlot(slot.slot_id)}
@@ -449,7 +460,7 @@ function ReviewTimeline({
                   {slot.is_anchor ? (
                     <Lock size={11} aria-label={t('review.storyAnchor')} />
                   ) : null}
-                  {draft[slot.slot_id] ? (
+                  {draft[slot.group_id] ? (
                     <span
                       className="review-slot__dirty"
                       aria-label={t('common.unsaved')}
@@ -588,7 +599,7 @@ export function ReviewWorkspace() {
   const { projectId = '', runId = '', editId = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [draft, setDraft] = useState<RevisionDraft>({})
-  const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null)
+  const [previewTrajectoryId, setPreviewTrajectoryId] = useState<string | null>(null)
   const updateSelection = (key: 'slot' | 'variant', value: string | null) => {
     const next = new URLSearchParams(searchParams)
     if (value) next.set(key, value)
@@ -638,7 +649,7 @@ export function ReviewWorkspace() {
     mutationFn: (audioMode: RenderAudioMode) =>
       api.renderVariants.create(editId, audioMode),
     onSuccess: async ({ render_variant: variant }) => {
-      setPreviewCandidateId(null)
+      setPreviewTrajectoryId(null)
       updateSelection('variant', variant.render_variant_id)
       await refreshRenders()
     },
@@ -734,16 +745,20 @@ export function ReviewWorkspace() {
     ? variantItems.indexOf(selectedVariantItem) + 1
     : null
   const selectedVariant = selectedVariantItem?.render_variant
-  const currentCandidate = selectedCandidate(data, selectedSlot, draft)
+  const currentTrajectory = selectedTrajectory(data, selectedSlot, draft)
+  const currentCandidate = trajectoryCandidate(currentTrajectory, selectedSlot.slot_id)
   const selectedSlotIndex = data.slots.findIndex(
     (slot) => slot.slot_id === selectedSlot.slot_id,
   )
   const nextSlotId = data.slots[selectedSlotIndex + 1]?.slot_id ?? null
-  const previewCandidate = previewCandidateId
-    ? data.candidates[selectedSlot.slot_id]?.find(
-        (candidate) => candidate.candidate_id === previewCandidateId,
-      )
-    : undefined
+  const previewCandidate = trajectoryCandidate(
+    previewTrajectoryId
+      ? data.candidates[selectedSlot.group_id]?.find(
+          (trajectory) => trajectory.trajectory_id === previewTrajectoryId,
+        )
+      : undefined,
+    selectedSlot.slot_id,
+  )
   const renderOperation =
     createRender.isPending ||
     recoverRender.isPending ||
@@ -798,7 +813,7 @@ export function ReviewWorkspace() {
               aria-label={t('review.renderVariant')}
               value={selectedVariant?.render_variant_id ?? ''}
               onChange={(event) => {
-                setPreviewCandidateId(null)
+                setPreviewTrajectoryId(null)
                 updateSelection('variant', event.target.value || null)
               }}
             >
@@ -824,7 +839,7 @@ export function ReviewWorkspace() {
             disabled={!dirty || save.isPending}
             onClick={() => {
               setDraft({})
-              setPreviewCandidateId(null)
+              setPreviewTrajectoryId(null)
             }}
           >
             <RotateCcw size={15} aria-hidden="true" />
@@ -926,27 +941,27 @@ export function ReviewWorkspace() {
           data={data}
           slot={selectedSlot}
           draft={draft}
-          previewCandidateId={previewCandidateId}
-          onPreview={(candidate) => setPreviewCandidateId(candidate.candidate_id)}
-          onChoose={(candidate) => {
-            setPreviewCandidateId(null)
+          previewTrajectoryId={previewTrajectoryId}
+          onPreview={(trajectory) => setPreviewTrajectoryId(trajectory.trajectory_id)}
+          onChoose={(trajectory) => {
+            setPreviewTrajectoryId(null)
             setDraft((current) => {
-              if (candidate.candidate_id === selectedSlot.selected_candidate_id) {
+              if (trajectory.trajectory_id === selectedSlot.selected_trajectory_id) {
                 const next = { ...current }
-                delete next[selectedSlot.slot_id]
+                delete next[selectedSlot.group_id]
                 return next
               }
               return {
                 ...current,
-                [selectedSlot.slot_id]: candidate.candidate_id,
+                [selectedSlot.group_id]: trajectory.trajectory_id,
               }
             })
           }}
           onUndo={() => {
-            setPreviewCandidateId(null)
+            setPreviewTrajectoryId(null)
             setDraft((current) => {
               const next = { ...current }
-              delete next[selectedSlot.slot_id]
+              delete next[selectedSlot.group_id]
               return next
             })
           }}
@@ -967,7 +982,7 @@ export function ReviewWorkspace() {
         selectedSlotId={selectedSlot.slot_id}
         draft={draft}
         onSelectSlot={(slotId) => {
-          setPreviewCandidateId(null)
+          setPreviewTrajectoryId(null)
           updateSelection('slot', slotId)
         }}
       />

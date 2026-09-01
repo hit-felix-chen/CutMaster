@@ -17,36 +17,40 @@ from cutmaster.workflow.shared.timecode import parse_range
 
 def _validate_patches(
     parsed: dict[str, Any],
-    slots: list[dict[str, Any]],
     pool: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     valid = {
-        slot["slot_id"]: {item["candidate_id"] for item in pool[slot["slot_id"]]}
-        for slot in slots
+        group_id: {
+            str(trajectory["trajectory_id"])
+            for trajectory in trajectories
+        }
+        for group_id, trajectories in pool.items()
     }
     patches = parsed["patches"]
     if not isinstance(patches, list):
         raise ValueError("patches must be an array")
     normalized: list[dict[str, Any]] = []
-    patched_slots: set[str] = set()
+    patched_groups: set[str] = set()
     for patch in patches:
         operation = str(patch["operation"]).lower()
-        slot_id = str(patch["slot_id"])
+        group_id = str(patch["group_id"])
         if operation == "keep":
             continue
-        if operation != "replace" or slot_id not in valid:
+        if operation != "replace" or group_id not in valid:
             raise ValueError(f"Unsupported patch: {patch}")
-        candidate_id = str(patch["candidate_id"])
-        if candidate_id not in valid[slot_id]:
-            raise ValueError(f"Invalid candidate for {slot_id}: {candidate_id}")
-        if slot_id in patched_slots:
-            raise ValueError(f"Multiple replacements returned for {slot_id}")
-        patched_slots.add(slot_id)
+        trajectory_id = str(patch["trajectory_id"])
+        if trajectory_id not in valid[group_id]:
+            raise ValueError(
+                f"Invalid trajectory for {group_id}: {trajectory_id}"
+            )
+        if group_id in patched_groups:
+            raise ValueError(f"Multiple replacements returned for {group_id}")
+        patched_groups.add(group_id)
         normalized.append(
             {
                 "operation": "replace",
-                "slot_id": slot_id,
-                "candidate_id": candidate_id,
+                "group_id": group_id,
+                "trajectory_id": trajectory_id,
                 "reason": str(patch["reason"]),
             }
         )
@@ -90,29 +94,60 @@ def review_and_patch(
     patches = context.call_prompt(
         package=package,
         config=config,
-        validate_business=lambda parsed: _validate_patches(parsed, slots, pool),
+        validate_business=lambda parsed: _validate_patches(parsed, pool),
     )
     original_by_slot = {item["slot_id"]: item for item in script}
+    slots_by_group: dict[str, list[dict[str, Any]]] = {}
+    for slot in slots:
+        slots_by_group.setdefault(str(slot["group_id"]), []).append(slot)
+    trajectories = {
+        str(trajectory["trajectory_id"]): trajectory
+        for values in pool.values()
+        for trajectory in values
+    }
     candidates = {
         candidate["candidate_id"]: candidate
         for values in pool.values()
-        for candidate in values
+        for trajectory in values
+        for candidate in trajectory["items"]
     }
-    replacements: dict[str, dict[str, Any]] = {}
+    candidates.update(
+        {
+            str(slot["fixed_candidate"]["candidate_id"]): slot["fixed_candidate"]
+            for slot in slots
+            if slot.get("fixed_candidate") is not None
+        }
+    )
+    replacements: dict[str, dict[str, dict[str, Any]]] = {}
     for patch in patches:
-        slot_id = patch["slot_id"]
-        slot = next(value for value in slots if value["slot_id"] == slot_id)
-        replacement = path_to_script([slot], [candidates[patch["candidate_id"]]], Path(script[0]["video_name"]))[0]
-        replacement["_id"] = original_by_slot[slot_id]["_id"]
-        replacement["video_name"] = original_by_slot[slot_id]["video_name"]
-        replacement["narration"] = original_by_slot[slot_id]["narration"]
-        replacements[slot_id] = replacement
+        group_id = patch["group_id"]
+        trajectory = trajectories[patch["trajectory_id"]]
+        group_slots = slots_by_group[group_id]
+        trajectory_items = []
+        for raw in trajectory["items"]:
+            candidate = dict(raw)
+            candidate["group_id"] = group_id
+            candidate["trajectory_id"] = trajectory["trajectory_id"]
+            trajectory_items.append(candidate)
+        replacement_items = path_to_script(
+            group_slots,
+            trajectory_items,
+            Path(script[0]["video_name"]),
+        )
+        replacements[group_id] = {}
+        for replacement in replacement_items:
+            slot_id = str(replacement["slot_id"])
+            original = original_by_slot[slot_id]
+            replacement["_id"] = original["_id"]
+            replacement["video_name"] = original["video_name"]
+            replacement["narration"] = original["narration"]
+            replacements[group_id][slot_id] = replacement
 
     def apply_subset(subset: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
-        chosen = {patch["slot_id"] for patch in subset}
+        chosen = {patch["group_id"] for patch in subset}
         return [
-            replacements[slot["slot_id"]]
-            if slot["slot_id"] in chosen
+            replacements[str(slot["group_id"])][str(slot["slot_id"])]
+            if str(slot["group_id"]) in chosen
             else original_by_slot[slot["slot_id"]]
             for slot in slots
         ]
@@ -146,18 +181,18 @@ def review_and_patch(
             )
             accepted = list(subset)
             break
-    accepted_slots = {patch["slot_id"] for patch in accepted}
+    accepted_groups = {patch["group_id"] for patch in accepted}
     rejected_patches: list[dict[str, Any]] = []
     for patch in patches:
-        if patch["slot_id"] in accepted_slots:
+        group_id = patch["group_id"]
+        if group_id in accepted_groups:
             continue
-        trial = list(patched)
-        slot_index = next(
-            index
-            for index, slot in enumerate(slots)
-            if slot["slot_id"] == patch["slot_id"]
-        )
-        trial[slot_index] = replacements[patch["slot_id"]]
+        trial = [
+            replacements[group_id][str(slot["slot_id"])]
+            if str(slot["group_id"]) == group_id
+            else item
+            for slot, item in zip(slots, patched, strict=True)
+        ]
         issue = _script_sequence_issue(trial)
         trial_score = (
             _score_candidate_path(
@@ -180,7 +215,7 @@ def review_and_patch(
                     )
                     else PromptFailureCode.PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET
                 ),
-                slot_id=patch["slot_id"],
+                group_id=group_id,
             )
         )
         rejected_patches.append(

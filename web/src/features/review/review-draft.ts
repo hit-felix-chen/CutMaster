@@ -3,14 +3,14 @@ import type { Location } from 'react-router-dom'
 export type RevisionDraft = Record<string, string>
 
 export interface RevisionReplacement {
-  slot_id: string
-  candidate_id: string
+  group_id: string
+  trajectory_id: string
 }
 
 export function revisionReplacements(draft: RevisionDraft): RevisionReplacement[] {
   return Object.entries(draft)
-    .map(([slot_id, candidate_id]) => ({ slot_id, candidate_id }))
-    .sort((left, right) => left.slot_id.localeCompare(right.slot_id))
+    .map(([group_id, trajectory_id]) => ({ group_id, trajectory_id }))
+    .sort((left, right) => left.group_id.localeCompare(right.group_id))
 }
 
 export function changesReviewContext(current: Location, next: Location): boolean {

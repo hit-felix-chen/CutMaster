@@ -25,11 +25,11 @@ CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 | 字母        | 智能体                          | 代码入口                                       | 剪辑职责                                                                     |
 | ----------- | ------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------- |
 | **M** | **Material Analyst**      | `workflow/analyser/material_analyst.py`      | 建立视频的 Shot、Segment、台词与故事摘要，以及完整音乐的可复用素材记忆       |
-| **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | 将 Music Memory 投影到目标时长，编排 Slot 长度、剪辑节奏、情绪曲线和叙事结构 |
-| **S** | **Story Editor**          | `workflow/planners/story_editor.py`          | 用关键原声锚定情节、人物弧光和提示词意图                                     |
-| **T** | **Timeline Scout**        | `workflow/planners/timeline_scout.py`        | 沿原片时间线检索并验证每个 Slot 的候选镜头                                   |
-| **E** | **Edit Composer**         | `workflow/planners/edit_composer.py`         | 综合单镜头质量与镜头衔接，用 Beam Search 组接最终序列                        |
-| **R** | **Revision Editor**       | `workflow/planners/revision_editor.py`       | 在候选池内审片、替换弱镜头并完成最终修订                                     |
+| **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | 编排 Slot，并把相邻 Slot 分组后绑定到同一个 Segment                           |
+| **S** | **Story Editor**          | `workflow/planners/story_editor.py`          | 用关键原声锚定故事，并把同组普通 Slot 切分到锚点前后的子 Segment               |
+| **T** | **Timeline Scout**        | `workflow/planners/timeline_scout.py`        | 为每个 Slot Group 检索、验证不可拆分的完整候选轨迹                            |
+| **E** | **Edit Composer**         | `workflow/planners/edit_composer.py`         | 以完整轨迹为单位，用 Beam Search 组接满足时序的最终序列                        |
+| **R** | **Revision Editor**       | `workflow/planners/revision_editor.py`       | 在候选池内审片，并以整组轨迹为单位替换弱选择                                  |
 
 其中：
 
@@ -81,9 +81,9 @@ flowchart LR
     RP --> RD["Renderer"]
     RD --> O["最终视频"]
 
-    T -. "候选不足 / 定向修复" .-> A
+    T -. "任一轮后整组 0 轨迹 / 定向修复" .-> A
     E -. "无可行时序路径 / 重新规划" .-> A
-    A -. "Slot 变化后刷新锚点" .-> S
+    A -. "Slot Group 变化后刷新锚点" .-> S
 ```
 
 完整调用关系：
@@ -136,31 +136,62 @@ Material Analyst 对视频使用 PySceneDetect 提取完整 Shot 边界并把 AS
 - 情绪、镜头尺度与运动倾向；
 - 与前后 Slot 的结构关系。
 
-Slot Arrangement 决定“成片需要什么”，而不是直接决定“使用哪个镜头”。
+相邻 Slot 可以绑定到同一个 Segment，并组成一个 Slot Group；只有同组 Slot 的
+Segment 编号相同，组与组之间的 Segment 编号严格递增。音乐对齐完成后，系统以毫秒
+检查同组 Slot 的总时长能否放入该 Segment；放不下就拒绝本次 Arrangement 返回，
+携带所需时长和可用时长重新规划。
+
+Slot Arrangement 决定“成片需要什么、每组使用哪个 Segment”，而不是直接决定
+“使用哪个镜头”。
 
 ### 3. 原声台词作为故事锚点
 
 Story Editor 从 Material Memory 中选择少量高价值原声台词，并将其固定到对应的源画面。锚点保证关键情节、人物关系和提示词意图不会被纯视觉蒙太奇稀释。
 
+如果锚点落在一个多 Slot 的组内，锚点 Slot 会退出普通检索；锚点固定画面前后
+连续的普通 Slot 分别形成子组，并绑定到锚点画面切出的子 Segment，例如
+`segment_0010_01`、`segment_0010_02`。每个子 Segment 也必须容纳其子组的总时长；
+放不下时会拒绝整次 Anchor 规划并重新选择，而不是删掉锚点继续。
+Story Editor 只会看到画面区间能够完整落在该 Slot 所属 Segment 内的台词组合。
+
 普通片段的原片声音保持静音；仅选中的 Dialogue Anchor 会经过人声准备后与 BGM 混合，并在台词区间自动压低背景音乐。
 
 ### 4. 候选空间与闭环修复
 
-Timeline Scout 为非锚点 Slot 沿原片时间线检索候选，并验证主体身份、内容相关性、可见性和运动强度。指定 Segment 检索耗尽后，它只扩展一次到前、中、后三个 Segment，超额检索候选缺口的三倍，再按统一单镜头分数选优补齐。候选备选之间允许重叠和小幅平移；只有完全重复的时间戳会被拒绝。候选不足时，它不会静默降级，而是把诊断返回 Arrangement Architect，触发定向 Slot 修复；如果 Slot 语义发生变化，Story Editor 会重新检查锚点。
+Timeline Scout 以 Slot Group 为最小单位检索。一次候选轨迹必须为组内每个 Slot
+提供一个片段，片段全部位于该组绑定的 Segment 或子 Segment 内，并按 Slot 顺序
+排列且互不重叠。任一片段没有通过时长、运动或 VLM 核验，整条轨迹都会被拒绝，
+不能把不同轨迹中的片段混在一起。
+
+每组最多检索 4 轮，依次为 1 轮初检、2 轮按失败信息修正、1 轮最终补充。
+`target_trajectories_per_group` 只是达到后提前停止的目标，不是成功门槛：任一轮结束后，
+如果某组仍为 0 条合法完整轨迹，会立即把该组诊断返回 Arrangement Architect 重新规划；
+已有至少 1 条但尚未达到目标数量的组才继续后续轮次。完成第 4 轮后，只要还有一条
+合法完整轨迹，就可以进入下一阶段。修复可以保留原 Segment
+并改正内容要求，也可以在顺序允许时更换 Segment。之后只对发生变化的完整组重新运行
+Story Editor 和 Timeline Scout；契约完全一致且仍合法的其他组会保留 Anchor 与候选，
+再进行一次全局校验。检索不会把单个 Slot 扩展到相邻 Segment。
 
 ### 5. 高效的全局序列选择
 
 Edit Composer 同时考虑：
 
-- 候选对当前 Slot 的单镜头适配度；
-- 相邻镜头的视觉连续性与转场质量；
+- 轨迹内各片段对对应 Slot 的适配度；
+- 轨迹内部以及相邻组之间的视觉连续性与转场质量；
 - 全片时间顺序等硬约束。
 
-序列搜索采用 Beam Search。转场 VLM 评分只对仍可能进入最优路径的边进行惰性计算，在保留全局组合空间的同时控制推理成本。默认评分由 `0.60 × unary + 0.40 × pairwise` 组成。
+序列搜索采用 Beam Search，并且每次选择的是一整条组轨迹。重叠、倒序或拆分轨迹
+的路径会直接淘汰；保留一个中间选择前，还会确认它能够接到后续组的至少一条合法
+路径，避免搜索走到末尾才发现无解。转场 VLM 评分只对仍可能进入最优路径的边进行
+惰性计算，在保留全局组合空间的同时控制推理成本。默认评分由
+`0.60 × unary + 0.40 × pairwise` 组成。
 
 ### 6. 候选约束下的最终修订
 
-Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeline Scout 临时生成未经验证的片段。Planners 随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划生成纯 BGM 或带原声版本。
+Revision Editor 在已有候选池内审片，并以 Slot Group 的完整轨迹为单位替换弱选择。
+多 Slot 轨迹不能拆开，也不能绕过 Timeline Scout 临时生成未经验证的片段。Planners
+随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划
+生成纯 BGM 或带原声版本。
 
 ## Case Study：《教父》的权力交接
 
@@ -174,11 +205,11 @@ Revision Editor 在已有候选池内审片和替换弱镜头，不绕过 Timeli
 
 <p align="center"><em>从提示词和 Material Memory 出发，ASTER 团队将《教父》的权力交接叙事编排、锚定、检索、组接并修订为一条 60 秒时间线。点击图片可查看完整尺寸。</em></p>
 
-- **Arrangement Architect** 将音乐结构映射为“权威建立—刺杀危机—迈克尔反击—失去与继承—权力巩固”五幕，并为每个 Slot 固定内容、素材范围、主体和时长约束。
-- **Story Editor** 用具有叙事转折价值的原声台词固定关键情节，并允许长台词通过 L-cut 跨越相邻画面 Slot。
-- **Timeline Scout** 为普通 Slot 验证多组候选；当人物身份、视觉相关性或主体可见性不合格时，拒绝候选并重新检索。
-- **Edit Composer** 联合单镜头得分和相邻镜头兼容度，在候选图上搜索全局最优的时序路径。
-- **Revision Editor** 在已验证候选池内复核弱镜头并执行替换，最终交付保持原片时间顺序、叙事完整且与音乐节奏对齐的成片。
+- **Arrangement Architect** 将音乐结构映射为“权威建立—刺杀危机—迈克尔反击—失去与继承—权力巩固”五幕，把相邻 Slot 分组并为每组固定 Segment、主体和时长约束。
+- **Story Editor** 用具有叙事转折价值的原声台词固定关键情节，并用锚点画面把同组普通 Slot 切分到前后的子 Segment；长台词仍可通过 L-cut 跨越相邻画面 Slot。
+- **Timeline Scout** 为每个普通 Slot Group 验证多条完整轨迹；当任一片段的人物身份、视觉相关性或主体可见性不合格时，拒绝整条轨迹并重新检索。
+- **Edit Composer** 联合片段得分、轨迹内部和组间镜头兼容度，在候选图上搜索可延伸到结尾的全局最优时序路径。
+- **Revision Editor** 在已验证候选池内以整组轨迹为单位执行替换，最终交付保持原片时间顺序、叙事完整且与音乐节奏对齐的成片。
 
 ## 快速开始
 
@@ -390,15 +421,20 @@ managed worker 共同使用的唯一非敏感配置文件；Settings 也会直�
 | --------------------------------------------- | ------------------------- | --------------------------------------------------------------- |
 | `[llm]`, `[vlm]`                          | Infrastructure / Workflow | 模型、接口、超时、重试、并发，以及输入/缓存输入/输出单价        |
 | `[analyser.*]`                              | Analyser                  | ASR、切镜、Scene/Shot 标注、完整音乐分析和 Material Memory 复用 |
-| `[planners.arrangement_architect]`          | Arrangement Architect     | 目标镜头长度与定向修复轮数                                      |
-| `[planners.dialogue_anchors]`               | Story Editor              | 锚点数量和最短时长                                              |
-| `[planners.candidate_retrieval]`            | Timeline Scout            | 候选数量、检索轮次和视觉验证                                    |
+| `[planners.aster_team]`                     | ASTER Team                | 完整规划流程的最大轮数                                          |
+| `[planners.arrangement_architect]`          | Arrangement Architect     | 目标镜头长度与模型请求上限                                      |
+| `[planners.dialogue_anchors]`               | Story Editor              | 锚点数量、最短时长与模型请求上限                                |
+| `[planners.candidate_retrieval]`            | Timeline Scout            | `target_trajectories_per_group`、`max_rounds` 和视觉验证         |
 | `[planners.beam_search]`                    | Edit Composer             | Beam Search 宽度                                                |
 | `[planners.script_review]`                  | Revision Editor           | 候选约束下的复核轮数                                            |
 | `[planners.source_window_optimization]`     | Plan Compiler             | 源区间切点搜索                                                  |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer                  | 画布、编码、人声分离和混音                                      |
 
 默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `600` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
+
+默认每个 Slot Group 的完整轨迹早停目标
+`target_trajectories_per_group = 3`，最大检索轮数 `max_rounds = 4`。早停目标没有达到
+不会让任务失败；任一轮结束后仍为 0 条合法完整轨迹，会立即触发整组重规划。
 
 模型单价统一使用“元/百万 token”。每次模型调用都会把当时的单价快照写入 usage artifact；因此修改配置只影响之后的新调用，不会用新价格重算历史费用。缓存命中输入、未缓存输入和输出分别计费，reasoning token 已包含在输出 token 中，不会重复计费。
 

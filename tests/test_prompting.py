@@ -17,7 +17,10 @@ from cutmaster.workflow.prompting.failure_catalog import (
     build_prompt_failure,
 )
 from cutmaster.workflow.prompting.planners import (
+    CandidateRetrievalDetails,
+    CandidateVisualScoringDetails,
     DialogueAnchorSelectionDetails,
+    ScriptReviewDetails,
     SlotArrangementDetails,
 )
 
@@ -60,6 +63,32 @@ def test_registry_exposes_every_model_task() -> None:
         (PromptStage.PLANNERS, PromptTask.PAIRWISE_SCORING),
         (PromptStage.PLANNERS, PromptTask.SCRIPT_REVIEW),
     }
+
+
+def test_candidate_visual_scoring_is_scoped_only_to_slot_requirements() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_VISUAL_SCORING,
+        CandidateVisualScoringDetails(
+            operation="Candidate visual validation",
+            candidates=[
+                {
+                    "candidate_id": "slot_01_candidate_01",
+                    "slot_id": "slot_01",
+                    "intended_visible_content": "The coach directs the defensive line.",
+                    "required_visible_subjects": ["Coach", "Defenders"],
+                    "source_segment_video_descriptions": [],
+                }
+            ],
+        ),
+    )
+
+    assert package.context_keys == ()
+    assert package.prompt_version == "2.1"
+    assert "maintained request" not in package.system_prompt.lower()
+    assert "global user request" in package.user_prompt
+    assert "do not infer or enforce" in package.user_prompt.lower()
+    assert "all subjects in required_visible_subjects" in package.user_prompt
 
 
 def test_prompt_embeds_contract_and_template_derived_from_same_schema() -> None:
@@ -136,11 +165,16 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
     assert "Source quality, request relevance, and narrative value always take priority" in (
         package.user_prompt
     )
-    assert "distribute source_segment_ids as evenly as practical" in package.user_prompt
+    slot_item_schema = slots_schema["items"]
+    assert "source_segment_id" in slot_item_schema["required"]
+    assert "source_segment_ids" not in slot_item_schema["properties"]
+    assert "Adjacent Slots may share one Segment" in package.user_prompt
+    assert "their total desired duration must fit inside that Segment" in package.user_prompt
+    assert "monotonically non-decreasing" in package.user_prompt
+    assert "Slot Group Segment\nidentifiers are strictly increasing" in package.user_prompt
+    assert "distribute source_segment_id values as evenly as practical" in package.user_prompt
     assert "reserve sufficient chronological Segment space" in package.user_prompt
-    assert "source Segment must be longer" in package.user_prompt
-    assert "alternative candidates may overlap" in package.user_prompt
-    assert package.prompt_version == "3.4"
+    assert package.prompt_version == "4.0"
     assert package.context_keys == (
         "request",
         "music_profile",
@@ -153,13 +187,15 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     constraints = {
         "slot_02": {
             "desired_duration_sec": 3.0,
-            "planned_duration_sec": 3.2,
+            "planned_duration_ms": 3200,
             "allowed_segment_ids": ["segment_0001", "segment_0002"],
+            "original_group_id": "group_001",
         },
         "slot_04": {
             "desired_duration_sec": 4.0,
-            "planned_duration_sec": 3.8,
+            "planned_duration_ms": 3800,
             "allowed_segment_ids": ["segment_0003", "segment_0004"],
+            "original_group_id": "group_002",
         },
     }
     package = prompt_registry.build(
@@ -199,25 +235,40 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     } == {"slot_02", "slot_04"}
     planned_durations = {
         schema["properties"]["slot_id"]["const"]: schema["properties"][
-            "planned_duration_sec"
+            "planned_duration_ms"
         ]["const"]
         for schema in slots_schema["items"]["oneOf"]
     }
-    assert planned_durations == {"slot_02": 3.2, "slot_04": 3.8}
+    assert planned_durations == {"slot_02": 3200, "slot_04": 3800}
     assert all(
-        "planned_duration_sec" in schema["required"]
+        "planned_duration_ms" in schema["required"]
+        for schema in slots_schema["items"]["oneOf"]
+    )
+    assert all(
+        "source_segment_id" in schema["required"]
+        and "source_segment_ids" not in schema["properties"]
         for schema in slots_schema["items"]["oneOf"]
     )
     assert "single response" in package.user_prompt
-    assert "authoritative visual clip duration" in package.user_prompt
+    assert "planned_duration_ms values are authoritative" in package.user_prompt
+    assert "complete adjacent groups" in package.user_prompt
+    assert "Every member of that\ngroup must choose the same source_segment_id" in (
+        package.user_prompt
+    )
+    assert "combined duration must not exceed the Segment's complete source duration" in (
+        package.user_prompt
+    )
+    assert "capacity check is for the whole resulting group" in package.user_prompt
     assert "Source quality and relevance to the maintained request always take priority" in (
         package.user_prompt
     )
-    assert "distribute source_segment_ids as\nevenly as practical" in package.user_prompt
-    assert "do not push a replacement toward an\ninterval boundary" in package.user_prompt
-    assert package.prompt_version == "3.4"
+    assert "runs Story Editor again" in package.user_prompt
+    assert "distribute source_segment_id" not in package.user_prompt
+    assert "one complete planned clip" not in package.user_prompt
+    assert package.prompt_version == "4.1"
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
+    assert "planners_feedback" not in package.context_keys
 
 
 def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
@@ -228,8 +279,10 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
             slots=[
                 {
                     "slot_id": "slot_01",
+                    "group_id": "group_001",
+                    "planned_duration_ms": 4000,
                     "planned_duration_sec": 4.0,
-                    "source_segment_ids": ["segment_0001"],
+                    "source_segment_id": "segment_0001",
                 }
             ],
             video_summary={
@@ -280,10 +333,24 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
             dialogue_constraints_by_slot={
                 "slot_01": {
                     "allowed_segment_ids": ["segment_0001"],
+                    "allowed_last_dialogue_ids_by_segment_and_first": {
+                        "segment_0001": {"7": ["8"]}
+                    },
+                    "output_audio_end_sec_by_segment_and_first_and_last": {
+                        "segment_0001": {"7": {"8": 1.4}}
+                    },
                     "min_audio_duration_sec": 1.0,
                     "max_audio_duration_sec": 60.0,
                     "planned_picture_duration_sec": 4.0,
                     "output_audio_start_sec": 0.0,
+                    "has_same_segment_sibling_slots": True,
+                    "preferred_anchor_picture_range": {
+                        "source_segment_id": "segment_0001",
+                        "start_sec": 10.0,
+                        "end_sec": 20.0,
+                        "left_slot_count": 0,
+                        "right_slot_count": 0,
+                    },
                 }
             },
             max_anchors=3,
@@ -291,9 +358,15 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
         ),
     )
     schema = package.response_contract.schema
-    anchor = schema["properties"]["anchors"]["items"]["oneOf"][0]
+    anchors = schema["properties"]["anchors"]
+    anchor = anchors["items"]["oneOf"][0]
 
-    assert package.response_contract.version == "4.0"
+    assert package.response_contract.version == "4.3"
+    assert anchors["minItems"] == 1
+    with pytest.raises(ValueError, match="should be non-empty"):
+        package.response_contract.validate_structure({"anchors": []})
+    assert "Return at least one strong Anchor" in package.user_prompt
+    assert package.prompt_version == "4.7"
     assert anchor["required"] == [
         "slot_id",
         "source_segment_id",
@@ -308,20 +381,179 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     assert anchor["properties"]["source_segment_id"]["enum"] == [
         "segment_0001"
     ]
-    assert anchor["properties"]["first_dialogue_id"]["enum"] == ["7", "8"]
-    assert anchor["properties"]["last_dialogue_id"]["enum"] == ["7", "8"]
+    assert anchor["properties"]["first_dialogue_id"]["enum"] == ["7"]
+    assert anchor["properties"]["last_dialogue_id"]["enum"] == ["8"]
+    assert "allOf" not in anchor
     assert "<source_shots>" not in package.user_prompt
     assert "inclusive endpoints" in package.user_prompt
+    assert "allowed_last_dialogue_ids_by_segment_and_first" not in package.user_prompt
+    assert "output_audio_end_sec_by_segment_and_first_and_last" in package.user_prompt
+    assert "allowed_passages" not in package.user_prompt
+    assert '"8": 1.4' in package.user_prompt
     assert "validates continuity" in package.user_prompt
     assert "same L-cut layout" in package.user_prompt
+    assert "preferred_anchor_picture_range" in package.user_prompt
+    assert "soft guidance, not a hard constraint" in package.user_prompt
+    assert "anchor_picture_edge_imbalance_ms_by_segment_and_first" not in (
+        package.user_prompt
+    )
     assert "audio_cut_style" not in anchor["properties"]
     assert "<video_summary>" in package.user_prompt
     assert "<dialogue_constraints_by_slot>" in package.user_prompt
+    assert "<preserved_anchors>" in package.user_prompt
     assert "<valid_dialogue_ranges_by_slot>" not in package.user_prompt
     assert "Mia presses Sebastian for the truth." in package.user_prompt
     assert "<full_dialogue_context>" not in package.user_prompt
     assert "music_profile" not in package.context_keys
+    assert "planners_feedback" in package.context_keys
     assert "lip" not in package.user_prompt.lower()
+
+
+def test_dialogue_anchor_contract_stays_compact_for_many_endpoint_pairs() -> None:
+    first_ids = [f"first_{index:03d}" for index in range(100)]
+    last_ids = [f"last_{index:03d}" for index in range(30)]
+    dialogue_ids = [*first_ids, *last_ids]
+    allowed_last_ids = {
+        first_dialogue_id: list(last_ids)
+        for first_dialogue_id in first_ids
+    }
+    output_end_by_endpoint = {
+        first_dialogue_id: {
+            last_dialogue_id: round(2.0 + index * 0.01, 6)
+            for index, last_dialogue_id in enumerate(last_ids)
+        }
+        for first_dialogue_id in first_ids
+    }
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.DIALOGUE_ANCHOR_SELECTION,
+        DialogueAnchorSelectionDetails(
+            slots=[{"slot_id": "slot_01"}],
+            video_summary={"story": "A compact contract test."},
+            source_segments=[
+                {
+                    "segment_id": "segment_0001",
+                    "dialogue_items": [
+                        {
+                            "dialogue_id": dialogue_id,
+                            "speaker": "Speaker",
+                            "text": dialogue_id,
+                        }
+                        for dialogue_id in dialogue_ids
+                    ],
+                }
+            ],
+            dialogue_constraints_by_slot={
+                "slot_01": {
+                    "allowed_segment_ids": ["segment_0001"],
+                    "allowed_last_dialogue_ids_by_segment_and_first": {
+                        "segment_0001": allowed_last_ids
+                    },
+                    "output_audio_end_sec_by_segment_and_first_and_last": {
+                        "segment_0001": output_end_by_endpoint
+                    },
+                    "output_audio_start_sec": 0.0,
+                }
+            },
+            max_anchors=1,
+            min_anchor_duration_sec=1.0,
+        ),
+    )
+
+    anchor_schema = package.response_contract.schema["properties"]["anchors"][
+        "items"
+    ]["oneOf"][0]
+    assert "allOf" not in anchor_schema
+    assert len(anchor_schema["properties"]["first_dialogue_id"]["enum"]) == len(
+        first_ids
+    )
+    assert len(anchor_schema["properties"]["last_dialogue_id"]["enum"]) == len(
+        last_ids
+    )
+    assert len(package.user_prompt) < 200_000
+    assert len(json.dumps(package.response_contract.schema)) < 30_000
+
+
+def test_candidate_retrieval_contract_returns_indivisible_group_trajectories() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_RETRIEVAL,
+        CandidateRetrievalDetails(
+            operation="Candidate retrieval round 1 group_001",
+            round_index=1,
+            round_phase="initial",
+            trajectories_per_group=2,
+            group={
+                "group_id": "group_001",
+                "planning_segment_id": "segment_0001_01",
+                "slot_ids": ["slot_01", "slot_02"],
+            },
+            slots=[
+                {"slot_id": "slot_01", "planned_duration_ms": 2000},
+                {"slot_id": "slot_02", "planned_duration_ms": 3000},
+            ],
+            confirmed_trajectories=[],
+            excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
+            rejected_trajectory_signatures=[],
+            rejection_feedback=[],
+            planning_segment={
+                "planning_segment_id": "segment_0001_01",
+                "start_ms": 10000,
+                "end_ms": 20000,
+            },
+        ),
+    )
+    trajectories = package.response_contract.schema["properties"]["trajectories"]
+    items = trajectories["items"]["properties"]["items"]
+
+    assert package.response_contract.version == "2.0"
+    assert package.prompt_version == "3.1"
+    assert trajectories["minItems"] == 2
+    assert trajectories["maxItems"] == 2
+    assert items["minItems"] == 2
+    assert items["maxItems"] == 2
+    assert {
+        schema["properties"]["slot_id"]["const"]
+        for schema in items["items"]["oneOf"]
+    } == {"slot_01", "slot_02"}
+    assert "one indivisible choice" in package.user_prompt
+    assert "exactly one item for every supplied Slot" in package.user_prompt
+    assert "one supplied Planning Segment" in package.user_prompt
+    assert "internally ordered and non-overlapping" in package.user_prompt
+    assert "planned_duration_ms to millisecond precision" in package.user_prompt
+    assert "initial phase" in package.user_prompt
+    assert "<rejection_feedback>" in package.user_prompt
+
+
+def test_script_review_contract_replaces_whole_group_trajectory() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.SCRIPT_REVIEW,
+        ScriptReviewDetails(
+            slots=[
+                {"slot_id": "slot_01", "group_id": "group_001"},
+                {"slot_id": "slot_02", "group_id": "group_001"},
+            ],
+            candidate_pool={
+                "group_001": [
+                    {"trajectory_id": "trajectory_001"},
+                    {"trajectory_id": "trajectory_002"},
+                ]
+            },
+        ),
+    )
+    patch = package.response_contract.schema["properties"]["patches"]["items"][
+        "oneOf"
+    ][0]
+
+    assert patch["properties"]["group_id"]["const"] == "group_001"
+    assert patch["properties"]["trajectory_id"]["enum"] == [
+        "trajectory_001",
+        "trajectory_002",
+    ]
+    assert "one complete trajectory" in package.user_prompt
+    assert "Never replace one Slot" in package.user_prompt
+    assert package.prompt_version == "2.0"
 
 
 def test_video_summary_contract_is_grounded_in_known_segments() -> None:
@@ -354,14 +586,14 @@ def test_registry_rebuilds_prompt_with_accumulated_failure_reasons() -> None:
 
     retried = package.retry_builder(
         (
-            "Candidate is shorter than planned_duration_sec",
+            "Candidate duration differs from planned_duration_ms",
             "Duplicate candidate range for slot_01",
         )
     )
 
     assert '"attempt": 1' in retried.user_prompt
     assert '"attempt": 2' in retried.user_prompt
-    assert "Candidate is shorter than planned_duration_sec" in retried.user_prompt
+    assert "Candidate duration differs from planned_duration_ms" in retried.user_prompt
     assert "Duplicate candidate range for slot_01" in retried.user_prompt
     assert retried.user_prompt.count('"reason_code": "response_validation_failed"') == 2
     assert retried.user_prompt.count('"diagnosis":') >= 2
@@ -376,6 +608,30 @@ def test_prompt_failure_catalog_covers_every_reason_code() -> None:
         item.repair_requirement.strip()
         for item in PROMPT_FAILURE_CATALOG.values()
     )
+
+
+def test_group_retrieval_failures_use_trajectory_contract() -> None:
+    rejected = build_prompt_failure(
+        PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+        group_id="group_001",
+        candidate_rejections=[],
+    )
+    exhausted = build_prompt_failure(
+        PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
+        shortages={"group_001": 0},
+    )
+    patch = build_prompt_failure(
+        PromptFailureCode.PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH,
+        group_id="group_001",
+    )
+
+    assert "complete trajectory" in rejected["diagnosis"]
+    assert "source_segment_id" in rejected["repair_requirement"]
+    assert "source_segment_ids" not in rejected["repair_requirement"]
+    assert "no valid complete trajectory" in exhausted["diagnosis"]
+    assert "early-stop target" in exhausted["repair_requirement"]
+    assert "group_001" in patch["diagnosis"]
+    assert "whole trajectory" in patch["repair_requirement"]
 
 
 def test_prompt_failure_requires_template_details() -> None:

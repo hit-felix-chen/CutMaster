@@ -48,13 +48,18 @@ shot_sample_frames = 5
 max_images_per_request = 200
 max_shots_per_request = 16
 
+[planners.aster_team]
+max_rounds = 3
+max_local_replans_per_round = 2
+
 [planners.arrangement_architect]
 target_clip_duration_sec = 4.5
-replan_max_rounds = 2
+max_model_requests = 3
 
 [planners.dialogue_anchors]
 max_anchors = 3
 min_anchor_duration_sec = 2.0
+max_model_requests = 3
 
 [renderer.dialogue_audio]
 enable_vocal_separation = false
@@ -66,8 +71,8 @@ separator_padding_sec = 0.75
 separated_loudness_lufs = -18.0
 
 [planners.candidate_retrieval]
-candidates_per_slot = 3
-retrieval_max_rounds = 2
+target_trajectories_per_group = 3
+max_rounds = 2
 visual_sample_frames = 4
 protagonist_visibility_likert_threshold = 4
 motion_sample_fps = 3.0
@@ -117,8 +122,14 @@ threads = 2
     assert config.analyser.shot_annotation.shot_sample_frames == 5
     assert config.analyser.shot_annotation.max_images_per_request == 200
     assert config.analyser.shot_annotation.max_shots_per_request == 16
+    assert config.planners.aster_team.max_rounds == 3
+    assert config.planners.aster_team.max_local_replans_per_round == 2
     assert config.planners.arrangement_architect.target_clip_duration_sec == 4.5
-    assert config.planners.arrangement_architect.replan_max_rounds == 2
+    assert config.planners.arrangement_architect.max_model_requests == 3
+    assert (
+        config.planners.candidate_retrieval.target_trajectories_per_group == 3
+    )
+    assert config.planners.candidate_retrieval.max_rounds == 2
     assert (
         config.planners.candidate_retrieval.protagonist_visibility_likert_threshold
         == 4
@@ -129,6 +140,7 @@ threads = 2
     )
     assert config.planners.dialogue_anchors.max_anchors == 3
     assert config.planners.dialogue_anchors.min_anchor_duration_sec == 2.0
+    assert config.planners.dialogue_anchors.max_model_requests == 3
     assert config.renderer.dialogue_audio.enable_vocal_separation is False
     assert config.renderer.dialogue_audio.separator_device == "cpu"
     assert config.renderer.dialogue_audio.separator_segment_sec == 6
@@ -284,6 +296,36 @@ protagonist_visibility_likert_threshold = 3.5
     )
 
     with pytest.raises(ValueError, match="must be an integer from 1 to 5"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("legacy_key", ["candidates_per_slot", "retrieval_max_rounds"])
+def test_legacy_candidate_retrieval_keys_are_rejected(
+    tmp_path,
+    legacy_key: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"""
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.asr]
+api_key = "secret"
+
+[planners.candidate_retrieval]
+{legacy_key} = 3
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=rf"Unknown keys.*{legacy_key}"):
         load_config(path)
 
 

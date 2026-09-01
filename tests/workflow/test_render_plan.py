@@ -62,3 +62,57 @@ def test_render_plan_rejects_renderer_transient_audio_path() -> None:
             ],
             planners_metadata={},
         )
+
+
+def test_render_plan_rejects_partial_trajectory_identity() -> None:
+    with pytest.raises(ValueError, match="complete trajectory identity"):
+        RenderPlan.create(
+            **_identity(),
+            fps=30,
+            clips=[
+                {
+                    "timestamp": "00:00:00,000-00:00:01,000",
+                    "output_frame_range": [0, 30],
+                    "group_id": "group_001",
+                }
+            ],
+            planners_metadata={},
+        )
+
+
+def test_render_plan_rejects_mixed_or_overlapping_group_trajectory() -> None:
+    clips = [
+        {
+            "timestamp": "00:00:10,000-00:00:12,000",
+            "output_frame_range": [0, 60],
+            "slot_id": "slot_01",
+            "group_id": "group_001",
+            "trajectory_id": "trajectory_01",
+            "candidate_id": "candidate_01",
+        },
+        {
+            "timestamp": "00:00:11,000-00:00:13,000",
+            "output_frame_range": [60, 120],
+            "slot_id": "slot_02",
+            "group_id": "group_001",
+            "trajectory_id": "trajectory_02",
+            "candidate_id": "candidate_02",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="mixes trajectories"):
+        RenderPlan.create(
+            **_identity(),
+            fps=30,
+            clips=clips,
+            planners_metadata={},
+        )
+
+    clips[1]["trajectory_id"] = "trajectory_01"
+    with pytest.raises(ValueError, match="source overlap"):
+        RenderPlan.create(
+            **_identity(),
+            fps=30,
+            clips=clips,
+            planners_metadata={},
+        )

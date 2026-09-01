@@ -229,6 +229,68 @@ def test_parallel_optimization_preserves_script_order(
     assert all(item["cut_optimization"]["max_beat_distance_sec"] == 0.0 for item in optimized)
 
 
+def test_trajectory_optimization_preserves_the_verified_windows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    items = [
+        {
+            "slot_id": "slot_01",
+            "group_id": "group_001",
+            "trajectory_id": "group_001_trajectory_01",
+            "candidate_id": "candidate_01",
+            "timestamp": "00:00:10,000-00:00:12,000",
+            "output_frame_range": [0, 60],
+        },
+        {
+            "slot_id": "slot_02",
+            "group_id": "group_001",
+            "trajectory_id": "group_001_trajectory_01",
+            "candidate_id": "candidate_02",
+            "timestamp": "00:00:12,000-00:00:14,000",
+            "output_frame_range": [60, 120],
+        },
+    ]
+
+    def fail_detection(*_args, **_kwargs):
+        raise AssertionError("trajectory-locked clips must not inspect source cuts")
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        fail_detection,
+    )
+
+    optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
+        tmp_path / "segments",
+        items,
+        beat_times=[1.0, 2.0, 3.0],
+        video_description={},
+        output_fps=30,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert [item["timestamp"] for item in optimized] == [
+        "00:00:10,000-00:00:12,000",
+        "00:00:12,000-00:00:14,000",
+    ]
+    assert [item["candidate_id"] for item in optimized] == [
+        "candidate_01",
+        "candidate_02",
+    ]
+    assert all(
+        item["cut_optimization"] == {
+            "mode": "trajectory_locked",
+            "source_shift_sec": 0.0,
+            "num_internal_cuts": 0,
+            "fallback_level": 0,
+            "max_beat_distance_sec": 0.0,
+        }
+        for item in optimized
+    )
+
+
 def test_cutless_used_segment_preserves_source_window(
     monkeypatch,
     tmp_path,

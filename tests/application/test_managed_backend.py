@@ -405,10 +405,10 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
     assert projects.list() == (first,)
     with pytest.raises(IdempotencyConflict):
         projects.create(CreateProjectCommand(create_id, "Different"))
-    assert store.schema_version == 5
+    assert store.schema_version == 6
     assert store.integrity_check() == "ok"
     with sqlite3.connect(store.database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         connection.execute("PRAGMA foreign_keys = ON")
         with pytest.raises(sqlite3.IntegrityError):
@@ -537,7 +537,7 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
 
     store = SQLiteApplicationStore(data_root)
 
-    assert store.schema_version == 5
+    assert store.schema_version == 6
     with sqlite3.connect(database_path) as connection:
         columns = {
             row[1]: row for row in connection.execute("PRAGMA table_info(attempts)")
@@ -637,6 +637,10 @@ def test_run_snapshots_adapter_planning_options_separately_from_configuration(
         "prompt_type": "narrative",
         "video_title": "Feature",
         "max_clip_duration_sec": 7.0,
+    }
+    assert submission.run.configuration["planners"]["aster_team"] == {
+        "max_rounds": 3,
+        "max_local_replans_per_round": 2,
     }
     assert "managed_request" not in submission.run.configuration["planners"]
 

@@ -166,6 +166,8 @@ class PlannersResult:
     render_plan_path: Path
     music_profile_path: Path
     edit_plan_path: Path
+    planning_segments_path: Path
+    planning_groups_path: Path
     dialogue_anchors_path: Path
     candidate_pool_path: Path
     raw_script_path: Path
@@ -197,6 +199,8 @@ class PlannersResult:
             "plan_id": self.render_plan.plan_id,
             "music_profile": str(self.music_profile_path),
             "edit_plan": str(self.edit_plan_path),
+            "planning_segments": str(self.planning_segments_path),
+            "planning_groups": str(self.planning_groups_path),
             "dialogue_anchors": str(self.dialogue_anchors_path),
             "candidate_pool": str(self.candidate_pool_path),
             "raw_script": str(self.raw_script_path),
@@ -250,6 +254,8 @@ class PlannersResult:
             render_plan_path=render_plan_path,
             music_profile_path=Path(value["music_profile"]),
             edit_plan_path=Path(value["edit_plan"]),
+            planning_segments_path=Path(value["planning_segments"]),
+            planning_groups_path=Path(value["planning_groups"]),
             dialogue_anchors_path=Path(value["dialogue_anchors"]),
             candidate_pool_path=Path(value["candidate_pool"]),
             raw_script_path=Path(value["raw_script"]),

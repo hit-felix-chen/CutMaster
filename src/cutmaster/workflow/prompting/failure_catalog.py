@@ -124,9 +124,10 @@ PROMPT_FAILURE_CATALOG: dict[
             "{error_message}"
         ),
         repair_requirement=(
-            "Use the attached per-Slot diagnostics to change the failing source "
-            "assignments or candidate choices, while preserving fixed Slots and all "
-            "chronology, duration, visual-grounding, and capacity constraints."
+            "Use the attached Slot Group diagnostics to change the failing group's "
+            "source assignment or complete trajectory choices, while preserving fixed "
+            "Anchors and all chronology, duration, visual-grounding, and capacity "
+            "constraints."
         ),
     ),
     PromptFailureCode.RESPONSE_VALIDATION_FAILED: PromptFailureDefinition(
@@ -141,26 +142,26 @@ PROMPT_FAILURE_CATALOG: dict[
     ),
     PromptFailureCode.CANDIDATE_RETRIEVAL_FAILED: PromptFailureDefinition(
         diagnosis=(
-            "Candidate retrieval for {slot_id} failed before a valid candidate set "
-            "could be accepted: {error_message}"
+            "Trajectory retrieval for the failed Slot Group ended before one "
+            "complete trajectory could be accepted: {error_message}"
         ),
         repair_requirement=(
-            "Return the required number of valid, fixed-duration candidate timestamps "
-            "inside the supplied source Segments. Candidate alternatives may overlap "
-            "but must not duplicate an excluded timestamp exactly."
+            "Return a complete trajectory with exactly one fixed-duration item for "
+            "every group Slot, in Slot order and without internal overlap, wholly "
+            "inside the assigned Planning Segment."
         ),
     ),
     PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT: (
         PromptFailureDefinition(
             diagnosis=(
-                "The longest available source Segment for {slot_id} is "
-                "{longest_segment_duration_sec} seconds, which is not longer than the "
-                "planned clip duration of {planned_duration_sec} seconds."
+                "The source Segment assigned to the failed Slot Group has only "
+                "{longest_segment_duration_sec} seconds, below the group's required "
+                "planned duration of {planned_duration_sec} seconds."
             ),
             repair_requirement=(
-                "Assign a different source Segment whose duration is longer than "
-                "{planned_duration_sec} seconds. Only one complete clip must fit; "
-                "overlapping alternative candidate windows are allowed."
+                "Reassign the whole Slot Group to one source Segment where all member "
+                "Slots can fit in order without overlap. Preserve every Slot's output "
+                "duration."
             ),
         )
     ),
@@ -203,27 +204,29 @@ PROMPT_FAILURE_CATALOG: dict[
     PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS: (
         PromptFailureDefinition(
             diagnosis=(
-                "Every retrieved candidate for {slot_id} was rejected by deterministic "
-                "motion checks or visual grounding. Candidate-level diagnostics are "
-                "included in candidate_rejections."
+                "Every complete trajectory for the failed Slot Group was rejected "
+                "because at least one item failed deterministic motion checks or "
+                "visual grounding. Item diagnostics are included in "
+                "candidate_rejections."
             ),
             repair_requirement=(
-                "Redesign the Slot's visible event, required_visible_subjects, and "
-                "source_segment_ids. Move to different source evidence instead of "
-                "paraphrasing the same unsupported request."
+                "Redesign the whole Slot Group's visible events, required subjects, and "
+                "source_segment_id. Move the group to different source evidence instead "
+                "of paraphrasing the same unsupported request."
             ),
         )
     ),
     PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES: (
         PromptFailureDefinition(
             diagnosis=(
-                "Candidate retrieval ended with fewer visually grounded candidates "
-                "than required. The per-Slot deficits are {shortages}."
+                "A completed trajectory-retrieval round left these Slot Groups with no "
+                "valid complete trajectory: {shortages}."
             ),
             repair_requirement=(
-                "Redesign every deficient Slot with different source evidence and at "
-                "least one Segment longer than the planned clip, then retrieve and "
-                "visually validate the missing candidates."
+                "Reassign each failed Slot Group as a whole, rerun Story Editor for the "
+                "new Anchor split, then retrieve complete trajectories again. A group "
+                "with at least one valid trajectory may proceed even if it did not reach "
+                "the configured early-stop target."
             ),
         )
     ),
@@ -240,24 +243,26 @@ PROMPT_FAILURE_CATALOG: dict[
     PromptFailureCode.PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH: (
         PromptFailureDefinition(
             diagnosis=(
-                "The proposed replacement for {slot_id} lowers the weighted full-path "
-                "score or requires a hard-cut pair that has not been visually scored."
+                "The proposed trajectory replacement for {group_id} lowers the weighted "
+                "full-path score or requires a hard-cut pair that has not been visually "
+                "scored."
             ),
             repair_requirement=(
-                "Keep the current candidate or choose a replacement whose complete "
-                "adjacent hard-cut path is scored and does not reduce the baseline."
+                "Keep the current group trajectory or choose another whole trajectory "
+                "whose complete hard-cut path is scored and does not reduce the baseline."
             ),
         )
     ),
     PromptFailureCode.PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET: (
         PromptFailureDefinition(
             diagnosis=(
-                "The proposed replacement for {slot_id} is individually plausible but "
-                "cannot coexist with the higher-scoring maximal feasible patch subset."
+                "The proposed trajectory replacement for {group_id} is plausible by "
+                "itself but cannot coexist with the higher-scoring maximal feasible "
+                "patch subset."
             ),
             repair_requirement=(
-                "Keep the accepted subset and omit this replacement unless a jointly "
-                "feasible, non-overlapping, non-degrading alternative is available."
+                "Keep the accepted group replacements and omit this one unless another "
+                "whole trajectory is jointly feasible, non-overlapping, and non-degrading."
             ),
         )
     ),

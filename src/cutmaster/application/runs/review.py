@@ -17,7 +17,8 @@ from cutmaster.workflow.contracts.render_plan import RenderPlan
 from cutmaster.workflow.shared.timecode import parse_range
 
 
-REVIEW_BUNDLE_SCHEMA_VERSION = "1.0"
+REVIEW_BUNDLE_SCHEMA_VERSION = "3.0"
+_LEGACY_REVIEW_BUNDLE_SCHEMA_VERSION = "2.0"
 REVIEW_BUNDLE_FILENAME = "review_bundle.json"
 
 
@@ -83,18 +84,25 @@ def load_review_bundle(plan_path: Path) -> dict[str, Any]:
             "Frozen Edit Candidate Bundle is unavailable"
         )
     manifest = _read_json_object(manifest_path, "Review bundle manifest")
-    if manifest.get("schema_version") != REVIEW_BUNDLE_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {
+        REVIEW_BUNDLE_SCHEMA_VERSION,
+        _LEGACY_REVIEW_BUNDLE_SCHEMA_VERSION,
+    }:
         raise ReviewArtifactUnavailableError("Unsupported Review bundle schema")
     raw_artifacts = manifest.get("artifacts")
     if not isinstance(raw_artifacts, Mapping):
         raise ReviewArtifactUnavailableError("Review bundle has no artifact map")
     loaded: dict[str, Any] = {}
-    for logical_name in (
+    logical_names = [
         "candidate_pool",
         "edit_plan",
         "music_profile",
         "selection_diagnostics",
-    ):
+    ]
+    if schema_version == REVIEW_BUNDLE_SCHEMA_VERSION:
+        logical_names.extend(("planning_segments", "planning_groups"))
+    for logical_name in logical_names:
         entry = raw_artifacts.get(logical_name)
         if not isinstance(entry, Mapping):
             raise ReviewArtifactUnavailableError(
@@ -129,6 +137,13 @@ def load_review_bundle(plan_path: Path) -> dict[str, Any]:
         "music_profile": dict,
         "selection_diagnostics": dict,
     }
+    if schema_version == REVIEW_BUNDLE_SCHEMA_VERSION:
+        expected_shapes.update(
+            {
+                "planning_segments": list,
+                "planning_groups": list,
+            }
+        )
     for logical_name, expected_type in expected_shapes.items():
         if not isinstance(loaded[logical_name], expected_type):
             raise ReviewArtifactUnavailableError(
@@ -161,6 +176,7 @@ def project_slots(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
             MappingProxyType(
                 {
                     "slot_id": str(clip["slot_id"]),
+                    "group_id": _required_identity(clip, "group_id", "RenderPlan clip"),
                     "position": position,
                     "is_anchor": isinstance(anchor, Mapping),
                     "output_start_sec": output_start,
@@ -169,6 +185,11 @@ def project_slots(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
                     "source_end_sec": source_end,
                     "source_timestamp": str(clip["timestamp"]),
                     "selected_candidate_id": str(clip["candidate_id"]),
+                    "selected_trajectory_id": _required_identity(
+                        clip,
+                        "trajectory_id",
+                        "RenderPlan clip",
+                    ),
                     "picture": str(clip.get("picture") or ""),
                     "selection_scores": MappingProxyType(
                         dict(clip.get("selection_scores") or {})
@@ -187,108 +208,340 @@ def project_slots(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
 def project_candidates(
     plan: RenderPlan,
     candidate_pool: Mapping[str, Any],
+    planning_segments: Sequence[Mapping[str, Any]] | None = None,
+    planning_groups: Sequence[Mapping[str, Any]] | None = None,
 ) -> Mapping[str, tuple[Mapping[str, Any], ...]]:
-    clips_by_slot = {str(clip["slot_id"]): clip for clip in plan.clips}
-    pool_slot_ids = tuple(candidate_pool.keys())
-    if any(not isinstance(slot_id, str) for slot_id in pool_slot_ids) or set(
-        pool_slot_ids
-    ) != set(clips_by_slot):
+    groups = _plan_groups(plan)
+    replaceable_groups = {
+        group_id: clips
+        for group_id, clips in groups.items()
+        if not any(isinstance(clip.get("dialogue_anchor"), Mapping) for clip in clips)
+    }
+    pool_group_ids = tuple(candidate_pool.keys())
+    if any(not isinstance(group_id, str) for group_id in pool_group_ids) or set(
+        pool_group_ids
+    ) != set(replaceable_groups):
         raise ReviewArtifactUnavailableError(
-            "Candidate Space Slot identities do not match the RenderPlan"
+            "Candidate trajectory Group identities do not match the RenderPlan"
         )
+    planning_contract = _planning_contract(
+        replaceable_groups,
+        planning_segments,
+        planning_groups,
+    )
+
     projected: dict[str, tuple[Mapping[str, Any], ...]] = {}
-    for slot_id, clip in clips_by_slot.items():
-        anchor = isinstance(clip.get("dialogue_anchor"), Mapping)
-        raw_items = candidate_pool.get(slot_id)
-        if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
+    for group_id, clips in replaceable_groups.items():
+        raw_trajectories = candidate_pool.get(group_id)
+        if not isinstance(raw_trajectories, Sequence) or isinstance(
+            raw_trajectories, (str, bytes)
+        ):
             raise ReviewArtifactUnavailableError(
-                f"Candidate Space for {slot_id} must be an array"
+                f"Candidate trajectories for {group_id} must be an array"
             )
-        by_id: dict[str, dict[str, Any]] = {}
-        for raw in raw_items:
-            if not isinstance(raw, Mapping):
+        selected_ids = {
+            _required_identity(clip, "trajectory_id", f"RenderPlan Group {group_id}")
+            for clip in clips
+        }
+        if len(selected_ids) != 1:
+            raise ReviewArtifactUnavailableError(
+                f"RenderPlan Group {group_id} mixes selected trajectories"
+            )
+        selected_trajectory_id = next(iter(selected_ids))
+        expected_slot_ids = tuple(str(clip["slot_id"]) for clip in clips)
+        expected_candidate_ids = tuple(str(clip["candidate_id"]) for clip in clips)
+        trajectories: list[Mapping[str, Any]] = []
+        seen_trajectory_ids: set[str] = set()
+        for raw_trajectory in raw_trajectories:
+            if not isinstance(raw_trajectory, Mapping):
                 raise ReviewArtifactUnavailableError(
-                    f"Candidate Space for {slot_id} contains an invalid item"
+                    f"Candidate trajectories for {group_id} contain an invalid item"
                 )
-            candidate_id = str(raw.get("candidate_id") or "")
-            candidate_slot_id = raw.get("slot_id")
+            trajectory_id = _required_identity(
+                raw_trajectory,
+                "trajectory_id",
+                f"Candidate trajectory Group {group_id}",
+            )
+            if trajectory_id in seen_trajectory_ids:
+                raise ReviewArtifactUnavailableError(
+                    f"Candidate trajectories contain duplicate {trajectory_id}"
+                )
+            seen_trajectory_ids.add(trajectory_id)
+            if _required_identity(
+                raw_trajectory,
+                "group_id",
+                f"Candidate trajectory {trajectory_id}",
+            ) != group_id:
+                raise ReviewArtifactUnavailableError(
+                    f"Candidate trajectory {trajectory_id} belongs to another Group"
+                )
+            planning_segment_id = _required_identity(
+                raw_trajectory,
+                "planning_segment_id",
+                f"Candidate trajectory {trajectory_id}",
+            )
+            segment_bounds = planning_contract.get(group_id)
             if (
-                not candidate_id
-                or not isinstance(candidate_slot_id, str)
-                or candidate_slot_id != slot_id
+                segment_bounds is not None
+                and planning_segment_id != segment_bounds[0]
             ):
                 raise ReviewArtifactUnavailableError(
-                    f"Candidate Space identity mismatch for {slot_id}"
+                    f"Candidate trajectory {trajectory_id} does not belong to "
+                    f"the Planning Segment for {group_id}"
                 )
-            if candidate_id in by_id:
+            raw_items = raw_trajectory.get("items")
+            if not isinstance(raw_items, Sequence) or isinstance(
+                raw_items, (str, bytes)
+            ):
                 raise ReviewArtifactUnavailableError(
-                    f"Candidate Space contains duplicate {candidate_id}"
+                    f"Candidate trajectory {trajectory_id} has no item array"
                 )
-            by_id[candidate_id] = dict(raw)
-        selected_id = str(clip["candidate_id"])
-        if selected_id not in by_id:
-            raise ReviewArtifactUnavailableError(
-                f"Candidate Space for {slot_id} does not contain its selected Candidate"
+            valid_item_identities = all(
+                isinstance(item, Mapping)
+                and isinstance(item.get("slot_id"), str)
+                and bool(str(item["slot_id"]).strip())
+                for item in raw_items
             )
-
-        items: list[Mapping[str, Any]] = []
-        for candidate_id, raw in by_id.items():
-            try:
-                source_start, source_end = parse_range(str(raw["timestamp"]))
-            except (KeyError, TypeError, ValueError) as exc:
+            trajectory_slot_ids = (
+                tuple(str(item["slot_id"]).strip() for item in raw_items)
+                if valid_item_identities
+                else ()
+            )
+            if (
+                trajectory_slot_ids != expected_slot_ids
+                or len(raw_items) != len(expected_slot_ids)
+            ):
                 raise ReviewArtifactUnavailableError(
-                    f"Candidate {candidate_id} has an invalid source range"
-                ) from exc
-            selected = candidate_id == selected_id
-            items.append(
+                    f"Candidate trajectory {trajectory_id} does not cover its "
+                    "Group exactly"
+                )
+            projected_items: list[Mapping[str, Any]] = []
+            prior_end = -1.0
+            candidate_ids: list[str] = []
+            for clip, raw in zip(clips, raw_items, strict=True):
+                if not isinstance(raw, Mapping):
+                    raise ReviewArtifactUnavailableError(
+                        f"Candidate trajectory {trajectory_id} contains an invalid clip"
+                    )
+                slot_id = str(clip["slot_id"])
+                candidate_id = _required_identity(
+                    raw,
+                    "candidate_id",
+                    f"Candidate trajectory {trajectory_id} Slot {slot_id}",
+                )
+                if candidate_id in candidate_ids:
+                    raise ReviewArtifactUnavailableError(
+                        f"Candidate trajectory {trajectory_id} contains duplicate "
+                        f"Candidate {candidate_id}"
+                    )
+                try:
+                    source_start, source_end = parse_range(str(raw["timestamp"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ReviewArtifactUnavailableError(
+                        f"Candidate {candidate_id} has an invalid source range"
+                    ) from exc
+                if source_start < prior_end:
+                    raise ReviewArtifactUnavailableError(
+                        f"Candidate trajectory {trajectory_id} overlaps inside "
+                        "its Group"
+                    )
+                if segment_bounds is not None:
+                    start_ms = round(source_start * 1000)
+                    end_ms = round(source_end * 1000)
+                    if start_ms < segment_bounds[1] or end_ms > segment_bounds[2]:
+                        raise ReviewArtifactUnavailableError(
+                            f"Candidate {candidate_id} escapes Planning Segment "
+                            f"{planning_segment_id}"
+                        )
+                prior_end = source_end
+                candidate_ids.append(candidate_id)
+                projected_items.append(
+                    MappingProxyType(
+                        {
+                            "candidate_id": candidate_id,
+                            "slot_id": slot_id,
+                            "source_start_sec": source_start,
+                            "source_end_sec": source_end,
+                            "source_timestamp": str(raw["timestamp"]),
+                            "description": str(
+                                raw.get("structured_context")
+                                or raw.get("description")
+                                or clip.get("picture")
+                                or ""
+                            ),
+                            "semantic_relevance": _optional_number(
+                                raw.get("semantic_relevance")
+                            ),
+                            "visual_score": _optional_number(
+                                raw.get("visual_slot_relevance_likert")
+                                or raw.get("visual_slot_relevance")
+                            ),
+                            "protagonist_visibility_score": _optional_number(
+                                raw.get("protagonist_visibility_likert")
+                            ),
+                            "emotional_intensity": _optional_number(
+                                raw.get("emotional_intensity")
+                            ),
+                            "kinetic_energy": _optional_number(
+                                raw.get("kinetic_energy")
+                            ),
+                            "salience": _optional_number(raw.get("salience")),
+                            "visual_evidence": (
+                                None
+                                if raw.get("visual_evidence") is None
+                                else str(raw["visual_evidence"])
+                            ),
+                        }
+                    )
+                )
+            selected = trajectory_id == selected_trajectory_id
+            if selected and tuple(candidate_ids) != expected_candidate_ids:
+                raise ReviewArtifactUnavailableError(
+                    f"Selected trajectory {trajectory_id} does not match the RenderPlan"
+                )
+            trajectories.append(
                 MappingProxyType(
                     {
-                        "candidate_id": candidate_id,
-                        "slot_id": slot_id,
-                        "source_start_sec": source_start,
-                        "source_end_sec": source_end,
-                        "source_timestamp": str(raw["timestamp"]),
-                        "description": str(
-                            raw.get("structured_context")
-                            or raw.get("description")
-                            or clip.get("picture")
-                            or ""
-                        ),
-                        "semantic_relevance": _optional_number(
-                            raw.get("semantic_relevance")
-                        ),
-                        "visual_score": _optional_number(
-                            raw.get("visual_slot_relevance_likert")
-                            or raw.get("visual_slot_relevance")
-                        ),
-                        "protagonist_visibility_score": _optional_number(
-                            raw.get("protagonist_visibility_likert")
-                        ),
-                        "emotional_intensity": _optional_number(
-                            raw.get("emotional_intensity")
-                        ),
-                        "kinetic_energy": _optional_number(raw.get("kinetic_energy")),
-                        "salience": _optional_number(raw.get("salience")),
-                        "visual_evidence": (
-                            None
-                            if raw.get("visual_evidence") is None
-                            else str(raw["visual_evidence"])
-                        ),
+                        "trajectory_id": trajectory_id,
+                        "group_id": group_id,
+                        "planning_segment_id": planning_segment_id,
+                        "items": tuple(projected_items),
                         "selected": selected,
-                        "eligible_for_replacement": (not anchor and not selected),
+                        "eligible_for_replacement": not selected,
                     }
                 )
             )
-        projected[slot_id] = tuple(
+        if selected_trajectory_id not in seen_trajectory_ids:
+            raise ReviewArtifactUnavailableError(
+                f"Candidate trajectories for {group_id} omit the selected trajectory"
+            )
+        projected[group_id] = tuple(
             sorted(
-                items,
+                trajectories,
                 key=lambda item: (
                     not bool(item["selected"]),
-                    str(item["candidate_id"]),
+                    str(item["trajectory_id"]),
                 ),
             )
         )
     return MappingProxyType(projected)
+
+
+def _planning_contract(
+    replaceable_groups: Mapping[str, tuple[Mapping[str, Any], ...]],
+    planning_segments: Sequence[Mapping[str, Any]] | None,
+    planning_groups: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, tuple[str, int, int]]:
+    """Validate the Story-to-Timeline boundary used by new Review bundles."""
+
+    if planning_segments is None and planning_groups is None:
+        # Completed schema-2 bundles remain viewable. New schema-3 bundles always
+        # provide both artifacts and therefore take the strict branch below.
+        return {}
+    if planning_segments is None or planning_groups is None:
+        raise ReviewArtifactUnavailableError(
+            "Review bundle has an incomplete Planning Segment contract"
+        )
+    if isinstance(planning_segments, (str, bytes)) or isinstance(
+        planning_groups, (str, bytes)
+    ):
+        raise ReviewArtifactUnavailableError(
+            "Review bundle Planning Segment artifacts must be arrays"
+        )
+
+    segments: dict[str, tuple[str, int, int]] = {}
+    for raw_segment in planning_segments:
+        if not isinstance(raw_segment, Mapping):
+            raise ReviewArtifactUnavailableError(
+                "Planning Segments contain an invalid item"
+            )
+        planning_segment_id = _required_identity(
+            raw_segment,
+            "planning_segment_id",
+            "Planning Segment",
+        )
+        if planning_segment_id in segments:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Segments contain duplicate {planning_segment_id}"
+            )
+        source_segment_id = _required_identity(
+            raw_segment,
+            "source_segment_id",
+            f"Planning Segment {planning_segment_id}",
+        )
+        start_ms = raw_segment.get("start_ms")
+        end_ms = raw_segment.get("end_ms")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or start_ms < 0
+            or end_ms <= start_ms
+        ):
+            raise ReviewArtifactUnavailableError(
+                f"Planning Segment {planning_segment_id} has invalid boundaries"
+            )
+        segments[planning_segment_id] = (source_segment_id, start_ms, end_ms)
+
+    contracts: dict[str, tuple[str, int, int]] = {}
+    for raw_group in planning_groups:
+        if not isinstance(raw_group, Mapping):
+            raise ReviewArtifactUnavailableError(
+                "Planning Groups contain an invalid item"
+            )
+        group_id = _required_identity(raw_group, "group_id", "Planning Group")
+        if group_id in contracts:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Groups contain duplicate {group_id}"
+            )
+        clips = replaceable_groups.get(group_id)
+        if clips is None:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Group {group_id} does not match the RenderPlan"
+            )
+        raw_slot_ids = raw_group.get("slot_ids")
+        if not isinstance(raw_slot_ids, Sequence) or isinstance(
+            raw_slot_ids, (str, bytes)
+        ):
+            raise ReviewArtifactUnavailableError(
+                f"Planning Group {group_id} has no Slot sequence"
+            )
+        slot_ids = tuple(
+            value.strip() if isinstance(value, str) else ""
+            for value in raw_slot_ids
+        )
+        expected_slot_ids = tuple(str(clip["slot_id"]) for clip in clips)
+        if not all(slot_ids) or slot_ids != expected_slot_ids:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Group {group_id} does not cover its Slots exactly"
+            )
+        planning_segment_id = _required_identity(
+            raw_group,
+            "planning_segment_id",
+            f"Planning Group {group_id}",
+        )
+        segment = segments.get(planning_segment_id)
+        if segment is None:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Group {group_id} references an unknown Planning Segment"
+            )
+        source_segment_id = _required_identity(
+            raw_group,
+            "source_segment_id",
+            f"Planning Group {group_id}",
+        )
+        if source_segment_id != segment[0]:
+            raise ReviewArtifactUnavailableError(
+                f"Planning Group {group_id} and its Planning Segment disagree"
+            )
+        contracts[group_id] = (planning_segment_id, segment[1], segment[2])
+
+    if set(contracts) != set(replaceable_groups):
+        raise ReviewArtifactUnavailableError(
+            "Planning Group identities do not match the RenderPlan"
+        )
+    return contracts
 
 
 def project_dialogue_cues(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
@@ -325,11 +578,13 @@ def project_dialogue_cues(plan: RenderPlan) -> tuple[Mapping[str, Any], ...]:
 def replacement_clip(
     original: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    trajectory_id: str,
 ) -> dict[str, Any]:
-    """Apply a user-selected validated candidate without changing edit rhythm."""
+    """Apply one item from a validated Group trajectory without changing rhythm."""
 
     updated = dict(original)
     updated["candidate_id"] = str(candidate["candidate_id"])
+    updated["trajectory_id"] = trajectory_id
     updated["timestamp"] = str(candidate["timestamp"])
     updated["selection_scores"] = {
         key: candidate[key]
@@ -349,6 +604,48 @@ def replacement_clip(
     }
     updated.pop("dialogue_anchor", None)
     return updated
+
+
+def _plan_groups(plan: RenderPlan) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    closed: set[str] = set()
+    current_group_id: str | None = None
+    seen_slots: set[str] = set()
+    for clip in plan.clips:
+        slot_id = _required_identity(clip, "slot_id", "RenderPlan clip")
+        if slot_id in seen_slots:
+            raise ReviewArtifactUnavailableError(
+                f"RenderPlan contains duplicate Slot {slot_id}"
+            )
+        seen_slots.add(slot_id)
+        group_id = _required_identity(clip, "group_id", f"RenderPlan Slot {slot_id}")
+        _required_identity(clip, "candidate_id", f"RenderPlan Slot {slot_id}")
+        _required_identity(clip, "trajectory_id", f"RenderPlan Slot {slot_id}")
+        if current_group_id != group_id:
+            if current_group_id is not None:
+                closed.add(current_group_id)
+            if group_id in closed:
+                raise ReviewArtifactUnavailableError(
+                    f"RenderPlan Group {group_id} is not contiguous"
+                )
+            current_group_id = group_id
+        groups.setdefault(group_id, []).append(clip)
+    for group_id, clips in groups.items():
+        anchor_count = sum(
+            isinstance(clip.get("dialogue_anchor"), Mapping) for clip in clips
+        )
+        if anchor_count and (anchor_count != 1 or len(clips) != 1):
+            raise ReviewArtifactUnavailableError(
+                f"Story Anchor Group {group_id} must contain exactly one Slot"
+            )
+    return {group_id: tuple(clips) for group_id, clips in groups.items()}
+
+
+def _required_identity(value: Mapping[str, Any], key: str, label: str) -> str:
+    raw = value.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ReviewArtifactUnavailableError(f"{label} has no {key}")
+    return raw.strip()
 
 
 def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:

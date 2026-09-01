@@ -224,7 +224,9 @@ describe('live ASTER execution progress', () => {
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getAllByText('Running')[0]).toBeVisible()
     expect(screen.getByText('Elapsed time · 01:30')).toBeVisible()
-    expect(screen.getByText('Timeline Scout is retrieving candidates')).toBeVisible()
+    expect(
+      screen.getByText('Timeline Scout is retrieving group trajectories'),
+    ).toBeVisible()
 
     await act(async () => vi.advanceTimersByTimeAsync(2000))
     await flushPromises()
@@ -258,7 +260,7 @@ describe('live ASTER execution progress', () => {
     )
 
     expect(
-      await screen.findByText('Timeline Scout is retrieving candidates'),
+      await screen.findByText('Timeline Scout is retrieving group trajectories'),
     ).toBeVisible()
     expect(screen.getAllByText('Running')[0]).toBeVisible()
     expect(screen.getByText('Arrangement Architect')).toBeVisible()
@@ -417,7 +419,9 @@ describe('live ASTER execution progress', () => {
     })
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getByRole('heading', { name: 'Running' })).toBeVisible()
-    expect(screen.getByText('Timeline Scout is retrieving candidates')).toBeVisible()
+    expect(
+      screen.getByText('Timeline Scout is retrieving group trajectories'),
+    ).toBeVisible()
 
     await act(async () => vi.advanceTimersByTimeAsync(2000))
     await flushPromises()

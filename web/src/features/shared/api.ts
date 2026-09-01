@@ -356,6 +356,7 @@ export interface ReviewMediaBinding {
 
 export interface ReviewSlot {
   slot_id: string
+  group_id: string
   position: number
   is_anchor: boolean
   output_start_sec: number
@@ -364,6 +365,7 @@ export interface ReviewSlot {
   source_end_sec: number
   source_timestamp: string
   selected_candidate_id: string
+  selected_trajectory_id: string
   picture: string
   selection_scores: Record<string, number>
   dialogue_anchor: Record<string, unknown> | null
@@ -383,9 +385,16 @@ export interface ReviewCandidate {
   kinetic_energy: number | null
   salience: number | null
   visual_evidence: string | null
+  media_url: string
+}
+
+export interface ReviewTrajectory {
+  trajectory_id: string
+  group_id: string
+  planning_segment_id: string
+  items: ReviewCandidate[]
   selected: boolean
   eligible_for_replacement: boolean
-  media_url: string
 }
 
 export type ReviewRenderVariant = RenderVariant
@@ -414,7 +423,7 @@ export interface FrozenEditReview {
     music: ReviewMediaBinding
   }
   slots: ReviewSlot[]
-  candidates: Record<string, ReviewCandidate[]>
+  candidates: Record<string, ReviewTrajectory[]>
   variants: ReviewRenderVariant[]
   timeline: ReviewTimeline
 }
@@ -888,7 +897,7 @@ export const api = {
       ),
     createRevision: (
       editId: string,
-      replacements: Array<{ slot_id: string; candidate_id: string }>,
+      replacements: Array<{ group_id: string; trajectory_id: string }>,
     ) =>
       apiRequest<CreateRevisionResult>(
         `/api/frozen-edits/${encodeURIComponent(editId)}/revisions`,

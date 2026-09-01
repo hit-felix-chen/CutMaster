@@ -16,6 +16,41 @@ from cutmaster.infrastructure.media.ffprobe import media_duration
 from cutmaster.workflow.shared.timecode import format_range, parse_range
 
 
+_TRAJECTORY_FRAME_TOLERANCE_SEC = 0.001001
+
+
+def _is_trajectory_clip(item: dict[str, Any]) -> bool:
+    """Return whether an item carries the complete selected-trajectory identity."""
+
+    group_id = item.get("group_id")
+    trajectory_id = item.get("trajectory_id")
+    candidate_id = item.get("candidate_id")
+    has_group = isinstance(group_id, str) and bool(group_id.strip())
+    has_trajectory = isinstance(trajectory_id, str) and bool(trajectory_id.strip())
+    if not has_group and not has_trajectory:
+        return False
+    if not has_group or not has_trajectory:
+        raise ValueError("Compiled clip must carry both group_id and trajectory_id")
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("Compiled trajectory clip must carry candidate_id")
+    return True
+
+
+def _planned_duration_sec(
+    item: dict[str, Any],
+    default_duration_sec: float,
+) -> float:
+    raw_ms = item.get("planned_duration_ms")
+    if raw_ms is not None:
+        if isinstance(raw_ms, bool) or not isinstance(raw_ms, int) or raw_ms <= 0:
+            raise ValueError("planned_duration_ms must be a positive integer")
+        return raw_ms / 1000.0
+    value = float(item.get("planned_duration_sec") or default_duration_sec)
+    if value <= 0.0:
+        raise ValueError("planned_duration_sec must be positive")
+    return value
+
+
 def adapt_script(
     raw_script: list[dict[str, Any]],
     target_output_length_sec: float,
@@ -25,7 +60,7 @@ def adapt_script(
     source_duration_sec: float | None = None,
     output_fps: int | None = None,
 ) -> list[dict[str, Any]]:
-    planned: list[tuple[dict[str, Any], float, float]] = []
+    planned: list[tuple[dict[str, Any], float, float, bool]] = []
     has_aligned_timeline = all(
         "output_start_sec" in raw and "output_end_sec" in raw for raw in raw_script
     )
@@ -33,16 +68,34 @@ def adapt_script(
     default_clip_cap = float(max_clip_duration_sec or target_shot_length_sec)
     for raw in raw_script:
         remaining = target_output_length_sec - total
-        if remaining <= 0.001:
+        if not has_aligned_timeline and remaining <= 0.001:
             break
         start, end = parse_range(str(raw["timestamp"]))
-        planned_duration = float(raw.get("planned_duration_sec") or default_clip_cap)
-        if max_clip_duration_sec is not None and raw.get("dialogue_anchor") is None:
+        trajectory_clip = _is_trajectory_clip(raw)
+        planned_duration = _planned_duration_sec(raw, default_clip_cap)
+        if (
+            max_clip_duration_sec is not None
+            and raw.get("dialogue_anchor") is None
+            and not trajectory_clip
+        ):
             planned_duration = min(planned_duration, max_clip_duration_sec)
-        duration = min(end - start, planned_duration, remaining)
+        source_duration = end - start
+        if trajectory_clip:
+            candidate_duration_ms = int(round(source_duration * 1000.0))
+            planned_duration_ms = int(round(planned_duration * 1000.0))
+            if candidate_duration_ms != planned_duration_ms:
+                raise ValueError(
+                    f"Trajectory candidate duration for {raw['candidate_id']} does not "
+                    "match its planned Slot duration"
+                )
+            duration = source_duration
+        else:
+            duration = min(source_duration, planned_duration)
+        if not has_aligned_timeline:
+            duration = min(duration, remaining)
         if duration <= 0.001:
             continue
-        planned.append((raw, start, duration))
+        planned.append((raw, start, duration, trajectory_clip))
         total += duration
     if not planned:
         raise ValueError("No usable clips remain after script adaptation")
@@ -51,11 +104,18 @@ def adapt_script(
 
     if has_aligned_timeline and len(planned) == len(raw_script):
         output_boundaries = [float(planned[0][0]["output_start_sec"])]
-        output_boundaries.extend(float(raw["output_end_sec"]) for raw, _, _ in planned)
+        output_boundaries.extend(
+            float(raw["output_end_sec"]) for raw, _, _, _ in planned
+        )
         if output_fps is not None:
-            output_boundaries = [
-                round(boundary * output_fps) / output_fps for boundary in output_boundaries
+            output_frame_boundaries = [
+                round(boundary * output_fps) for boundary in output_boundaries
             ]
+            output_boundaries = [
+                frame / output_fps for frame in output_frame_boundaries
+            ]
+        else:
+            output_frame_boundaries = None
         if abs(output_boundaries[0]) > 1e-6:
             raise ValueError("Aligned output timeline must start at 0")
         if any(
@@ -66,7 +126,7 @@ def adapt_script(
     else:
         ideal_boundaries: list[float] = []
         elapsed = 0.0
-        for _, _, duration in planned[:-1]:
+        for _, _, duration, _ in planned[:-1]:
             elapsed += duration
             ideal_boundaries.append(elapsed)
         aligned_boundaries = align_cut_boundaries(
@@ -77,23 +137,54 @@ def adapt_script(
             output_fps,
         )
         output_boundaries = [0.0, *aligned_boundaries, total]
+        output_frame_boundaries = (
+            [round(boundary * output_fps) for boundary in output_boundaries]
+            if output_fps is not None
+            else None
+        )
+        if output_frame_boundaries is not None:
+            output_boundaries = [
+                frame / output_fps for frame in output_frame_boundaries
+            ]
 
     adapted: list[dict[str, Any]] = []
-    for index, ((raw, source_start, _), output_start, output_end) in enumerate(
+    for index, ((raw, source_start, _, trajectory_clip), output_start, output_end) in enumerate(
         zip(planned, output_boundaries[:-1], output_boundaries[1:], strict=True),
         start=1,
     ):
         duration = output_end - output_start
-        if source_duration_sec is not None and source_start + duration > source_duration_sec:
+        source_end = parse_range(str(raw["timestamp"]))[1]
+        if trajectory_clip:
+            source_window_duration = source_end - source_start
+            if abs(source_window_duration - duration) > _TRAJECTORY_FRAME_TOLERANCE_SEC:
+                raise ValueError(
+                    f"Trajectory candidate duration for {raw['candidate_id']} differs "
+                    "from its renderable frame duration by more than 1 ms"
+                )
+            if (
+                source_duration_sec is not None
+                and source_end > source_duration_sec + _TRAJECTORY_FRAME_TOLERANCE_SEC
+            ):
+                raise ValueError(
+                    f"Trajectory candidate {raw['candidate_id']} exceeds source duration"
+                )
+        elif source_duration_sec is not None and source_start + duration > source_duration_sec:
             source_start = max(0.0, source_duration_sec - duration)
         item = dict(raw)
         item["_id"] = index
-        item["timestamp"] = format_range(source_start, source_start + duration)
+        item["timestamp"] = (
+            str(raw["timestamp"])
+            if trajectory_clip
+            else format_range(source_start, source_start + duration)
+        )
         item["output_timestamp"] = format_range(output_start, output_end)
-        if output_fps is not None:
+        item["output_start_sec"] = output_start
+        item["output_end_sec"] = output_end
+        item["render_duration_sec"] = duration
+        if output_frame_boundaries is not None:
             item["output_frame_range"] = [
-                round(output_start * output_fps),
-                round(output_end * output_fps),
+                output_frame_boundaries[index - 1],
+                output_frame_boundaries[index],
             ]
         item["narration"] = f"播放原片{item['_id']}"
         item["OST"] = 1

@@ -847,10 +847,30 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
         completed_stage=PlannersCheckpointStage.ARRANGEMENT,
         aster_attempt=1,
         music_profile=profile,
-        slots=({"slot_id": "slot_01", "content_description": "setup"},),
+        slots=(
+            {
+                "slot_id": "slot_01",
+                "group_id": "group_001",
+                "source_segment_id": "segment_0001",
+                "content_description": "setup",
+                "planned_duration_ms": 1000,
+            },
+        ),
+        arrangement_groups=(
+            {
+                "group_id": "group_001",
+                "source_segment_id": "segment_0001",
+                "slot_ids": ["slot_01"],
+                "total_planned_duration_ms": 1000,
+            },
+        ),
+        planning_segments=None,
+        planning_groups=None,
         dialogue_anchors=None,
         candidate_pool=None,
+        replan_reuse=None,
         beam_path=None,
+        selected_trajectory_ids=None,
         selection=None,
         pairwise_scores=None,
         raw_script=None,
@@ -866,6 +886,15 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
         application.settings.get().data_root / str(receipt["relative_path"])
     )
     checkpoint_document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint_document["checkpoint"]["schema_version"] == "4.0"
+    assert checkpoint_document["checkpoint"]["arrangement_groups"] == [
+        {
+            "group_id": "group_001",
+            "source_segment_id": "segment_0001",
+            "slot_ids": ["slot_01"],
+            "total_planned_duration_ms": 1000,
+        }
+    ]
 
     def assert_path_free(value) -> None:
         if isinstance(value, dict):
@@ -918,6 +947,14 @@ def test_resume_validates_and_pins_completed_aster_checkpoint(
     loaded = resumed_session.load()
     assert loaded is not None
     assert loaded.to_dict()["music_profile"] == profile
+    assert loaded.to_dict()["arrangement_groups"] == [
+        {
+            "group_id": "group_001",
+            "source_segment_id": "segment_0001",
+            "slot_ids": ["slot_01"],
+            "total_planned_duration_ms": 1000,
+        }
+    ]
 
 
 def test_run_again_copies_historical_snapshot_not_current_project_setup(

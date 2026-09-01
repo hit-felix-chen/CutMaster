@@ -431,6 +431,8 @@ def _publish_review_bundle(
     sources = {
         "candidate_pool": artifacts.candidate_pool,
         "edit_plan": artifacts.edit_plan,
+        "planning_segments": artifacts.planning_segments,
+        "planning_groups": artifacts.planning_groups,
         "dialogue_anchors": artifacts.dialogue_anchors,
         "raw_script": artifacts.raw_script,
         "music_profile": artifacts.music_profile,

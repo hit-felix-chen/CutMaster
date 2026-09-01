@@ -22,9 +22,11 @@ from cutmaster.configuration.schema import (
 )
 from cutmaster.domain.ids import MaterialId
 from cutmaster.domain.materials import MaterialFingerprint, MaterialType
+from cutmaster.infrastructure.models.openai_compatible import empty_usage_summary
 from cutmaster.workflow.contracts.checkpoints import (
     PlannersCheckpoint,
     PlannersCheckpointStage,
+    PlannersReplanScope,
 )
 from cutmaster.workflow.contracts.material import (
     AnalysedMusicRuntimeHandle,
@@ -39,7 +41,11 @@ from cutmaster.workflow.contracts.planners import (
 )
 from cutmaster.workflow.contracts.render_plan import RenderPlan
 from cutmaster.workflow.planners import Planners
-from cutmaster.workflow.planners.tools.errors import NoFeasiblePathError
+from cutmaster.workflow.planners.tools.errors import (
+    GroupNoCandidateError,
+    NoFeasiblePathError,
+    RetryablePlanningStageError,
+)
 from cutmaster.workflow.planners.tools.music_analysis import project_music_profile
 from cutmaster.workflow.ports import WorkflowCancelledError
 
@@ -231,10 +237,12 @@ class _MemoryCheckpointStore:
         stop_stage: PlannersCheckpointStage,
         *,
         stop_attempt: int = 1,
+        stop_replan_scope: PlannersReplanScope | None = None,
     ) -> None:
         self.token = token
         self.stop_stage = stop_stage
         self.stop_attempt = stop_attempt
+        self.stop_replan_scope = stop_replan_scope
         self.latest: PlannersCheckpoint | None = None
         self.saved: list[PlannersCheckpoint] = []
         self.armed = True
@@ -249,6 +257,10 @@ class _MemoryCheckpointStore:
             self.armed
             and checkpoint.completed_stage is self.stop_stage
             and checkpoint.aster_attempt == self.stop_attempt
+            and (
+                self.stop_replan_scope is None
+                or checkpoint.replan_scope is self.stop_replan_scope
+            )
         ):
             self.armed = False
             self.token.cancelled = True
@@ -259,6 +271,15 @@ def _install_fake_workflow(
     calls: list[str],
     *,
     fail_first_composition: bool = False,
+    fail_first_global_composition: bool = False,
+    fail_anchor_attempts: int = 0,
+    fail_candidate_attempts: int = 0,
+    fail_local_repair_attempts: int = 0,
+    candidate_failure_groups: tuple[tuple[str, ...], ...] = (),
+    repair_diagnostics: list[dict[str, Any]] | None = None,
+    fail_first_reuse_with_retryable_error: bool = False,
+    revise_to_alternative: bool = False,
+    checkpoint_validation_error: str | None = None,
 ) -> None:
     class _Team:
         def __init__(
@@ -278,57 +299,284 @@ def _install_fake_workflow(
 
         def arrange(self, *_args):
             calls.append("arrangement_architect")
-            return [{"slot_id": "slot_01", "content_description": "setup"}]
+            slots = [
+                {
+                    "slot_id": "slot_01",
+                    "group_id": "group_001",
+                    "parent_group_id": "group_001",
+                    "source_segment_id": "segment_0001",
+                    "content_description": "setup",
+                    "required_visible_subjects": [],
+                    "planned_duration_ms": 1000,
+                    "planned_duration_sec": 1.0,
+                }
+            ]
+            self.context.set_artifact(
+                "arrangement_groups",
+                [
+                    {
+                        "group_id": "group_001",
+                        "source_segment_id": "segment_0001",
+                        "slot_ids": ["slot_01"],
+                        "total_planned_duration_ms": 1000,
+                    }
+                ],
+            )
+            return slots
 
         def anchor_story(self, slots):
             calls.append("story_editor")
+            if calls.count("story_editor") <= fail_anchor_attempts:
+                try:
+                    raise ValueError(
+                        "Anchor partition leaves an infeasible child group: "
+                        "failed_group_id=group_001"
+                    )
+                except ValueError as exc:
+                    raise RuntimeError("Anchor model requests exhausted") from exc
             self.context.set_artifact("dialogue_anchors", [])
+            self.context.set_artifact(
+                "planning_segments",
+                [
+                    {
+                        "planning_segment_id": "planning_segment_001",
+                        "source_segment_id": "segment_0001",
+                        "start_ms": 0,
+                        "end_ms": 1000,
+                    }
+                ],
+            )
+            self.context.set_artifact(
+                "planning_groups",
+                [
+                    {
+                        "group_id": "group_001",
+                        "parent_group_id": "group_001",
+                        "source_segment_id": "segment_0001",
+                        "planning_segment_id": "planning_segment_001",
+                        "slot_ids": ["slot_01"],
+                    }
+                ],
+            )
             return slots
 
-        def scout(self, _slots):
+        def scout(self, _slots, _cancellation_token=None):
             calls.append("timeline_scout")
-            return {
-                "slot_01": [
+            scout_index = calls.count("timeline_scout") - 1
+            scheduled_groups = (
+                candidate_failure_groups[scout_index]
+                if scout_index < len(candidate_failure_groups)
+                else ()
+            )
+            if scheduled_groups or scout_index < fail_candidate_attempts:
+                failed_groups = list(scheduled_groups or ("group_001",))
+                self.context.set_artifact("candidate_pool", {"group_001": []})
+                raise GroupNoCandidateError(
                     {
-                        "candidate_id": "candidate_01",
-                        "timestamp": "00:00:00,000-00:00:01,000",
+                        "failed_group_ids": failed_groups,
+                        "failed_parent_group_ids": failed_groups,
+                        "valid_trajectory_counts": {
+                            group_id: 0 for group_id in failed_groups
+                        },
+                        "rounds_completed": 1,
                     }
+                )
+            return {
+                "group_001": [
+                    {
+                        "trajectory_id": "group_001_trajectory_001",
+                        "group_id": "group_001",
+                        "planning_segment_id": "planning_segment_001",
+                        "items": [
+                            {
+                                "slot_id": "slot_01",
+                                "candidate_id": "candidate_01",
+                                "timestamp": "00:00:00,000-00:00:01,000",
+                            }
+                        ],
+                    },
+                    {
+                        "trajectory_id": "group_001_trajectory_002",
+                        "group_id": "group_001",
+                        "planning_segment_id": "planning_segment_001",
+                        "items": [
+                            {
+                                "slot_id": "slot_01",
+                                "candidate_id": "candidate_02",
+                                "timestamp": "00:00:00,000-00:00:01,000",
+                            }
+                        ],
+                    },
                 ]
             }
 
+        def validate_planning(self, _slots) -> None:
+            calls.append("validate_planning")
+            if checkpoint_validation_error == "planning":
+                raise ValueError("restored planning contract is invalid")
+
         def validate_composition(self, *_args) -> None:
             calls.append("validate_composition")
+            if (
+                checkpoint_validation_error == "composition"
+                and self.context.get_artifact("candidate_pool") is not None
+            ):
+                raise ValueError("restored candidate contract is invalid")
+
+        def validate_edit_checkpoint(
+            self, slots, pool, _beam, _selection, _pairwise
+        ) -> None:
+            calls.append("validate_edit_checkpoint")
+            self.validate_composition(slots, pool)
+
+        def validate_revision_checkpoint(
+            self,
+            slots,
+            pool,
+            _beam,
+            _selection,
+            _script,
+            _pairwise,
+        ) -> None:
+            calls.append("validate_revision_checkpoint")
+            self.validate_composition(slots, pool)
 
         def compose(self, _slots, pool):
             calls.append("edit_composer")
+            if (
+                fail_first_global_composition
+                and calls.count("edit_composer") == 1
+            ):
+                raise ValueError("global composition contract failed")
             if fail_first_composition and calls.count("edit_composer") == 1:
                 raise NoFeasiblePathError(
-                    "slot_01",
-                    {"failed_slot_id": "slot_01", "shortages": {}},
+                    "group_001",
+                    {
+                        "failed_group_id": "group_001",
+                        "valid_trajectory_counts": {"group_001": 1},
+                    },
                 )
-            return list(pool["slot_01"]), {"beam_score": 1.0}, {}
+            trajectory = pool["group_001"][0]
+            return (
+                [trajectory],
+                {
+                    "beam_score": 1.0,
+                    "selected_trajectory_ids": {
+                        "group_001": trajectory["trajectory_id"],
+                    },
+                },
+                {},
+            )
 
         def build_script(self, _slots, selected):
             calls.append("build_script")
+            item = selected[0]["items"][0]
             return [
                 {
-                    **selected[0],
+                    **item,
+                    "group_id": selected[0]["group_id"],
+                    "trajectory_id": selected[0]["trajectory_id"],
                     "output_frame_range": [0, 30],
                 }
             ]
 
         def revise(self, _slots, _pool, script, _scores):
             calls.append("revision_editor")
+            if revise_to_alternative:
+                return (
+                    [
+                        {
+                            **script[0],
+                            "candidate_id": "candidate_02",
+                            "trajectory_id": "group_001_trajectory_002",
+                        }
+                    ],
+                    [
+                        {
+                            "operation": "replace",
+                            "group_id": "group_001",
+                            "trajectory_id": "group_001_trajectory_002",
+                            "reason": "stronger visual",
+                        }
+                    ],
+                )
             return script, []
 
-        def record_failure(self, *, attempt, **_kwargs) -> None:
+        def repair_groups(self, slots, diagnostics):
+            calls.append("repair_groups")
+            if repair_diagnostics is not None:
+                repair_diagnostics.append(dict(diagnostics))
+            if calls.count("repair_groups") <= fail_local_repair_attempts:
+                try:
+                    raise ValueError("failed_group_id=group_001")
+                except ValueError as exc:
+                    raise RuntimeError("Local group repair failed") from exc
+            self.context.set_artifact(
+                "arrangement_groups",
+                [
+                    {
+                        "group_id": "group_001",
+                        "source_segment_id": "segment_0001",
+                        "slot_ids": ["slot_01"],
+                        "total_planned_duration_ms": 1000,
+                    }
+                ],
+            )
+            return slots, {"slot_01"}
+
+        def refresh_story_groups(
+            self,
+            slots,
+            *,
+            previous_slots,
+            replanned_slot_ids,
+        ):
+            calls.append("refresh_story_groups")
+            assert previous_slots
+            refreshed = self.anchor_story(slots)
+            return refreshed, replanned_slot_ids, {"group_001"}
+
+        def scout_with_reuse(
+            self,
+            slots,
+            *,
+            cancellation_token=None,
+            previous_candidate_pool,
+            previous_slots,
+            **_reuse,
+        ):
+            calls.append("scout_with_reuse")
+            assert previous_slots
+            assert "group_001" in previous_candidate_pool
+            if (
+                fail_first_reuse_with_retryable_error
+                and calls.count("scout_with_reuse") == 1
+            ):
+                raise RetryablePlanningStageError(
+                    "retrieval",
+                    {
+                        "diagnosis": "retrieval response contract failed",
+                        "failed_group_ids": [],
+                        "failed_parent_group_ids": [],
+                    },
+                )
+            return self.scout(slots, cancellation_token)
+
+        def record_failure(self, *, attempt, diagnostics, **_kwargs) -> None:
             calls.append("record_failure")
             self.context.set_artifact(
                 "planners_feedback",
                 {
                     "attempt": attempt,
-                    "failed_slots": [],
-                    "forbidden_segment_ids": [],
+                    "diagnostics": diagnostics,
+                    "failed_slots": [
+                        {
+                            "slot_id": "slot_01",
+                            "group_id": "group_001",
+                            "source_segment_id": "segment_0001",
+                            "valid_trajectory_count": 1,
+                        }
+                    ],
                     "instruction": "private retry instruction",
                 },
             )
@@ -422,7 +670,104 @@ def test_resume_skips_every_completed_aster_agent_boundary(
     assert calls.count("compile_render_plan") == 1
 
 
-def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
+def test_resume_story_checkpoint_revalidates_planning_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        checkpoint_validation_error="planning",
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.STORY)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    token.cancelled = False
+
+    with pytest.raises(ValueError, match="restored planning contract is invalid"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert calls.count("timeline_scout") == 0
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [PlannersCheckpointStage.EDIT, PlannersCheckpointStage.REVISION],
+)
+def test_late_checkpoint_resume_revalidates_candidate_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: PlannersCheckpointStage,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        checkpoint_validation_error="composition",
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, stage)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    token.cancelled = False
+
+    with pytest.raises(ValueError, match="restored candidate contract is invalid"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert calls.count("compile_render_plan") == 0
+
+
+def test_resume_rejects_disagreeing_checkpoint_selection_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls)
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.EDIT)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    changed = store.latest.to_dict()
+    changed["selected_trajectory_ids"] = {"group_001": "trajectory_changed"}
+    store.latest = PlannersCheckpoint.from_dict(changed)
+    token.cancelled = False
+
+    with pytest.raises(ValueError, match="disagree with selection"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+
+def test_timeline_resume_promotes_no_path_to_full_global_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -432,6 +777,301 @@ def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
         monkeypatch,
         calls,
         fail_first_composition=True,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.TIMELINE)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("repair_groups") == 0
+    assert calls.count("timeline_scout") == 2
+    assert calls.count("edit_composer") == 2
+
+
+def test_anchor_failure_returns_to_arrangement_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls, fail_anchor_attempts=1)
+
+    result = Planners(_config(tmp_path)).plan(request)
+
+    assert result.status == "success"
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("repair_groups") == 0
+    assert calls.count("story_editor") == 2
+    assert calls.count("timeline_scout") == 1
+    assert calls.index("arrangement_architect", 1) < calls.index(
+        "story_editor",
+        calls.index("story_editor") + 1,
+    )
+
+
+def test_candidate_empty_local_replan_keeps_current_aster_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_anchor_attempts=1,
+        fail_candidate_attempts=1,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert result.status == "success"
+    assert diagnostics["aster_attempt"] == 2
+    assert calls.count("timeline_scout") == 2
+    assert calls.count("scout_with_reuse") == 1
+
+
+def test_candidate_local_replan_drops_groups_recovered_in_latest_retrieval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    repairs: list[dict[str, Any]] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        candidate_failure_groups=(("group_001",), ("group_002",)),
+        repair_diagnostics=repairs,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+
+    assert result.status == "success"
+    assert [item["failed_parent_group_ids"] for item in repairs] == [
+        ["group_001"],
+        ["group_002"],
+    ]
+
+
+def test_candidate_local_budget_exhaustion_starts_full_next_aster_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=3,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert result.status == "success"
+    assert diagnostics["aster_attempt"] == 2
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("repair_groups") == 2
+    assert calls.count("timeline_scout") == 4
+    assert calls.count("scout_with_reuse") == 2
+
+
+def test_candidate_local_budget_is_nested_inside_each_global_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=9,
+    )
+
+    with pytest.raises(GroupNoCandidateError):
+        Planners(_config(tmp_path)).plan(request)
+
+    assert calls.count("arrangement_architect") == 3
+    assert calls.count("repair_groups") == 6
+    assert calls.count("timeline_scout") == 9
+    assert calls.count("scout_with_reuse") == 6
+    assert calls.count("record_failure") == 9
+
+
+def test_last_global_attempt_can_use_candidate_local_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_anchor_attempts=2,
+        fail_candidate_attempts=1,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert result.status == "success"
+    assert diagnostics["aster_attempt"] == 3
+    assert calls.count("arrangement_architect") == 3
+    assert calls.count("repair_groups") == 1
+    assert calls.count("timeline_scout") == 2
+
+
+def test_candidate_local_repair_failure_uses_local_budget_before_global(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+        fail_local_repair_attempts=1,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert result.status == "success"
+    assert diagnostics["aster_attempt"] == 1
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("repair_groups") == 2
+    assert calls.count("timeline_scout") == 2
+
+
+def test_generic_retrieval_failure_after_local_repair_promotes_global(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+        fail_first_reuse_with_retryable_error=True,
+    )
+
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert result.status == "success"
+    assert diagnostics["aster_attempt"] == 2
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("repair_groups") == 1
+    assert calls.count("scout_with_reuse") == 1
+
+
+def test_anchor_failure_stops_after_three_aster_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls, fail_anchor_attempts=3)
+
+    with pytest.raises(RetryablePlanningStageError):
+        Planners(_config(tmp_path)).plan(request)
+
+    assert calls.count("arrangement_architect") == 3
+    assert calls.count("repair_groups") == 0
+    assert calls.count("story_editor") == 3
+    assert calls.count("timeline_scout") == 0
+    assert calls.count("record_failure") == 3
+
+
+def test_resume_after_candidate_local_replan_reuses_group_and_sanitizes_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.REPLAN_PENDING,
+        stop_attempt=1,
+        stop_replan_scope=PlannersReplanScope.CANDIDATE_LOCAL,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    assert store.latest.completed_stage is PlannersCheckpointStage.REPLAN_PENDING
+    assert store.latest.aster_attempt == 1
+    assert store.latest.replan_scope is PlannersReplanScope.CANDIDATE_LOCAL
+    assert store.latest.local_replan_attempt == 1
+    assert store.latest.planners_feedback is not None
+    assert "instruction" not in store.latest.planners_feedback
+    assert store.latest.replan_reuse is not None
+    assert store.latest.replan_reuse["previous_slots"][0]["slot_id"] == "slot_01"
+    assert "group_001" in store.latest.replan_reuse["previous_candidate_pool"]
+    store.latest = PlannersCheckpoint.from_dict(store.latest.to_dict())
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("repair_groups") == 1
+    assert calls.count("refresh_story_groups") == 1
+    assert calls.count("scout_with_reuse") == 1
+    assert calls.count("edit_composer") == 1
+
+
+def test_global_retry_checkpoint_discards_candidate_reuse_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_first_global_composition=True,
     )
     token = _BoundaryToken()
     store = _MemoryCheckpointStore(
@@ -447,10 +1087,9 @@ def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
             checkpoint_store=store,
         )
     assert store.latest is not None
-    assert store.latest.completed_stage is PlannersCheckpointStage.REPLAN_PENDING
-    assert store.latest.aster_attempt == 2
-    assert store.latest.planners_feedback is not None
-    assert "instruction" not in store.latest.planners_feedback
+    assert store.latest.replan_scope is PlannersReplanScope.GLOBAL
+    assert store.latest.local_replan_attempt == 0
+    assert store.latest.replan_reuse is None
     token.cancelled = False
 
     result = Planners(_config(tmp_path)).plan(
@@ -461,27 +1100,216 @@ def test_resume_after_replan_reuses_second_arrangement_and_sanitizes_feedback(
 
     assert result.status == "success"
     assert calls.count("arrangement_architect") == 2
-    assert calls.count("edit_composer") == 2
+    assert calls.count("timeline_scout") == 2
+    assert calls.count("scout_with_reuse") == 0
 
 
-def test_checkpoint_contract_rejects_non_string_nested_keys() -> None:
-    value: dict[str, Any] = {
-        "schema_version": "1.0",
+def test_candidate_local_story_checkpoint_keeps_reuse_seed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.STORY,
+        stop_attempt=1,
+        stop_replan_scope=PlannersReplanScope.CANDIDATE_LOCAL,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    assert store.latest.completed_stage is PlannersCheckpointStage.STORY
+    assert store.latest.aster_attempt == 1
+    assert store.latest.replan_scope is PlannersReplanScope.CANDIDATE_LOCAL
+    assert store.latest.local_replan_attempt == 1
+    assert store.latest.replan_reuse is not None
+    assert store.latest.replan_reuse["affected_parent_group_ids"] == [
+        "group_001"
+    ]
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert calls.count("repair_groups") == 1
+    assert calls.count("refresh_story_groups") == 1
+    assert calls.count("scout_with_reuse") == 1
+
+
+def test_revision_checkpoint_and_final_diagnostics_store_revised_trajectory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        revise_to_alternative=True,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.REVISION)
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+    assert store.latest is not None
+    assert store.latest.selected_trajectory_ids == {
+        "group_001": "group_001_trajectory_002"
+    }
+    assert store.latest.selection is not None
+    assert store.latest.selection["composer_selected_trajectory_ids"] == {
+        "group_001": "group_001_trajectory_001"
+    }
+    assert store.latest.selection["selected_trajectory_ids"] == {
+        "group_001": "group_001_trajectory_002"
+    }
+    token.cancelled = False
+
+    result = Planners(_config(tmp_path)).plan(
+        request,
+        cancellation_token=token,
+        checkpoint_store=store,
+    )
+    diagnostics = json.loads(
+        result.selection_diagnostics_path.read_text(encoding="utf-8")
+    )
+
+    assert diagnostics["selected_trajectory_ids"] == {
+        "group_001": "group_001_trajectory_002"
+    }
+    assert diagnostics["final_candidate_ids"] == ["candidate_02"]
+
+
+def _arrangement_checkpoint_document() -> dict[str, Any]:
+    return {
+        "schema_version": "4.0",
         "completed_stage": "arrangement_architect",
         "aster_attempt": 1,
-        "music_profile": {1: "coerced"},
-        "slots": [{"slot_id": "slot_01"}],
+        "replan_scope": None,
+        "local_replan_attempt": 0,
+        "music_profile": {"source_duration_sec": 30.0},
+        "slots": [
+            {
+                "slot_id": "slot_01",
+                "group_id": "group_001",
+                "source_segment_id": "segment_0001",
+                "planned_duration_ms": 1000,
+            }
+        ],
+        "arrangement_groups": [
+            {
+                "group_id": "group_001",
+                "source_segment_id": "segment_0001",
+                "slot_ids": ["slot_01"],
+                "total_planned_duration_ms": 1000,
+            }
+        ],
+        "planning_segments": None,
+        "planning_groups": None,
         "dialogue_anchors": None,
         "candidate_pool": None,
+        "replan_reuse": None,
         "beam_path": None,
+        "selected_trajectory_ids": None,
         "selection": None,
         "pairwise_scores": None,
         "raw_script": None,
         "planners_feedback": None,
         "stage_timings_sec": {},
-        "prior_model_usage": {},
+        "prior_model_usage": empty_usage_summary(),
         "prior_model_call_count": 0,
     }
+
+
+def _candidate_local_pending_checkpoint_document() -> dict[str, Any]:
+    value = _arrangement_checkpoint_document()
+    value.update(
+        {
+            "completed_stage": "replan_pending",
+            "replan_scope": "candidate_local",
+            "local_replan_attempt": 1,
+            "planners_feedback": {
+                "diagnostics": {
+                    "failed_parent_group_ids": ["group_001"],
+                }
+            },
+            "replan_reuse": {
+                "previous_slots": list(value["slots"]),
+                "previous_planning_segments": [],
+                "previous_planning_groups": [],
+                "previous_dialogue_anchors": [],
+                "previous_candidate_pool": {"group_001": []},
+                "affected_parent_group_ids": [],
+            },
+        }
+    )
+    return value
+
+
+def test_candidate_local_pending_checkpoint_round_trip() -> None:
+    value = _candidate_local_pending_checkpoint_document()
+
+    restored = PlannersCheckpoint.from_dict(value)
+
+    assert restored.to_dict() == value
+
+
+def test_candidate_local_pending_checkpoint_requires_failed_parent_groups() -> None:
+    value = _candidate_local_pending_checkpoint_document()
+    value["planners_feedback"]["diagnostics"]["failed_parent_group_ids"] = []
+
+    with pytest.raises(ValueError, match="failed_parent_group_ids"):
+        PlannersCheckpoint.from_dict(value)
+
+
+def test_checkpoint_contract_rejects_schema_1_without_compatibility() -> None:
+    value = _arrangement_checkpoint_document()
+    value["schema_version"] = "1.0"
+
+    with pytest.raises(ValueError, match=r"Unsupported.*'1\.0'"):
+        PlannersCheckpoint.from_dict(value)
+
+
+def test_checkpoint_contract_rejects_schema_2_without_compatibility() -> None:
+    value = _arrangement_checkpoint_document()
+    value["schema_version"] = "2.0"
+
+    with pytest.raises(ValueError, match=r"Unsupported.*'2\.0'"):
+        PlannersCheckpoint.from_dict(value)
+
+
+def test_checkpoint_contract_rejects_schema_3_without_compatibility() -> None:
+    value = _arrangement_checkpoint_document()
+    value["schema_version"] = "3.0"
+
+    with pytest.raises(ValueError, match=r"Unsupported.*'3\.0'"):
+        PlannersCheckpoint.from_dict(value)
+
+
+def test_checkpoint_contract_rejects_non_string_nested_keys() -> None:
+    value = _arrangement_checkpoint_document()
+    value["music_profile"] = {1: "coerced"}
 
     with pytest.raises(TypeError, match="string keys"):
         PlannersCheckpoint.from_dict(value)

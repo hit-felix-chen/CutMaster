@@ -29,7 +29,7 @@
   "run_checkpoint_invalid": "The saved ASTER checkpoint failed validation. Use Retry to start this Run again.",
   "run_again_not_allowed": "Only a completed Run can run again.",
   "anchor_locked": "Story Anchors are locked and cannot be replaced.",
-  "invalid_candidate_replacement": "The selected Candidate does not belong to this Slot.",
+  "invalid_candidate_replacement": "The selected trajectory does not belong to this Slot Group.",
   "revision_infeasible": "These replacements cannot form a valid edit. Adjust them and try again.",
   "review_artifact_unavailable": "A required Review artifact is unavailable or failed validation.",
   "render_media_unavailable": "The rendered video is not available for playback or download.",

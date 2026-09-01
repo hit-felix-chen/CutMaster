@@ -78,21 +78,28 @@ class AnalyserConfig:
 
 
 @dataclass(frozen=True)
+class AsterTeamConfig:
+    max_rounds: int = 3
+    max_local_replans_per_round: int = 2
+
+
+@dataclass(frozen=True)
 class ArrangementArchitectConfig:
     target_clip_duration_sec: float = 4.0
-    replan_max_rounds: int = 3
+    max_model_requests: int = 3
 
 
 @dataclass(frozen=True)
 class DialogueAnchorConfig:
     max_anchors: int = 4
     min_anchor_duration_sec: float = 1.5
+    max_model_requests: int = 3
 
 
 @dataclass(frozen=True)
 class CandidateRetrievalConfig:
-    candidates_per_slot: int = 3
-    retrieval_max_rounds: int = 3
+    target_trajectories_per_group: int = 3
+    max_rounds: int = 4
     motion_sample_fps: float = 2.0
     motion_workers: int = 4
     static_kinetic_energy_threshold: float = 0.01
@@ -119,6 +126,7 @@ class SourceWindowOptimizationConfig:
 
 @dataclass(frozen=True)
 class PlannersConfig:
+    aster_team: AsterTeamConfig = field(default_factory=AsterTeamConfig)
     arrangement_architect: ArrangementArchitectConfig = field(
         default_factory=ArrangementArchitectConfig
     )
@@ -175,6 +183,7 @@ __all__ = [
     "ASRConfig",
     "AnalyserConfig",
     "AppConfig",
+    "AsterTeamConfig",
     "BeamSearchConfig",
     "CandidateRetrievalConfig",
     "DialogueAnchorConfig",

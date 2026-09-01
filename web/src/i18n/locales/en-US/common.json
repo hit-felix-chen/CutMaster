@@ -166,35 +166,35 @@
     "editLabel": "Edit {{sequence}}",
     "basedOn": "Based on Edit {{sequence}}",
     "variantLabel": "Variant {{number}}",
-    "inspector": "Slot and Candidate Inspector",
+    "inspector": "Slot and Group Trajectory Inspector",
     "slotNumber": "Slot {{number}}",
     "storyAnchor": "Story Anchor",
     "outputRange": "Output range",
     "sourceRange": "Source range",
-    "candidateSpace": "Candidate Space",
-    "candidateCount_one": "{{count}} candidate",
-    "candidateCount_other": "{{count}} candidates",
+    "candidateSpace": "Group trajectories",
+    "trajectoryCount_one": "{{count}} trajectory",
+    "trajectoryCount_other": "{{count}} trajectories",
     "anchorLocked": "Story Anchor Slots are locked to protect the narrative and original dialogue.",
     "currentChoice": "Current choice",
     "visualScore": "Visual",
     "semanticScore": "Relevance",
     "emotionScore": "Emotion",
     "previewSource": "Preview source",
-    "useCandidate": "Use candidate",
-    "previewingCandidate": "Previewing {{candidate}}",
-    "undoSlot": "Undo Slot",
+    "useTrajectory": "Use trajectory",
+    "previewingTrajectory": "Previewing {{trajectory}}",
+    "undoGroup": "Undo Group",
     "savingRevision": "Saving",
     "saveFailed": "The revision was not saved",
     "variantUnavailable": "This Render Variant is not ready to play",
     "timeline": "Review timeline",
     "slotTimeline": "Slot Timeline",
-    "timelineHelp": "Output timing with locked dialogue anchors and replacement state.",
+    "timelineHelp": "Output timing with locked dialogue anchors and Group trajectory replacements.",
     "dialogue": "Dialogue",
     "musicBeats": "Music beats",
     "musicBeatsUnavailable": "No real beat analysis is available",
     "noSlots": "This Frozen Edit has no Slots",
     "leaveTitle": "Discard unsaved revision?",
-    "leaveBody": "Candidate replacements exist only on this page. Save the revision, or explicitly discard them before leaving this Frozen Edit or Render Variant.",
+    "leaveBody": "Trajectory replacements exist only on this page. Save the revision, or explicitly discard them before leaving this Frozen Edit or Render Variant.",
     "stayOnPage": "Stay on page",
     "discardAndLeave": "Discard changes and leave"
   },
@@ -249,27 +249,27 @@
       "arrangementArchitect": {
         "name": "Arrangement Architect",
         "active": "Arrangement Architect is shaping the edit",
-        "description": "Defining Slot lengths, pacing, emotional progression, and narrative structure."
+        "description": "Defining Slot timing and grouping adjacent Slots on one Segment."
       },
       "storyEditor": {
         "name": "Story Editor",
         "active": "Story Editor is anchoring the story",
-        "description": "Selecting original dialogue that preserves key events and the editing intent."
+        "description": "Selecting original dialogue and splitting ordinary group Slots around Anchor pictures."
       },
       "timelineScout": {
         "name": "Timeline Scout",
-        "active": "Timeline Scout is retrieving candidates",
-        "description": "Searching the source timeline and validating visual candidates for each Slot."
+        "active": "Timeline Scout is retrieving group trajectories",
+        "description": "Searching the source timeline for complete, indivisible candidate trajectories for each Slot Group."
       },
       "editComposer": {
         "name": "Edit Composer",
         "active": "Edit Composer is assembling the sequence",
-        "description": "Composing a globally coherent sequence under narrative and visual constraints."
+        "description": "Composing a chronological, globally coherent sequence from whole group trajectories."
       },
       "revisionEditor": {
         "name": "Revision Editor",
         "active": "Revision Editor is reviewing the cut",
-        "description": "Reviewing the candidate sequence and replacing weak choices before freezing the edit."
+        "description": "Reviewing the candidate sequence and replacing weak choices as whole group trajectories."
       }
     }
   },

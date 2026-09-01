@@ -105,6 +105,8 @@ class RunPlanningArtifacts:
     render_plan: Path
     candidate_pool: Path
     edit_plan: Path
+    planning_segments: Path
+    planning_groups: Path
     dialogue_anchors: Path
     raw_script: Path
     music_profile: Path
@@ -122,6 +124,8 @@ class RunPlanningArtifacts:
             "render_plan": result.render_plan_path,
             "candidate_pool": result.candidate_pool_path,
             "edit_plan": result.edit_plan_path,
+            "planning_segments": result.planning_segments_path,
+            "planning_groups": result.planning_groups_path,
             "dialogue_anchors": result.dialogue_anchors_path,
             "raw_script": result.raw_script_path,
             "music_profile": result.music_profile_path,
@@ -147,6 +151,8 @@ class RunPlanningArtifacts:
             render_plan=resolved["render_plan"],
             candidate_pool=resolved["candidate_pool"],
             edit_plan=resolved["edit_plan"],
+            planning_segments=resolved["planning_segments"],
+            planning_groups=resolved["planning_groups"],
             dialogue_anchors=resolved["dialogue_anchors"],
             raw_script=resolved["raw_script"],
             music_profile=resolved["music_profile"],

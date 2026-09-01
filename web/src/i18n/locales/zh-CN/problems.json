@@ -29,7 +29,7 @@
   "run_checkpoint_invalid": "保存的 ASTER 检查点校验失败，请使用“重试”重新运行。",
   "run_again_not_allowed": "只有已完成的剪辑运行才能再次运行。",
   "anchor_locked": "故事锚点已锁定，不能替换。",
-  "invalid_candidate_replacement": "所选候选不属于这个镜头位置。",
+  "invalid_candidate_replacement": "所选轨迹不属于这个 Slot 分组。",
   "revision_infeasible": "这些替换无法组成有效剪辑，请调整后重试。",
   "review_artifact_unavailable": "审阅所需的产物不可用或校验失败。",
   "render_media_unavailable": "渲染视频尚不可播放或下载。",

@@ -70,6 +70,7 @@ function reviewFixture(
     slots: [
       {
         slot_id: 'slot_01',
+        group_id: 'group_anchor_01',
         position: 1,
         is_anchor: true,
         output_start_sec: 0,
@@ -78,6 +79,7 @@ function reviewFixture(
         source_end_sec: 14,
         source_timestamp: '00:00:10,000-00:00:14,000',
         selected_candidate_id: 'anchor_1',
+        selected_trajectory_id: 'trajectory_anchor_1',
         picture: 'The opening line establishes the story.',
         selection_scores: { unary: 0.9 },
         dialogue_anchor: {
@@ -93,6 +95,7 @@ function reviewFixture(
       },
       {
         slot_id: 'slot_02',
+        group_id: 'group_02',
         position: 2,
         is_anchor: false,
         output_start_sec: 4,
@@ -101,68 +104,63 @@ function reviewFixture(
         source_end_sec: 24,
         source_timestamp: '00:00:20,000-00:00:24,000',
         selected_candidate_id: 'candidate_a',
+        selected_trajectory_id: 'trajectory_a',
         picture: 'The pair cross the city at night.',
         selection_scores: { unary: 0.82 },
         dialogue_anchor: null,
       },
     ],
     candidates: {
-      slot_01: [
+      group_02: [
         {
-          candidate_id: 'anchor_1',
-          slot_id: 'slot_01',
-          source_start_sec: 10,
-          source_end_sec: 14,
-          source_timestamp: '00:00:10,000-00:00:14,000',
-          description: 'The locked original dialogue.',
-          semantic_relevance: 0.9,
-          visual_score: 0.8,
-          protagonist_visibility_score: 0.8,
-          emotional_intensity: 0.7,
-          kinetic_energy: 0.4,
-          salience: 1,
-          visual_evidence: null,
+          trajectory_id: 'trajectory_a',
+          group_id: 'group_02',
+          planning_segment_id: 'segment_0002_1',
           selected: true,
           eligible_for_replacement: false,
-          media_url: '/api/materials/mat_video/source',
-        },
-      ],
-      slot_02: [
-        {
-          candidate_id: 'candidate_a',
-          slot_id: 'slot_02',
-          source_start_sec: 20,
-          source_end_sec: 24,
-          source_timestamp: '00:00:20,000-00:00:24,000',
-          description: 'The selected city crossing.',
-          semantic_relevance: 0.82,
-          visual_score: 0.75,
-          protagonist_visibility_score: 0.8,
-          emotional_intensity: 0.65,
-          kinetic_energy: 0.55,
-          salience: 0.8,
-          visual_evidence: 'Both protagonists remain visible.',
-          selected: true,
-          eligible_for_replacement: false,
-          media_url: '/api/materials/mat_video/source',
+          items: [
+            {
+              candidate_id: 'candidate_a',
+              slot_id: 'slot_02',
+              source_start_sec: 20,
+              source_end_sec: 24,
+              source_timestamp: '00:00:20,000-00:00:24,000',
+              description: 'The selected city crossing.',
+              semantic_relevance: 0.82,
+              visual_score: 0.75,
+              protagonist_visibility_score: 0.8,
+              emotional_intensity: 0.65,
+              kinetic_energy: 0.55,
+              salience: 0.8,
+              visual_evidence: 'Both protagonists remain visible.',
+              media_url: '/api/materials/mat_video/source',
+            },
+          ],
         },
         {
-          candidate_id: 'candidate_b',
-          slot_id: 'slot_02',
-          source_start_sec: 30,
-          source_end_sec: 34,
-          source_timestamp: '00:00:30,000-00:00:34,000',
-          description: 'A quieter alternate city crossing.',
-          semantic_relevance: 0.9,
-          visual_score: 0.92,
-          protagonist_visibility_score: 0.9,
-          emotional_intensity: 0.7,
-          kinetic_energy: 0.4,
-          salience: 0.85,
-          visual_evidence: 'The alternate preserves screen direction.',
+          trajectory_id: 'trajectory_b',
+          group_id: 'group_02',
+          planning_segment_id: 'segment_0002_1',
           selected: false,
           eligible_for_replacement: true,
-          media_url: '/api/materials/mat_video/source',
+          items: [
+            {
+              candidate_id: 'candidate_b',
+              slot_id: 'slot_02',
+              source_start_sec: 30,
+              source_end_sec: 34,
+              source_timestamp: '00:00:30,000-00:00:34,000',
+              description: 'A quieter alternate city crossing.',
+              semantic_relevance: 0.9,
+              visual_score: 0.92,
+              protagonist_visibility_score: 0.9,
+              emotional_intensity: 0.7,
+              kinetic_energy: 0.4,
+              salience: 0.85,
+              visual_evidence: 'The alternate preserves screen direction.',
+              media_url: '/api/materials/mat_video/source',
+            },
+          ],
         },
       ],
     },
@@ -316,7 +314,7 @@ describe('Review workspace', () => {
         /Candidate Space is unavailable|before Candidate Space persistence/,
       ),
     ).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Use candidate' }))
+    await user.click(screen.getByRole('button', { name: 'Use trajectory' }))
     expect(screen.getByText('Unsaved changes')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Undo changes' })).toBeEnabled()
@@ -415,7 +413,7 @@ describe('Review workspace', () => {
     )
     const user = userEvent.setup()
 
-    await user.click(await screen.findByRole('button', { name: 'Use candidate' }))
+    await user.click(await screen.findByRole('button', { name: 'Use trajectory' }))
     expect(screen.getByText('Unsaved changes')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -428,7 +426,7 @@ describe('Review workspace', () => {
     expect(postCall).toBeDefined()
     expect(postCall?.[0]).toBe('/api/frozen-edits/edit_1/revisions')
     expect(JSON.parse(String(postCall?.[1]?.body))).toEqual({
-      replacements: [{ slot_id: 'slot_02', candidate_id: 'candidate_b' }],
+      replacements: [{ group_id: 'group_02', trajectory_id: 'trajectory_b' }],
     })
     expect(postCall?.[1]?.headers).toMatchObject({
       'Idempotency-Key': expect.any(String),
@@ -445,7 +443,7 @@ describe('Review workspace', () => {
     )
     const user = userEvent.setup()
 
-    await user.click(await screen.findByRole('button', { name: 'Use candidate' }))
+    await user.click(await screen.findByRole('button', { name: 'Use trajectory' }))
     await user.click(screen.getByRole('link', { name: 'Back to Run' }))
 
     const stay = screen.getByRole('button', { name: 'Stay on page' })

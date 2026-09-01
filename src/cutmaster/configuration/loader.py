@@ -10,6 +10,7 @@ from cutmaster.configuration.schema import (
     AnalyserConfig,
     AppConfig,
     ArrangementArchitectConfig,
+    AsterTeamConfig,
     BeamSearchConfig,
     CandidateRetrievalConfig,
     DialogueAnchorConfig,
@@ -74,11 +75,19 @@ ANALYSER_SCHEMA: dict[str, set[str]] = {
 }
 
 PLANNERS_SCHEMA: dict[str, set[str]] = {
-    "arrangement_architect": {"target_clip_duration_sec", "replan_max_rounds"},
-    "dialogue_anchors": {"max_anchors", "min_anchor_duration_sec"},
+    "aster_team": {"max_rounds", "max_local_replans_per_round"},
+    "arrangement_architect": {
+        "target_clip_duration_sec",
+        "max_model_requests",
+    },
+    "dialogue_anchors": {
+        "max_anchors",
+        "min_anchor_duration_sec",
+        "max_model_requests",
+    },
     "candidate_retrieval": {
-        "candidates_per_slot",
-        "retrieval_max_rounds",
+        "target_trajectories_per_group",
+        "max_rounds",
         "visual_sample_frames",
         "protagonist_visibility_likert_threshold",
         "motion_sample_fps",
@@ -342,10 +351,14 @@ def _validate_values(config: AppConfig) -> None:
         "analyser.scene_segmentation.focus_shots": analyser.scene_segmentation.focus_shots,
         "analyser.scene_segmentation.frames_per_shot": analyser.scene_segmentation.frames_per_shot,
         "planners.arrangement_architect.target_clip_duration_sec": planners.arrangement_architect.target_clip_duration_sec,
+        "planners.arrangement_architect.max_model_requests": planners.arrangement_architect.max_model_requests,
+        "planners.aster_team.max_rounds": planners.aster_team.max_rounds,
+        "planners.aster_team.max_local_replans_per_round": planners.aster_team.max_local_replans_per_round,
         "planners.dialogue_anchors.max_anchors": planners.dialogue_anchors.max_anchors,
         "planners.dialogue_anchors.min_anchor_duration_sec": planners.dialogue_anchors.min_anchor_duration_sec,
-        "planners.candidate_retrieval.candidates_per_slot": planners.candidate_retrieval.candidates_per_slot,
-        "planners.candidate_retrieval.retrieval_max_rounds": planners.candidate_retrieval.retrieval_max_rounds,
+        "planners.dialogue_anchors.max_model_requests": planners.dialogue_anchors.max_model_requests,
+        "planners.candidate_retrieval.target_trajectories_per_group": planners.candidate_retrieval.target_trajectories_per_group,
+        "planners.candidate_retrieval.max_rounds": planners.candidate_retrieval.max_rounds,
         "planners.candidate_retrieval.visual_sample_frames": planners.candidate_retrieval.visual_sample_frames,
         "planners.candidate_retrieval.motion_sample_fps": planners.candidate_retrieval.motion_sample_fps,
         "planners.candidate_retrieval.motion_workers": planners.candidate_retrieval.motion_workers,
@@ -393,7 +406,6 @@ def _validate_values(config: AppConfig) -> None:
         "vlm.output_price_yuan_per_million_tokens": (
             config.vlm.output_price_yuan_per_million_tokens
         ),
-        "planners.arrangement_architect.replan_max_rounds": planners.arrangement_architect.replan_max_rounds,
         "planners.script_review.review_rounds": planners.script_review.review_rounds,
         "planners.source_window_optimization.search_margin_sec": planners.source_window_optimization.search_margin_sec,
         "planners.source_window_optimization.min_boundary_distance_sec": planners.source_window_optimization.min_boundary_distance_sec,
@@ -485,6 +497,7 @@ def _build_config(
     asr = _section(data, "analyser", "asr")
     scene = _section(data, "analyser", "scene_segmentation")
     annotation = _section(data, "analyser", "shot_annotation")
+    aster_team = _section(data, "planners", "aster_team")
     arrangement = _section(data, "planners", "arrangement_architect")
     anchors = _section(data, "planners", "dialogue_anchors")
     retrieval = _section(data, "planners", "candidate_retrieval")
@@ -557,23 +570,30 @@ def _build_config(
             ),
         ),
         planners=PlannersConfig(
+            aster_team=AsterTeamConfig(
+                max_rounds=int(aster_team.get("max_rounds", 3)),
+                max_local_replans_per_round=int(
+                    aster_team.get("max_local_replans_per_round", 2)
+                ),
+            ),
             arrangement_architect=ArrangementArchitectConfig(
                 target_clip_duration_sec=float(
                     arrangement.get("target_clip_duration_sec", 4.0)
                 ),
-                replan_max_rounds=int(
-                    arrangement.get("replan_max_rounds", 3)
-                ),
+                max_model_requests=int(arrangement.get("max_model_requests", 3)),
             ),
             dialogue_anchors=DialogueAnchorConfig(
                 max_anchors=int(anchors.get("max_anchors", 4)),
                 min_anchor_duration_sec=float(
                     anchors.get("min_anchor_duration_sec", 1.5)
                 ),
+                max_model_requests=int(anchors.get("max_model_requests", 3)),
             ),
             candidate_retrieval=CandidateRetrievalConfig(
-                candidates_per_slot=int(retrieval.get("candidates_per_slot", 3)),
-                retrieval_max_rounds=int(retrieval.get("retrieval_max_rounds", 3)),
+                target_trajectories_per_group=int(
+                    retrieval.get("target_trajectories_per_group", 3)
+                ),
+                max_rounds=int(retrieval.get("max_rounds", 4)),
                 motion_sample_fps=float(retrieval.get("motion_sample_fps", 2.0)),
                 motion_workers=int(retrieval.get("motion_workers", 4)),
                 static_kinetic_energy_threshold=float(

@@ -26,7 +26,7 @@ from cutmaster.application.runs import CompleteRunCommand, CreateRunCommand
 from cutmaster.domain.ids import FrozenEditId
 from cutmaster.domain.materials import MaterialFingerprint
 from cutmaster.workflow.contracts.render_plan import RenderPlan
-from cutmaster.workflow.shared.timecode import format_range
+from cutmaster.workflow.shared.timecode import format_range, parse_range
 
 
 def _command_id() -> str:
@@ -144,6 +144,13 @@ def review_fixture(
     pool: dict[str, list[dict[str, Any]]] = {}
     for index in range(1, 16):
         slot_id = f"slot_{index:02d}"
+        group_id = (
+            "group_anchor_01"
+            if index == 1
+            else "group_02"
+            if index in {2, 3}
+            else f"group_{index:02d}"
+        )
         source_start = float((index - 1) * 10)
         output_start = float((index - 1) * 2)
         selected_id = (
@@ -169,7 +176,13 @@ def review_fixture(
             "narration": f"Play source {index}",
             "OST": 1,
             "slot_id": slot_id,
+            "group_id": group_id,
             "candidate_id": selected_id,
+            "trajectory_id": (
+                "trajectory_anchor_01"
+                if index == 1
+                else f"{group_id}_trajectory_01"
+            ),
             "output_start_sec": output_start,
             "output_end_sec": output_start + 2.0,
             "planned_duration_sec": 2.0,
@@ -190,52 +203,67 @@ def review_fixture(
             clip["dialogue_anchor"] = anchor
         clips.append(clip)
 
-        def candidate(
-            candidate_id: str,
-            start_sec: float,
-            *,
-            description: str,
-            dialogue_anchor: dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            value: dict[str, Any] = {
-                "candidate_id": candidate_id,
-                "slot_id": slot_id,
-                "timestamp": format_range(start_sec, start_sec + 2.0),
-                "description": description,
-                "structured_context": description,
-                "semantic_relevance": 0.88,
-                "visual_slot_relevance_likert": 4,
-                "protagonist_visibility_likert": 4,
-                "emotional_intensity": 0.55,
-                "kinetic_energy": 0.45,
-                "salience": 0.82,
-                "visual_evidence": f"Visible evidence for {candidate_id}",
-            }
-            if dialogue_anchor is not None:
-                value["dialogue_anchor"] = dialogue_anchor
-            return value
+    def candidate(
+        clip: dict[str, Any],
+        suffix: str,
+        start_sec: float,
+    ) -> dict[str, Any]:
+        slot_id = str(clip["slot_id"])
+        index = int(slot_id.rsplit("_", 1)[1])
+        candidate_id = f"{slot_id}_candidate_{suffix}"
+        description = (
+            f"Selected scene {index}"
+            if suffix == "01"
+            else f"Alternative scene {index}"
+        )
+        return {
+            "candidate_id": candidate_id,
+            "slot_id": slot_id,
+            "timestamp": format_range(start_sec, start_sec + 2.0),
+            "description": description,
+            "structured_context": description,
+            "semantic_relevance": 0.88,
+            "visual_slot_relevance_likert": 4,
+            "protagonist_visibility_likert": 4,
+            "emotional_intensity": 0.55,
+            "kinetic_energy": 0.45,
+            "salience": 0.82,
+            "visual_evidence": f"Visible evidence for {candidate_id}",
+        }
 
-        pool[slot_id] = [
-            candidate(
-                selected_id,
-                source_start,
-                description=f"Selected scene {index}",
-                dialogue_anchor=anchor,
-            ),
-            candidate(
-                f"{slot_id}_candidate_02",
-                source_start + 3.0,
-                description=f"Alternative scene {index}",
-            ),
-        ]
+    grouped_clips: dict[str, list[dict[str, Any]]] = {}
+    for clip in clips[1:]:
+        grouped_clips.setdefault(str(clip["group_id"]), []).append(clip)
+    for group_id, group_clips in grouped_clips.items():
+        pool[group_id] = []
+        for suffix, offset in (("01", 0.0), ("02", 3.0)):
+            pool[group_id].append(
+                {
+                    "trajectory_id": f"{group_id}_trajectory_{suffix}",
+                    "group_id": group_id,
+                    "planning_segment_id": f"segment_{group_id.rsplit('_', 1)[1]}_1",
+                    "items": [
+                        candidate(
+                            clip,
+                            suffix,
+                            parse_range(str(clip["timestamp"]))[0] + offset,
+                        )
+                        for clip in group_clips
+                    ],
+                }
+            )
 
-    # This validated candidate belongs to slot 02 but makes the whole source
-    # sequence overlap slot 03. It exercises the atomic chronology guard.
-    pool["slot_02"].append(
+    # This complete trajectory is valid inside Group 02, but its final item
+    # overlaps the next Group. It exercises the atomic chronology guard.
+    pool["group_02"].append(
         {
-            **pool["slot_02"][1],
-            "candidate_id": "slot_02_candidate_late",
-            "timestamp": format_range(25.0, 27.0),
+            "trajectory_id": "group_02_trajectory_late",
+            "group_id": "group_02",
+            "planning_segment_id": "segment_02_1",
+            "items": [
+                candidate(clips[1], "late", 25.0),
+                candidate(clips[2], "late", 35.0),
+            ],
         }
     )
     plan = RenderPlan.create(
@@ -282,7 +310,49 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _publish_bundle(fixture: ReviewFixture) -> Path:
+def _publish_bundle(
+    fixture: ReviewFixture,
+    *,
+    schema_version: str = "3.0",
+) -> Path:
+    planning_segments: list[dict[str, Any]] = []
+    planning_groups: list[dict[str, Any]] = []
+    clips_by_group: dict[str, list[dict[str, Any]]] = {}
+    for clip in fixture.plan.clips:
+        if "dialogue_anchor" not in clip:
+            clips_by_group.setdefault(str(clip["group_id"]), []).append(dict(clip))
+    for group_id, clips in clips_by_group.items():
+        trajectories = fixture.candidate_pool.get(group_id, [])
+        planning_segment_id = (
+            str(trajectories[0]["planning_segment_id"])
+            if trajectories
+            else f"segment_{group_id.rsplit('_', 1)[-1]}_1"
+        )
+        ranges = [
+            parse_range(str(item["timestamp"]))
+            for trajectory in trajectories
+            for item in trajectory["items"]
+        ]
+        if not ranges:
+            ranges = [parse_range(str(clip["timestamp"])) for clip in clips]
+        source_segment_id = f"source_{group_id}"
+        planning_segments.append(
+            {
+                "planning_segment_id": planning_segment_id,
+                "source_segment_id": source_segment_id,
+                "start_ms": round(min(start for start, _ in ranges) * 1000),
+                "end_ms": round(max(end for _, end in ranges) * 1000),
+            }
+        )
+        planning_groups.append(
+            {
+                "group_id": group_id,
+                "parent_group_id": group_id,
+                "source_segment_id": source_segment_id,
+                "planning_segment_id": planning_segment_id,
+                "slot_ids": [str(clip["slot_id"]) for clip in clips],
+            }
+        )
     payloads = {
         "candidate_pool": fixture.candidate_pool,
         "edit_plan": [
@@ -294,9 +364,15 @@ def _publish_bundle(fixture: ReviewFixture) -> Path:
         ],
         "music_profile": {"schema_version": "1.0", "beats_sec": [0.5, 1.5]},
         "selection_diagnostics": {
-            "beam_candidate_ids": [clip["candidate_id"] for clip in fixture.plan.clips]
+            "selected_trajectory_ids": {
+                str(clip["group_id"]): str(clip["trajectory_id"])
+                for clip in fixture.plan.clips
+            }
         },
     }
+    if schema_version == "3.0":
+        payloads["planning_segments"] = planning_segments
+        payloads["planning_groups"] = planning_groups
     entries: dict[str, dict[str, str]] = {}
     for logical_name, payload in payloads.items():
         path = fixture.plan_path.parent / f"{logical_name}.fixture.json"
@@ -305,9 +381,21 @@ def _publish_bundle(fixture: ReviewFixture) -> Path:
     manifest = fixture.plan_path.parent / "review_bundle.json"
     _write_json(
         manifest,
-        {"schema_version": "1.0", "artifacts": entries},
+        {"schema_version": schema_version, "artifacts": entries},
     )
     return manifest
+
+
+def test_legacy_completed_review_bundle_remains_viewable(
+    review_fixture: ReviewFixture,
+) -> None:
+    _publish_bundle(review_fixture, schema_version="2.0")
+
+    response = review_fixture.client.get(
+        f"/api/frozen-edits/{review_fixture.edit_id}/review"
+    )
+
+    assert response.status_code == 200
 
 
 def test_frozen_edit_without_candidate_bundle_is_unavailable(
@@ -329,7 +417,10 @@ def test_guided_revision_without_candidate_bundle_is_unavailable_and_atomic(
         headers={"Idempotency-Key": _command_id()},
         json={
             "replacements": [
-                {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}
+                {
+                    "group_id": "group_02",
+                    "trajectory_id": "group_02_trajectory_02",
+                }
             ]
         },
     )
@@ -353,16 +444,19 @@ def test_committed_review_bundle_exposes_only_real_validated_candidates(
     payload = response.json()
     assert "candidate_space_available" not in payload
     assert "candidate_space_unavailable_reason" not in payload
-    selected, alternative, late = payload["candidates"]["slot_02"]
-    assert selected["candidate_id"] == "slot_02_candidate_01"
+    selected, alternative, late = payload["candidates"]["group_02"]
+    assert selected["trajectory_id"] == "group_02_trajectory_01"
     assert selected["selected"] is True
     assert selected["eligible_for_replacement"] is False
-    assert alternative["candidate_id"] == "slot_02_candidate_02"
-    assert alternative["description"] == "Alternative scene 2"
-    assert alternative["visual_score"] == 4.0
+    assert [item["slot_id"] for item in selected["items"]] == ["slot_02", "slot_03"]
+    assert alternative["trajectory_id"] == "group_02_trajectory_02"
+    assert alternative["items"][0]["description"] == "Alternative scene 2"
+    assert alternative["items"][0]["visual_score"] == 4.0
     assert alternative["eligible_for_replacement"] is True
-    assert alternative["media_url"].endswith("/source")
-    assert late["candidate_id"] == "slot_02_candidate_late"
+    assert alternative["items"][0]["media_url"].endswith("/source")
+    assert late["trajectory_id"] == "group_02_trajectory_late"
+    assert payload["slots"][1]["group_id"] == "group_02"
+    assert payload["slots"][1]["selected_trajectory_id"] == "group_02_trajectory_01"
     assert payload["variants"] == []
     serialized = json.dumps(payload, sort_keys=True)
     assert "a" * 64 not in serialized
@@ -373,6 +467,50 @@ def test_committed_review_bundle_exposes_only_real_validated_candidates(
     assert "specification_digest" not in serialized
     assert "master_sha256" not in serialized
     assert "master_relative_path" not in serialized
+
+
+def test_review_and_guided_revision_reject_trajectory_outside_planning_segment(
+    review_fixture: ReviewFixture,
+) -> None:
+    manifest_path = _publish_bundle(review_fixture)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    segments_path = (
+        manifest_path.parent / manifest["artifacts"]["planning_segments"]["path"]
+    )
+    segments = json.loads(segments_path.read_text(encoding="utf-8"))
+    group_segment_id = review_fixture.candidate_pool["group_02"][0][
+        "planning_segment_id"
+    ]
+    segment = next(
+        item
+        for item in segments
+        if item["planning_segment_id"] == group_segment_id
+    )
+    segment["end_ms"] = 24_000
+    _write_json(segments_path, segments)
+    manifest["artifacts"]["planning_segments"]["sha256"] = _sha256(segments_path)
+    _write_json(manifest_path, manifest)
+
+    review = review_fixture.client.get(
+        f"/api/frozen-edits/{review_fixture.edit_id}/review"
+    )
+    revision = review_fixture.client.post(
+        f"/api/frozen-edits/{review_fixture.edit_id}/revisions",
+        headers={"Idempotency-Key": _command_id()},
+        json={
+            "replacements": [
+                {
+                    "group_id": "group_02",
+                    "trajectory_id": "group_02_trajectory_02",
+                }
+            ]
+        },
+    )
+
+    assert review.status_code == 409
+    assert review.json()["code"] == "review_artifact_unavailable"
+    assert revision.status_code == 409
+    assert revision.json()["code"] == "review_artifact_unavailable"
 
 
 def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
@@ -388,7 +526,12 @@ def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
     review_fixture.client.app.state.cutmaster_job_dispatcher = PreviewDispatcher()
     command_id = _command_id()
     request = {
-        "replacements": [{"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}]
+        "replacements": [
+            {
+                "group_id": "group_02",
+                "trajectory_id": "group_02_trajectory_02",
+            }
+        ]
     }
 
     first = review_fixture.client.post(
@@ -424,10 +567,14 @@ def test_guided_revision_creates_one_idempotent_child_and_preserves_timing(
     original = review_fixture.plan.clips[1]
     revised = child_plan.clips[1]
     assert revised["candidate_id"] == "slot_02_candidate_02"
+    assert revised["trajectory_id"] == "group_02_trajectory_02"
     assert revised["timestamp"] == format_range(13.0, 15.0)
     assert revised["output_frame_range"] == original["output_frame_range"]
     assert revised["output_start_sec"] == original["output_start_sec"]
     assert revised["output_end_sec"] == original["output_end_sec"]
+    assert child_plan.clips[2]["candidate_id"] == "slot_03_candidate_02"
+    assert child_plan.clips[2]["trajectory_id"] == "group_02_trajectory_02"
+    assert child_plan.clips[2]["timestamp"] == format_range(23.0, 25.0)
     assert len(review_fixture.application.runs.list_frozen_edits(child.run_id)) == 2
     child_review = review_fixture.client.get(f"/api/frozen-edits/{child_id}/review")
     assert child_review.status_code == 200
@@ -448,18 +595,17 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
     corrupt: str,
 ) -> None:
     if corrupt == "missing_slot":
-        review_fixture.candidate_pool.pop("slot_02")
+        review_fixture.candidate_pool.pop("group_02")
     elif corrupt == "missing_selected":
-        selected_id = str(review_fixture.plan.clips[1]["candidate_id"])
-        review_fixture.candidate_pool["slot_02"] = [
-            item
-            for item in review_fixture.candidate_pool["slot_02"]
-            if item["candidate_id"] != selected_id
+        review_fixture.candidate_pool["group_02"] = [
+            trajectory
+            for trajectory in review_fixture.candidate_pool["group_02"]
+            if trajectory["trajectory_id"] != "group_02_trajectory_01"
         ]
     elif corrupt == "extra_slot":
-        review_fixture.candidate_pool["slot_extra"] = []
+        review_fixture.candidate_pool["group_extra"] = []
     else:
-        review_fixture.candidate_pool["slot_02"][1].pop("slot_id")
+        review_fixture.candidate_pool["group_02"][1]["items"][0].pop("slot_id")
     _publish_bundle(review_fixture)
 
     review = review_fixture.client.get(
@@ -470,7 +616,10 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         headers={"Idempotency-Key": _command_id()},
         json={
             "replacements": [
-                {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"}
+                {
+                    "group_id": "group_02",
+                    "trajectory_id": "group_02_trajectory_02",
+                }
             ]
         },
     )
@@ -489,7 +638,10 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         (
             {
                 "replacements": [
-                    {"slot_id": "slot_01", "candidate_id": "slot_01_candidate_02"}
+                    {
+                        "group_id": "group_anchor_01",
+                        "trajectory_id": "trajectory_anchor_other",
+                    }
                 ]
             },
             "anchor_locked",
@@ -497,7 +649,10 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         (
             {
                 "replacements": [
-                    {"slot_id": "slot_02", "candidate_id": "slot_03_candidate_02"}
+                    {
+                        "group_id": "group_02",
+                        "trajectory_id": "group_04_trajectory_02",
+                    }
                 ]
             },
             "invalid_candidate_replacement",
@@ -505,7 +660,10 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         (
             {
                 "replacements": [
-                    {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_01"}
+                    {
+                        "group_id": "group_02",
+                        "trajectory_id": "group_02_trajectory_01",
+                    }
                 ]
             },
             "invalid_candidate_replacement",
@@ -513,7 +671,10 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         (
             {
                 "replacements": [
-                    {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_late"}
+                    {
+                        "group_id": "group_02",
+                        "trajectory_id": "group_02_trajectory_late",
+                    }
                 ]
             },
             "revision_infeasible",
@@ -521,8 +682,14 @@ def test_incomplete_candidate_space_is_unavailable_for_review_and_revision(
         (
             {
                 "replacements": [
-                    {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_02"},
-                    {"slot_id": "slot_02", "candidate_id": "slot_02_candidate_late"},
+                    {
+                        "group_id": "group_02",
+                        "trajectory_id": "group_02_trajectory_02",
+                    },
+                    {
+                        "group_id": "group_02",
+                        "trajectory_id": "group_02_trajectory_late",
+                    },
                 ]
             },
             "invalid_candidate_replacement",
@@ -576,7 +743,7 @@ def test_invalid_review_bundle_is_a_review_conflict(
     elif corrupt == "path":
         manifest["artifacts"]["candidate_pool"]["path"] = "../outside.json"
     elif corrupt == "schema":
-        manifest["schema_version"] = "0.9"
+        manifest["schema_version"] = "1.0"
     else:
         edit_plan_path = (
             manifest_path.parent / manifest["artifacts"]["edit_plan"]["path"]

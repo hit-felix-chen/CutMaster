@@ -134,6 +134,12 @@ class RenderPlan:
         )
         expected_start = 0
         anchors: list[dict[str, Any]] = []
+        trajectory_contract: bool | None = None
+        current_group_id: str | None = None
+        closed_group_ids: set[str] = set()
+        trajectory_by_group: dict[str, str] = {}
+        candidate_ids: set[str] = set()
+        previous_source_end: float | None = None
         for index, clip in enumerate(self.clips, start=1):
             if not isinstance(clip, dict):
                 raise TypeError(f"Render clip {index} must be an object")
@@ -150,6 +156,62 @@ class RenderPlan:
             )
             if source_end <= source_start:
                 raise ValueError(f"Render clip {index} has an invalid source range")
+            group_id = clip.get("group_id")
+            trajectory_id = clip.get("trajectory_id")
+            has_group = isinstance(group_id, str) and bool(group_id.strip())
+            has_trajectory = isinstance(trajectory_id, str) and bool(
+                trajectory_id.strip()
+            )
+            uses_trajectory_contract = has_group or has_trajectory
+            if trajectory_contract is None:
+                trajectory_contract = uses_trajectory_contract
+            elif trajectory_contract != uses_trajectory_contract:
+                raise ValueError(
+                    "RenderPlan must not mix trajectory-bound and legacy clips"
+                )
+            if uses_trajectory_contract:
+                slot_id = clip.get("slot_id")
+                candidate_id = clip.get("candidate_id")
+                if (
+                    not has_group
+                    or not has_trajectory
+                    or not isinstance(slot_id, str)
+                    or not slot_id.strip()
+                    or not isinstance(candidate_id, str)
+                    or not candidate_id.strip()
+                ):
+                    raise ValueError(
+                        f"Render clip {index} must carry complete trajectory identity"
+                    )
+                normalized_group_id = group_id.strip()
+                normalized_trajectory_id = trajectory_id.strip()
+                normalized_candidate_id = candidate_id.strip()
+                if normalized_group_id != current_group_id:
+                    if current_group_id is not None:
+                        closed_group_ids.add(current_group_id)
+                    if normalized_group_id in closed_group_ids:
+                        raise ValueError(
+                            f"RenderPlan Group {normalized_group_id} is not contiguous"
+                        )
+                    current_group_id = normalized_group_id
+                selected = trajectory_by_group.setdefault(
+                    normalized_group_id,
+                    normalized_trajectory_id,
+                )
+                if selected != normalized_trajectory_id:
+                    raise ValueError(
+                        f"RenderPlan Group {normalized_group_id} mixes trajectories"
+                    )
+                if normalized_candidate_id in candidate_ids:
+                    raise ValueError(
+                        f"RenderPlan contains duplicate Candidate {normalized_candidate_id}"
+                    )
+                candidate_ids.add(normalized_candidate_id)
+                if previous_source_end is not None and source_start < previous_source_end:
+                    raise ValueError(
+                        f"Render clip {index} creates a source overlap or reversal"
+                    )
+                previous_source_end = source_end
             anchor = clip.get("dialogue_anchor")
             if anchor is not None:
                 if not isinstance(anchor, dict):

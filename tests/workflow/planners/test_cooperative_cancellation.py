@@ -148,7 +148,7 @@ def test_aster_checks_cancellation_after_each_agent_boundary(
             self._stage("anchor_story")
             return slots
 
-        def scout(self, _slots):
+        def scout(self, _slots, _cancellation_token=None):
             self._stage("scout")
             return {}
 
