@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -23,7 +23,11 @@ from cutmaster.workflow.contracts.analysis import (
     VideoAnalysisResult,
 )
 from cutmaster.workflow.contracts.material import MaterialRuntimeHandle
-from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    raise_if_cancelled,
+)
 
 MaterialAnalysisResult = VideoAnalysisResult | MusicAnalysisResult
 
@@ -35,6 +39,7 @@ class MaterialAnalysisEngine(Protocol):
         self,
         request: AnalyseVideoRequest,
         *,
+        progress_reporter: ProgressReporter | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> VideoAnalysisResult: ...
 
@@ -42,6 +47,7 @@ class MaterialAnalysisEngine(Protocol):
         self,
         request: AnalyseMusicRequest,
         *,
+        progress_reporter: ProgressReporter | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> MusicAnalysisResult: ...
 
@@ -70,6 +76,11 @@ class ExecuteMaterialAnalysisCommand:
     workspace: AnalysisWorkspace
     video_title: str = ""
     material_reused: bool = False
+    progress_reporter: ProgressReporter | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.material_id, MaterialId):
@@ -168,7 +179,10 @@ class ManagedMaterialAnalysisExecutor:
                 options=VideoAnalysisOptions(video_title=command.video_title),
                 workspace=workspace,
             ),
-            cancellation_token=cancellation_token,
+            **_execution_options(
+                progress_reporter=command.progress_reporter,
+                cancellation_token=cancellation_token,
+            ),
         )
         return replace(result, material_reused=command.material_reused)
 
@@ -188,7 +202,10 @@ class ManagedMaterialAnalysisExecutor:
                 options=MusicAnalysisOptions(),
                 workspace=workspace,
             ),
-            cancellation_token=cancellation_token,
+            **_execution_options(
+                progress_reporter=command.progress_reporter,
+                cancellation_token=cancellation_token,
+            ),
         )
         return replace(result, material_reused=command.material_reused)
 
@@ -202,6 +219,21 @@ def _prepare_workspace(workspace: AnalysisWorkspace) -> AnalysisWorkspace:
         raise ValueError(f"Analysis workspace is not a regular directory: {root}")
     root.mkdir(parents=True, exist_ok=True)
     return AnalysisWorkspace(root)
+
+
+def _execution_options(
+    *,
+    progress_reporter: ProgressReporter | None,
+    cancellation_token: CancellationToken | None,
+) -> dict[str, object]:
+    """Pass optional ports only when configured so simple test engines stay valid."""
+
+    options: dict[str, object] = {}
+    if progress_reporter is not None:
+        options["progress_reporter"] = progress_reporter
+    if cancellation_token is not None:
+        options["cancellation_token"] = cancellation_token
+    return options
 
 
 def _runtime_handle(

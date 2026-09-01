@@ -155,6 +155,28 @@ export type JobProgress = JobProgressBase &
     | { agent: AsterAgent; state: 'running' | 'complete' }
   )
 
+export type MaterialAnalysisNodeState = 'queued' | 'running' | 'complete'
+
+export interface MaterialAnalysisNodeProgress {
+  id: string
+  state: MaterialAnalysisNodeState
+  completed: number
+  total: number
+  unit: string
+}
+
+export interface MaterialAnalysisProgress {
+  schema_version: '2.0'
+  phase: 'analyser'
+  material_type: MaterialType
+  state: string
+  completed: number
+  total: number
+  unit: 'node'
+  active_node: string | null
+  nodes: MaterialAnalysisNodeProgress[]
+}
+
 export interface JobSummary {
   job_id: string
   attempt_id: string
@@ -163,7 +185,7 @@ export interface JobSummary {
   worker_id?: string | null
   process_id?: number | null
   heartbeat_at?: string | null
-  progress: JobProgress | Record<string, unknown>
+  progress: JobProgress | MaterialAnalysisProgress | Record<string, unknown>
   created_at: string
   updated_at: string
 }

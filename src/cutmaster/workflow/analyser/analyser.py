@@ -24,7 +24,12 @@ from cutmaster.workflow.contracts.material import (
     AnalysedMusicRuntimeHandle,
     AnalysedVideoRuntimeHandle,
 )
-from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
+    raise_if_cancelled,
+)
 
 
 def _valid_music_memory(path: Path) -> dict[str, Any] | None:
@@ -70,6 +75,7 @@ class Analyser:
         self,
         request: AnalyseVideoRequest,
         *,
+        progress_reporter: ProgressReporter | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> VideoAnalysisResult:
         raise_if_cancelled(cancellation_token)
@@ -96,23 +102,19 @@ class Analyser:
         )
         analyst = MaterialAnalystAgent(self.config)
         video_title = request.options.video_title or request.material.material_name
-        artifacts = (
-            analyst.analyse(
-                source_video,
-                video_title,
-                subtitle_path,
-                source_fingerprint=str(request.material.expected_fingerprint),
-                material_directory=memory_root,
-            )
-            if cancellation_token is None
-            else analyst.analyse(
-                source_video,
-                video_title,
-                subtitle_path,
-                source_fingerprint=str(request.material.expected_fingerprint),
-                material_directory=memory_root,
-                cancellation_token=cancellation_token,
-            )
+        analysis_options: dict[str, Any] = {
+            "source_fingerprint": str(request.material.expected_fingerprint),
+            "material_directory": memory_root,
+        }
+        if progress_reporter is not None:
+            analysis_options["progress_reporter"] = progress_reporter
+        if cancellation_token is not None:
+            analysis_options["cancellation_token"] = cancellation_token
+        artifacts = analyst.analyse(
+            source_video,
+            video_title,
+            subtitle_path,
+            **analysis_options,
         )
         raise_if_cancelled(cancellation_token)
         memory_schema_version = str(
@@ -165,6 +167,7 @@ class Analyser:
         self,
         request: AnalyseMusicRequest,
         *,
+        progress_reporter: ProgressReporter | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> MusicAnalysisResult:
         raise_if_cancelled(cancellation_token)
@@ -188,6 +191,10 @@ class Analyser:
         )
         memory = _valid_music_memory(memory_path)
         analysis_reused = memory is not None
+        if progress_reporter is not None:
+            progress_reporter.report(
+                ProgressUpdate(0, 1, "music_analysis", "task")
+            )
         if memory is None:
             analyst = MaterialAnalystAgent(self.config)
             if cancellation_token is None:
@@ -199,6 +206,10 @@ class Analyser:
                 )
             raise_if_cancelled(cancellation_token)
             write_music_memory(memory_path, memory)
+        if progress_reporter is not None:
+            progress_reporter.report(
+                ProgressUpdate(1, 1, "music_analysis", "task")
+            )
         raise_if_cancelled(cancellation_token)
         elapsed = time.monotonic() - started
         result = MusicAnalysisResult(

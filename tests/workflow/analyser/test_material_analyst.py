@@ -640,6 +640,14 @@ def test_segment_annotation_uses_one_parallel_vlm_call_per_segment(
             kwargs["package"].response_contract.validate_structure(parsed)
             return kwargs["validate_business"](parsed)
 
+    class Reporter:
+        def __init__(self):
+            self.updates = []
+
+        def report(self, update):
+            self.updates.append(update)
+
+    reporter = Reporter()
     descriptions = _annotate_segments(
         segments,
         Context(),
@@ -651,6 +659,7 @@ def test_segment_annotation_uses_one_parallel_vlm_call_per_segment(
         ),
         5,
         tmp_path / "shot_annotations",
+        progress_reporter=reporter,
     )
     assert len(descriptions) == 2
     assert set(call_order) == {"segment_0", "segment_1"}
@@ -675,12 +684,21 @@ def test_segment_annotation_uses_one_parallel_vlm_call_per_segment(
         summary_context,
         LLMConfig(model="test", base_url="", api_key="test"),
         summary_directory,
+        progress_reporter=reporter,
     )
     assert [segment.segment_summary for segment in summarized] == [
         "Concise summary for segment_0.",
         "Concise summary for segment_1.",
     ]
     assert set(summary_context.calls) == {"segment_0", "segment_1"}
+    assert [
+        (update.description, update.completed, update.total)
+        for update in reporter.updates
+        if update.completed == update.total
+    ] == [
+        ("shot_annotation", 2, 2),
+        ("segment_summarization", 2, 2),
+    ]
 
     class UnexpectedSummaryContext:
         def call_prompt(self, **_kwargs):

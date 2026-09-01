@@ -328,7 +328,27 @@
       "preparing": "Preparing the analysis workspace",
       "analysing": "Material Analyst is analysing the source",
       "publishing": "Publishing reusable Material Memory",
+      "complete": "Material analysis complete",
       "inconsistent": "Source consistency check failed"
+    },
+    "analysisNodes": {
+      "completed": "{{completed}} / {{total}} nodes complete",
+      "progressLabel": "{{node}} progress",
+      "states": {
+        "queued": "Queued",
+        "running": "Running",
+        "complete": "Complete"
+      },
+      "names": {
+        "shot_detection": "Shot detection",
+        "dialogue_preparation": "Dialogue preparation",
+        "scene_segmentation": "Scene segmentation",
+        "segment_clip_preparation": "Segment clip preparation",
+        "shot_annotation": "Shot annotation",
+        "segment_summarization": "Segment summarization",
+        "video_summary": "Video summary",
+        "music_analysis": "Music analysis"
+      }
     },
     "actions": "Material actions",
     "resumeAnalysis": "Resume analysis",

@@ -327,7 +327,27 @@
       "preparing": "正在准备分析工作区",
       "analysing": "Material Analyst 正在分析源素材",
       "publishing": "正在发布可复用的素材记忆",
+      "complete": "素材分析已完成",
       "inconsistent": "源文件一致性校验失败"
+    },
+    "analysisNodes": {
+      "completed": "已完成 {{completed}} / {{total}} 个节点",
+      "progressLabel": "{{node}}进度",
+      "states": {
+        "queued": "排队中",
+        "running": "运行中",
+        "complete": "已完成"
+      },
+      "names": {
+        "shot_detection": "镜头检测",
+        "dialogue_preparation": "台词准备",
+        "scene_segmentation": "场景分段",
+        "segment_clip_preparation": "分段片段准备",
+        "shot_annotation": "镜头标注",
+        "segment_summarization": "分段摘要",
+        "video_summary": "视频摘要",
+        "music_analysis": "音乐分析"
+      }
     },
     "actions": "素材操作",
     "resumeAnalysis": "继续分析",

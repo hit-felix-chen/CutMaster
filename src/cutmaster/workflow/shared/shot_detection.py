@@ -10,7 +10,12 @@ from scenedetect import open_video
 from scenedetect.detectors import AdaptiveDetector
 
 from cutmaster.infrastructure.observability.progress import progress_bar
-from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
+    raise_if_cancelled,
+)
 
 ADAPTIVE_THRESHOLD = 2.0
 ADAPTIVE_MIN_CONTENT_VAL = 15.0
@@ -37,6 +42,8 @@ def detect_source_cuts(
     adaptive_min_scene_len_sec: float = ADAPTIVE_MIN_SCENE_LEN_SEC,
     duplicate_frame_threshold: float = DUPLICATE_FRAME_THRESHOLD,
     progress_label: str | None = None,
+    progress_reporter: ProgressReporter | None = None,
+    progress_description: str | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[list[float], float]:
     raise_if_cancelled(cancellation_token)
@@ -63,8 +70,16 @@ def detect_source_cuts(
             if progress_label
             else None
         )
+        progress_total = max(1, round((end_sec - start_sec) * frame_rate))
+        reported_completed = 0
+        if progress_reporter is not None and progress_description is not None:
+            progress_reporter.report(
+                ProgressUpdate(0, progress_total, progress_description, "frame")
+            )
         pending_progress = 0
-        progress_batch_size = max(1, round(frame_rate))
+        # The drawer refreshes every two seconds; reporting more often only adds
+        # SQLite writes without making the visible progress smoother.
+        progress_batch_size = max(1, round(frame_rate * 2))
         while True:
             frame = video.read()
             if frame is False:
@@ -75,6 +90,19 @@ def detect_source_cuts(
                 progress.update(
                     min(pending_progress, max(0, progress.total - progress.n))
                 )
+                reported_completed = min(
+                    progress_total,
+                    reported_completed + pending_progress,
+                )
+                if progress_reporter is not None and progress_description is not None:
+                    progress_reporter.report(
+                        ProgressUpdate(
+                            reported_completed,
+                            progress_total,
+                            progress_description,
+                            "frame",
+                        )
+                    )
                 pending_progress = 0
             position = video.position
             if float(position.seconds) >= end_sec:
@@ -98,4 +126,13 @@ def detect_source_cuts(
             progress.update(min(pending_progress, max(0, progress.total - progress.n)))
             progress.close()
         video.capture.release()
+    if progress_reporter is not None and progress_description is not None:
+        progress_reporter.report(
+            ProgressUpdate(
+                progress_total,
+                progress_total,
+                progress_description,
+                "frame",
+            )
+        )
     return cuts, frame_rate

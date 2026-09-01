@@ -4,8 +4,10 @@ from cutmaster.workflow.contracts.analysis import (
     AnalyseMusicRequest,
     AnalyseVideoRequest,
     AnalysisWorkspace,
+    MUSIC_ANALYSIS_NODE_IDS,
     MusicAnalysisResult,
     MusicAnalysisOptions,
+    VIDEO_ANALYSIS_NODE_IDS,
     VideoAnalysisResult,
     VideoAnalysisOptions,
 )
@@ -39,6 +41,7 @@ __all__ = [
     "AnalysisWorkspace",
     "AudioMode",
     "MaterialRuntimeHandle",
+    "MUSIC_ANALYSIS_NODE_IDS",
     "MusicAnalysisOptions",
     "MusicAnalysisResult",
     "PlannersBrief",
@@ -52,6 +55,7 @@ __all__ = [
     "RenderRequest",
     "RenderResult",
     "RenderRuntimeBindings",
+    "VIDEO_ANALYSIS_NODE_IDS",
     "VideoAnalysisOptions",
     "VideoAnalysisResult",
 ]

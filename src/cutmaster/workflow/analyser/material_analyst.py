@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import cv2
@@ -57,6 +58,7 @@ from cutmaster.workflow.analyser.tools.scene_segmenter import (
     build_segments_from_scene_boundaries,
     detect_scene_boundaries,
 )
+from cutmaster.workflow.contracts.analysis import VIDEO_ANALYSIS_NODE_IDS
 from cutmaster.workflow.contracts.video import (
     BoundarySource,
     CameraAngle,
@@ -81,6 +83,8 @@ from cutmaster.workflow.contracts.video import (
 )
 from cutmaster.workflow.ports import (
     CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
     WorkflowCancelledError,
     raise_if_cancelled,
 )
@@ -123,11 +127,59 @@ class _MaterialAnalysisArtifacts:
     analysis_reused: bool = False
 
 
+class _NodeProgressCounter:
+    """Report monotonic per-item progress from sequential or concurrent work."""
+
+    def __init__(
+        self,
+        reporter: ProgressReporter | None,
+        node_id: str,
+        total: int,
+        unit: str,
+    ) -> None:
+        self._reporter = reporter
+        self._node_id = node_id
+        self._total = total
+        self._unit = unit
+        self._completed = 0
+        self._lock = Lock()
+        self._report()
+
+    def advance(self) -> None:
+        with self._lock:
+            self._completed += 1
+            self._report()
+
+    def _report(self) -> None:
+        if self._reporter is None:
+            return
+        self._reporter.report(
+            ProgressUpdate(
+                completed=self._completed,
+                total=self._total,
+                description=self._node_id,
+                unit=self._unit,
+            )
+        )
+
+
+def _report_node(
+    reporter: ProgressReporter | None,
+    node_id: str,
+    completed: int,
+    total: int = 1,
+    unit: str = "task",
+) -> None:
+    if reporter is not None:
+        reporter.report(ProgressUpdate(completed, total, node_id, unit))
+
+
 def _detect_full_video_shots(
     video_path: Path,
     duration_sec: float,
     detection_config: ShotDetectionConfig,
     cancellation_token: CancellationToken | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     cuts, fps = detect_source_cuts(
         video_path,
@@ -138,6 +190,8 @@ def _detect_full_video_shots(
         adaptive_min_scene_len_sec=(detection_config.adaptive_min_scene_len_sec),
         duplicate_frame_threshold=detection_config.duplicate_frame_threshold,
         progress_label="Full-video Shot detection",
+        progress_reporter=progress_reporter,
+        progress_description="shot_detection",
         cancellation_token=cancellation_token,
     )
     boundaries = [
@@ -237,10 +291,17 @@ def _split_segment_clips(
     segments: list[dict[str, Any]],
     material_directory: Path,
     *,
+    progress_reporter: ProgressReporter | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
     clips_dir = material_directory / "segments"
     clips_dir.mkdir(parents=True, exist_ok=True)
+    node_progress = _NodeProgressCounter(
+        progress_reporter,
+        "segment_clip_preparation",
+        len(segments),
+        "segment",
+    )
     with progress_bar(
         segments,
         total=len(segments),
@@ -267,6 +328,7 @@ def _split_segment_clips(
                     segment_id=segment["segment_id"],
                     path=output,
                 )
+                node_progress.advance()
                 continue
             temporary_output = output.with_suffix(".partial.mp4")
             command = [
@@ -306,6 +368,7 @@ def _split_segment_clips(
                 temporary_output.unlink(missing_ok=True)
                 raise
             temporary_output.replace(output)
+            node_progress.advance()
 
 
 def _segment_clip_path(material_directory: Path, segment_id: object) -> Path:
@@ -537,6 +600,7 @@ def _annotate_segments(
     max_images_per_request: int = 250,
     max_shots_per_request: int = 20,
     *,
+    progress_reporter: ProgressReporter | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> list[SegmentDescription]:
     raise_if_cancelled(cancellation_token)
@@ -549,6 +613,12 @@ def _annotate_segments(
         total=len(segments),
         description="Segment Shot VLM annotation",
         unit="segment",
+    )
+    node_progress = _NodeProgressCounter(
+        progress_reporter,
+        "shot_annotation",
+        len(segments),
+        "segment",
     )
 
     def unavailable_annotation(
@@ -1130,6 +1200,7 @@ def _annotate_segments(
         description.validate()
         raise_if_cancelled(cancellation_token)
         annotation_progress.update()
+        node_progress.advance()
         return description
 
     worker_count = max(1, min(config.max_concurrency, len(segments)))
@@ -1210,6 +1281,7 @@ def _summarize_segments(
     config: LLMConfig,
     summary_directory: Path,
     *,
+    progress_reporter: ProgressReporter | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> list[SegmentDescription]:
     raise_if_cancelled(cancellation_token)
@@ -1219,6 +1291,12 @@ def _summarize_segments(
         description="Segment LLM summarization",
         unit="segment",
     )
+    node_progress = _NodeProgressCounter(
+        progress_reporter,
+        "segment_summarization",
+        len(segments),
+        "segment",
+    )
 
     def summarize(segment: SegmentDescription) -> SegmentDescription:
         raise_if_cancelled(cancellation_token)
@@ -1227,6 +1305,7 @@ def _summarize_segments(
             for shot in segment.shots
         ):
             summary_progress.update()
+            node_progress.advance()
             return segment
         package = prompt_registry.build(
             PromptStage.ANALYSER,
@@ -1284,6 +1363,7 @@ def _summarize_segments(
         summarized.validate()
         raise_if_cancelled(cancellation_token)
         summary_progress.update()
+        node_progress.advance()
         return summarized
 
     worker_count = max(1, min(config.max_concurrency, len(segments)))
@@ -1495,6 +1575,7 @@ def _analyse_video_material(
     cancellation_token: CancellationToken | None = None,
     *,
     source_fingerprint: str,
+    progress_reporter: ProgressReporter | None = None,
 ) -> _MaterialAnalysisArtifacts:
     raise_if_cancelled(cancellation_token)
     if annotation_config.shot_sample_frames != 5:
@@ -1513,6 +1594,8 @@ def _analyse_video_material(
     material_directory = material_directory.resolve()
     cached = _cache_result(material_directory, analysis_signature)
     if cached is not None:
+        for node_id in VIDEO_ANALYSIS_NODE_IDS:
+            _report_node(progress_reporter, node_id, 1)
         raise_if_cancelled(cancellation_token)
         return cached
     _require_compatible_incomplete_analysis(
@@ -1547,6 +1630,7 @@ def _analyse_video_material(
     if fps <= 0:
         raise ValueError("Could not determine source-video frame rate")
     if shots is None:
+        _report_node(progress_reporter, "shot_detection", 0)
         raise_if_cancelled(cancellation_token)
         stage_started = time.monotonic()
         log_event(
@@ -1563,6 +1647,7 @@ def _analyse_video_material(
             duration_sec,
             detection_config,
             cancellation_token,
+            progress_reporter,
         )
         _write_json_checkpoint(shots_path, shots)
         raise_if_cancelled(cancellation_token)
@@ -1588,6 +1673,7 @@ def _analyse_video_material(
             stage_count=7,
             shots=len(shots),
         )
+        _report_node(progress_reporter, "shot_detection", 1)
     context.set_artifact("shot_boundaries", shots)
 
     source_metadata = {
@@ -1601,6 +1687,7 @@ def _analyse_video_material(
 
     stage_started = time.monotonic()
     raise_if_cancelled(cancellation_token)
+    _report_node(progress_reporter, "dialogue_preparation", 0)
     log_event(
         "INFO",
         "analyser",
@@ -1657,6 +1744,7 @@ def _analyse_video_material(
     )
     if context.get_artifact("full_dialogue") != dialogue:
         context.set_artifact("full_dialogue", dialogue)
+    _report_node(progress_reporter, "dialogue_preparation", 1)
 
     segments_path = material_directory / "segments.json"
     scene_manifest_path = material_directory / "scene_segmentation_manifest.json"
@@ -1692,7 +1780,8 @@ def _analyse_video_material(
             scene_config,
             material_directory / "scene_frames",
             material_directory / "scene_boundary_windows",
-            cancellation_token,
+            cancellation_token=cancellation_token,
+            progress_reporter=progress_reporter,
         )
         _write_json_checkpoint(
             material_directory / "scene_boundaries.json",
@@ -1742,6 +1831,7 @@ def _analyse_video_material(
         if not segments_path.is_file():
             _write_json_checkpoint(segments_path, segments)
         context.set_artifact("segments", segments)
+        _report_node(progress_reporter, "scene_segmentation", 1)
 
     stage_started = time.monotonic()
     raise_if_cancelled(cancellation_token)
@@ -1759,6 +1849,7 @@ def _analyse_video_material(
         video_path,
         segments,
         material_directory,
+        progress_reporter=progress_reporter,
         cancellation_token=cancellation_token,
     )
     raise_if_cancelled(cancellation_token)
@@ -1794,6 +1885,7 @@ def _analyse_video_material(
         material_directory / "shot_annotations",
         annotation_config.max_images_per_request,
         annotation_config.max_shots_per_request,
+        progress_reporter=progress_reporter,
         cancellation_token=cancellation_token,
     )
     raise_if_cancelled(cancellation_token)
@@ -1825,6 +1917,7 @@ def _analyse_video_material(
         context,
         llm_config,
         material_directory / "segment_summaries",
+        progress_reporter=progress_reporter,
         cancellation_token=cancellation_token,
     )
     raise_if_cancelled(cancellation_token)
@@ -1867,6 +1960,7 @@ def _analyse_video_material(
         [str(segment["segment_id"]) for segment in description_dict["segments"]],
     )
     if video_summary is None:
+        _report_node(progress_reporter, "video_summary", 0)
         raise_if_cancelled(cancellation_token)
         stage_started = time.monotonic()
         log_event(
@@ -1906,6 +2000,7 @@ def _analyse_video_material(
             story_beats=len(video_summary["chronological_story_beats"]),
             elapsed_sec=time.monotonic() - stage_started,
         )
+        _report_node(progress_reporter, "video_summary", 1)
     else:
         context.set_artifact("video_summary", video_summary)
         log_event(
@@ -1917,6 +2012,7 @@ def _analyse_video_material(
             stage_index=7,
             stage_count=7,
         )
+        _report_node(progress_reporter, "video_summary", 1)
     cover_path = material_directory / VIDEO_COVER_FILENAME
     if not is_video_cover_file(cover_path):
         write_video_cover(
@@ -1971,6 +2067,7 @@ class MaterialAnalystAgent:
         source_fingerprint: str,
         material_directory: Path,
         cancellation_token: CancellationToken | None = None,
+        progress_reporter: ProgressReporter | None = None,
     ) -> _MaterialAnalysisArtifacts:
         return _analyse_video_material(
             video_path,
@@ -1985,6 +2082,7 @@ class MaterialAnalystAgent:
             material_directory,
             cancellation_token=cancellation_token,
             source_fingerprint=source_fingerprint,
+            progress_reporter=progress_reporter,
         )
 
     def analyse_music(
