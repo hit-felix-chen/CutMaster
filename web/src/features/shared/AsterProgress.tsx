@@ -13,15 +13,13 @@ const agents = [
   ['S', 'story_editor'],
   ['T', 'timeline_scout'],
   ['E', 'edit_composer'],
-  ['R', 'revision_editor'],
 ] as const satisfies ReadonlyArray<readonly [string, AsterAgent]>
 
-const agentKey: Record<AsterAgent, string> = {
+const agentKey: Record<Exclude<AsterAgent, 'revision_editor'>, string> = {
   arrangement_architect: 'arrangementArchitect',
   story_editor: 'storyEditor',
   timeline_scout: 'timelineScout',
   edit_composer: 'editComposer',
-  revision_editor: 'revisionEditor',
 }
 
 interface AsterProgressProps {
@@ -51,7 +49,8 @@ export function AsterProgress({
       : [],
   )
   const currentAgent = runComplete ? null : progress?.agent
-  const currentKey = currentAgent ? agentKey[currentAgent] : null
+  const currentKey =
+    currentAgent && currentAgent !== 'revision_editor' ? agentKey[currentAgent] : null
   const preparing = progress?.state === 'preparing'
   const heartbeat = formatHeartbeat(execution?.job.heartbeat_at, i18n.language)
 

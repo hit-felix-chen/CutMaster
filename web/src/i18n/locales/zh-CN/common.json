@@ -166,34 +166,34 @@
     "editLabel": "Edit {{sequence}}",
     "basedOn": "基于 Edit {{sequence}}",
     "variantLabel": "版本 {{number}}",
-    "inspector": "Slot 与候选 Inspector",
+    "inspector": "Slot 与分组轨迹 Inspector",
     "slotNumber": "Slot {{number}}",
     "storyAnchor": "故事锚点",
     "outputRange": "成片区间",
     "sourceRange": "原片区间",
-    "candidateSpace": "Candidate Space",
-    "candidateCount": "{{count}} 个候选片段",
+    "candidateSpace": "分组候选轨迹",
+    "trajectoryCount": "{{count}} 条轨迹",
     "anchorLocked": "故事锚点 Slot 已锁定，用于保护叙事结构与原声台词。",
     "currentChoice": "当前选择",
     "visualScore": "视觉",
     "semanticScore": "相关性",
     "emotionScore": "情绪",
     "previewSource": "预览原片",
-    "useCandidate": "使用候选片段",
-    "previewingCandidate": "正在预览 {{candidate}}",
-    "undoSlot": "撤销此 Slot",
+    "useTrajectory": "使用整组轨迹",
+    "previewingTrajectory": "正在预览 {{trajectory}}",
+    "undoGroup": "撤销此组",
     "savingRevision": "正在保存",
     "saveFailed": "修订未保存",
     "variantUnavailable": "这个 Render Variant 尚不能播放",
     "timeline": "审片时间线",
     "slotTimeline": "Slot Timeline",
-    "timelineHelp": "按成片时长展示故事锚点与候选替换状态。",
+    "timelineHelp": "按成片时长展示故事锚点与整组轨迹替换状态。",
     "dialogue": "原声台词",
     "musicBeats": "音乐节拍",
     "musicBeatsUnavailable": "没有可用的真实节拍分析数据",
     "noSlots": "这个 Frozen Edit 没有 Slot",
     "leaveTitle": "放弃未保存的修订？",
-    "leaveBody": "候选替换只保存在当前页面。请保存修订，或明确放弃修改后再离开当前 Frozen Edit 或 Render Variant。",
+    "leaveBody": "轨迹替换只保存在当前页面。请保存修订，或明确放弃修改后再离开当前 Frozen Edit 或 Render Variant。",
     "stayOnPage": "留在当前页面",
     "discardAndLeave": "放弃修改并离开"
   },
@@ -242,33 +242,28 @@
     "preparingBody": "执行进程已经启动，首个智能体里程碑即将出现。",
     "legacyWorkingBody": "当前运行没有提供智能体级里程碑，页面仍会持续更新整体状态与心跳。",
     "complete": "ASTER 规划已完成",
-    "completeBody": "五个 ASTER 智能体均已完成工作，初始 Frozen Edit 已就绪。",
+    "completeBody": "A/S/T/E 规划阶段已完成，初始 Frozen Edit 已就绪。",
     "heartbeat": "最近心跳 · {{time}}",
     "agents": {
       "arrangementArchitect": {
         "name": "Arrangement Architect",
         "active": "Arrangement Architect 正在编排剪辑",
-        "description": "规划 Slot 长度、剪辑节奏、情绪推进与叙事结构。"
+        "description": "规划 Slot 长度与节奏，并把相邻 Slot 分组绑定到同一 Segment。"
       },
       "storyEditor": {
         "name": "Story Editor",
         "active": "Story Editor 正在锚定故事",
-        "description": "选择关键原声台词，保证核心情节与剪辑意图。"
+        "description": "选择关键原声台词，并按锚点画面切分同组普通 Slot。"
       },
       "timelineScout": {
         "name": "Timeline Scout",
-        "active": "Timeline Scout 正在检索候选镜头",
-        "description": "沿原片时间线搜索并验证每个 Slot 的视觉候选。"
+        "active": "Timeline Scout 正在检索整组轨迹",
+        "description": "沿原片时间线为每个 Slot Group 搜索并验证不可拆分的完整候选轨迹。"
       },
       "editComposer": {
         "name": "Edit Composer",
         "active": "Edit Composer 正在组接序列",
-        "description": "在叙事与视觉约束下组接全局连贯的镜头序列。"
-      },
-      "revisionEditor": {
-        "name": "Revision Editor",
-        "active": "Revision Editor 正在复核成片",
-        "description": "审查候选序列并替换弱镜头，然后冻结剪辑方案。"
+        "description": "以整组轨迹为单位，组接满足时序的全局连贯镜头序列。"
       }
     }
   },
@@ -327,7 +322,27 @@
       "preparing": "正在准备分析工作区",
       "analysing": "Material Analyst 正在分析源素材",
       "publishing": "正在发布可复用的素材记忆",
+      "complete": "素材分析已完成",
       "inconsistent": "源文件一致性校验失败"
+    },
+    "analysisNodes": {
+      "completed": "已完成 {{completed}} / {{total}} 个节点",
+      "progressLabel": "{{node}}进度",
+      "states": {
+        "queued": "排队中",
+        "running": "运行中",
+        "complete": "已完成"
+      },
+      "names": {
+        "shot_detection": "镜头检测",
+        "dialogue_preparation": "台词准备",
+        "scene_segmentation": "场景分段",
+        "segment_clip_preparation": "分段片段准备",
+        "shot_annotation": "镜头标注",
+        "segment_summarization": "分段摘要",
+        "video_summary": "视频摘要",
+        "music_analysis": "音乐分析"
+      }
     },
     "actions": "素材操作",
     "resumeAnalysis": "继续分析",
@@ -432,13 +447,7 @@
     "runContext": "{{project}} · 剪辑运行 {{sequence}}",
     "renderContext": "{{project}} · 剪辑运行 {{runSequence}} · Edit {{editVersion}} · {{audioMode}}",
     "loadMore": "加载更多活动记录",
-    "loadingMore": "正在加载更多活动记录",
-    "manage": "管理",
-    "selectAll": "全选",
-    "clearSelection": "取消全选",
-    "clearSelected": "清空（{{count}}）",
-    "doneManaging": "完成",
-    "selectAttempt": "选择{{attempt}}"
+    "loadingMore": "正在加载更多活动记录"
   },
   "executionFailures": {
     "materialAnalysis": {

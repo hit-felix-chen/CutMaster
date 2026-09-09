@@ -515,7 +515,7 @@ export function ProjectOverview() {
               <p>{t('projects.masterReady')}</p>
             </header>
             <div className="master-lane" aria-label="MASTER">
-              {['M', 'A', 'S', 'T', 'E', 'R'].map((role, index) => (
+              {['M', 'A', 'S', 'T', 'E'].map((role, index) => (
                 <span
                   className={index === 0 ? 'master-role master-role--m' : 'master-role'}
                   key={role}
@@ -1390,8 +1390,6 @@ const asterAgentByTask: Record<string, { initial: string; name: string }> = {
   timeline_scout: { initial: 'T', name: 'Timeline Scout' },
   pairwise_scoring: { initial: 'E', name: 'Edit Composer' },
   edit_composer: { initial: 'E', name: 'Edit Composer' },
-  script_review: { initial: 'R', name: 'Revision Editor' },
-  revision_editor: { initial: 'R', name: 'Revision Editor' },
 }
 
 const asterTaskOrder: Record<string, number> = {
@@ -1404,8 +1402,6 @@ const asterTaskOrder: Record<string, number> = {
   candidate_visual_scoring: 3,
   pairwise_scoring: 4,
   edit_composer: 4,
-  script_review: 5,
-  revision_editor: 5,
 }
 
 function compareAsterTasks(left: string, right: string) {
@@ -1421,6 +1417,8 @@ function groupAsterTasks(items: Array<[string, ModelUsageBucket]>) {
     items: Array<[string, ModelUsageBucket]>
   }> = []
   items.forEach((item) => {
+    // Hide retired review tasks without rewriting historical billing totals.
+    if (item[0] === 'script_review' || item[0] === 'revision_editor') return
     const agent = asterAgentByTask[item[0]] ?? null
     const key = agent?.name ?? `task:${item[0]}`
     const previous = groups.at(-1)

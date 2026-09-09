@@ -27,7 +27,6 @@ class PromptTask(StrEnum):
     CANDIDATE_RETRIEVAL = "candidate_retrieval"
     CANDIDATE_VISUAL_SCORING = "candidate_visual_scoring"
     PAIRWISE_SCORING = "pairwise_scoring"
-    SCRIPT_REVIEW = "script_review"
 
 
 class PromptModality(StrEnum):

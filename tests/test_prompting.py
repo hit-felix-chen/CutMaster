@@ -60,8 +60,33 @@ def test_registry_exposes_every_model_task() -> None:
         (PromptStage.PLANNERS, PromptTask.CANDIDATE_RETRIEVAL),
         (PromptStage.PLANNERS, PromptTask.CANDIDATE_VISUAL_SCORING),
         (PromptStage.PLANNERS, PromptTask.PAIRWISE_SCORING),
-        (PromptStage.PLANNERS, PromptTask.SCRIPT_REVIEW),
     }
+
+
+def test_candidate_visual_scoring_is_scoped_only_to_slot_requirements() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_VISUAL_SCORING,
+        CandidateVisualScoringDetails(
+            operation="Candidate visual validation",
+            candidates=[
+                {
+                    "candidate_id": "slot_01_candidate_01",
+                    "slot_id": "slot_01",
+                    "intended_visible_content": "The coach directs the defensive line.",
+                    "required_visible_subjects": ["Coach", "Defenders"],
+                    "source_segment_video_descriptions": [],
+                }
+            ],
+        ),
+    )
+
+    assert package.context_keys == ()
+    assert package.prompt_version == "2.1"
+    assert "maintained request" not in package.system_prompt.lower()
+    assert "global user request" in package.user_prompt
+    assert "do not infer or enforce" in package.user_prompt.lower()
+    assert "all subjects in required_visible_subjects" in package.user_prompt
 
 
 def test_prompt_embeds_contract_and_template_derived_from_same_schema() -> None:
@@ -117,9 +142,6 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
             existing_slots=[],
             target_slot_constraints={},
             rejection_feedback=[],
-            hard_forbidden_assignments={
-                "slot_02": [["segment_0002"]],
-            },
         ),
     )
     slots_schema = package.response_contract.schema["properties"]["slots"]
@@ -141,21 +163,23 @@ def test_slot_arrangement_contract_leaves_slot_count_to_model() -> None:
     assert "Source quality, request relevance, and narrative value always take priority" in (
         package.user_prompt
     )
-    assert "distribute source_segment_ids as evenly as practical" in package.user_prompt
+    slot_item_schema = slots_schema["items"]
+    assert "source_segment_id" in slot_item_schema["required"]
+    assert "source_segment_ids" not in slot_item_schema["properties"]
+    assert "Adjacent Slots may share one Segment" in package.user_prompt
+    assert "their total desired duration must fit inside that Segment" in package.user_prompt
+    assert "monotonically non-decreasing" in package.user_prompt
+    assert "Slot Group Segment\nidentifiers are strictly increasing" in package.user_prompt
+    assert "distribute source_segment_id values as evenly as practical" in package.user_prompt
     assert "reserve sufficient chronological Segment space" in package.user_prompt
-    assert "source Segment must be longer" in package.user_prompt
-    assert "alternative candidates may overlap" in package.user_prompt
-    assert (
-        '<hard_forbidden_assignments>\n{"slot_02": [["segment_0002"]]}\n'
-        '</hard_forbidden_assignments>'
-    ) in package.user_prompt
-    assert "same slot_id must not repeat" in package.user_prompt
-    assert "first array item is slot_01" in package.user_prompt
-    assert package.prompt_version == "3.5"
+    assert "not as a permanent ban on ordinary Slot-to-Segment" in package.user_prompt
+    assert "confirmed all-static Segments are excluded" in package.user_prompt
+    assert package.prompt_version == "4.1"
     assert package.context_keys == (
         "request",
         "music_profile",
         "source_story_context",
+        "planners_feedback",
     )
 
 
@@ -163,13 +187,15 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     constraints = {
         "slot_02": {
             "desired_duration_sec": 3.0,
-            "planned_duration_sec": 3.2,
+            "planned_duration_ms": 3200,
             "allowed_segment_ids": ["segment_0001", "segment_0002"],
+            "original_group_id": "group_001",
         },
         "slot_04": {
             "desired_duration_sec": 4.0,
-            "planned_duration_sec": 3.8,
+            "planned_duration_ms": 3800,
             "allowed_segment_ids": ["segment_0003", "segment_0004"],
+            "original_group_id": "group_002",
         },
     }
     package = prompt_registry.build(
@@ -190,10 +216,12 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
                     candidate_rejections=[],
                 ),
                 build_prompt_failure(
-                    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT,
+                    PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
                     slot_id="slot_04",
-                    longest_segment_duration_sec=3.0,
-                    planned_duration_sec=4.0,
+                    candidate_id="slot_04_candidate_01",
+                    timestamp="00:00:03,000-00:00:07,000",
+                    required_visible_subjects=["subject_04"],
+                    visual_evidence="The required subject is not visible.",
                 ),
             ],
         ),
@@ -209,156 +237,210 @@ def test_targeted_slot_arrangement_contract_batches_exact_requested_slots() -> N
     } == {"slot_02", "slot_04"}
     planned_durations = {
         schema["properties"]["slot_id"]["const"]: schema["properties"][
-            "planned_duration_sec"
+            "planned_duration_ms"
         ]["const"]
         for schema in slots_schema["items"]["oneOf"]
     }
-    assert planned_durations == {"slot_02": 3.2, "slot_04": 3.8}
+    assert planned_durations == {"slot_02": 3200, "slot_04": 3800}
     assert all(
-        "planned_duration_sec" in schema["required"]
+        "planned_duration_ms" in schema["required"]
+        for schema in slots_schema["items"]["oneOf"]
+    )
+    assert all(
+        "source_segment_id" in schema["required"]
+        and "source_segment_ids" not in schema["properties"]
         for schema in slots_schema["items"]["oneOf"]
     )
     assert "single response" in package.user_prompt
-    assert "authoritative visual clip duration" in package.user_prompt
+    assert "planned_duration_ms values are authoritative" in package.user_prompt
+    assert "complete adjacent groups" in package.user_prompt
+    assert "Every member of that\ngroup must choose the same source_segment_id" in (
+        package.user_prompt
+    )
+    assert "must not exceed\nthe Segment's complete source duration" in (
+        package.user_prompt
+    )
+    assert "capacity check is for the resulting canonical group" in (
+        package.user_prompt
+    )
+    assert "Distinct original groups must use different Segments" not in (
+        package.user_prompt
+    )
     assert "Source quality and relevance to the maintained request always take priority" in (
         package.user_prompt
     )
-    assert "distribute source_segment_ids as\nevenly as practical" in package.user_prompt
-    assert "do not push a replacement toward an\ninterval boundary" in package.user_prompt
-    assert "Collateral/blocker Slots" in package.user_prompt
-    assert "keep their previous_source_segment_ids" in package.user_prompt
-    assert "strictly increasing source order" in package.user_prompt
-    assert package.prompt_version == "3.6"
+    assert "may choose the same Segment" in package.user_prompt
+    assert "without another Story Editor model call" in package.user_prompt
+    assert "must_change_segment" not in package.user_prompt
+    assert "distribute source_segment_id" not in package.user_prompt
+    assert "one complete planned clip" not in package.user_prompt
+    assert package.prompt_version == "4.4"
+    assert "preserved_anchor_source_segment_id" in package.user_prompt
+    assert "total Segment capacity alone does not establish feasibility" in package.user_prompt
     assert "<existing_slot_plan>" in package.user_prompt
     assert "<rejection_feedback>" in package.user_prompt
+    assert "planners_feedback" not in package.context_keys
 
 
-def test_targeted_slot_arrangement_contract_preserves_requirements_by_failure_kind() -> None:
+def test_targeted_arrangement_can_keep_source_and_revise_editorial_fields() -> None:
+    original = {
+        "slot_id": "slot_02",
+        "narrative_role": "development",
+        "content_description": "The named defender heads the ball into the net.",
+        "target_emotion": "focused",
+        "target_emotional_intensity": 0.5,
+        "target_kinetic_energy": 0.5,
+        "desired_duration_sec": 3.0,
+        "planned_duration_ms": 3000,
+        "continuity_from_previous": "Continues the attack.",
+        "source_segment_id": "segment_0025",
+        "required_visible_subjects": ["named defender"],
+    }
+    sources = [
+        {
+            "segment_id": "segment_0025",
+            "segment_summary": "A corner leads to a header and a 2-1 lead.",
+            "narrative_function": "Restores the team's lead.",
+            "appearing_characters": ["attacking team"],
+        },
+        {
+            "segment_id": "segment_0026",
+            "segment_summary": "The attacking side wins and scores a penalty.",
+        },
+    ]
+    constraint = {
+        "desired_duration_sec": 3.0,
+        "planned_duration_ms": 3000,
+        "allowed_segment_ids": [source["segment_id"] for source in sources],
+        "allowed_source_segments": sources,
+        "original_group_id": "group_002",
+        "original_segment_id": "segment_0025",
+        "previous_fixed_slot": {"slot_id": "slot_01", "source_segment_id": "segment_0011"},
+        "next_fixed_slot": {"slot_id": "slot_03", "source_segment_id": "segment_0027"},
+    }
+    feedback = {
+        "reason_code": "required_subject_not_visually_confirmed",
+        "diagnosis": "The goal is visible, but the distant player's identity is unconfirmed.",
+        # Historical checkpoints may still contain the old repair advice.
+        "repair_requirement": "Choose a different Segment and visible event.",
+        "candidate_failure_evidence": [{
+            "timestamp": "00:48:51,000-00:48:54,000",
+            "visible_subjects": ["attacking team"],
+            "protagonist_visibility_likert": 2,
+        }],
+    }
     package = prompt_registry.build(
         PromptStage.PLANNERS,
         PromptTask.SLOT_ARRANGEMENT,
         SlotArrangementDetails(
-            target_duration_sec=8.0,
-            target_clip_duration_sec=4.0,
+            target_duration_sec=9.0,
+            target_clip_duration_sec=3.0,
             allowed_segment_ids=[],
             retry_note="",
             mode="targeted",
-            existing_slots=[{"slot_id": "slot_01"}],
-            target_slot_constraints={
-                "slot_01": {
-                    "desired_duration_sec": 4.0,
-                    "planned_duration_sec": 4.0,
-                    "allowed_segment_ids": ["segment_0001", "segment_0002"],
-                }
-            },
-            rejection_feedback=[
-                build_prompt_failure(
-                    PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
-                    slot_id="slot_01",
-                    candidate_id="candidate_01",
-                    timestamp="00:00:01,000-00:00:05,000",
-                    required_visible_subjects=["goalkeeper"],
-                    visual_evidence="The goalkeeper is outside the selected window.",
-                )
-            ],
+            existing_slots=[original],
+            target_slot_constraints={"slot_02": constraint},
+            rejection_feedback=[feedback],
         ),
     )
 
+    revised = {
+        **original,
+        "narrative_role": "climax",
+        "content_description": "An attacking player heads the corner into the net.",
+        "required_visible_subjects": ["attacking team"],
+        "target_emotion": "triumphant",
+        "target_emotional_intensity": 0.9,
+        "target_kinetic_energy": 0.8,
+        "continuity_from_previous": "The pressure produces a goal.",
+    }
+    assert package.response_contract.validate_structure({"slots": [revised]}) == {
+        "slots": [revised]
+    }
+    for tag, expected in (
+        ("existing_slot_plan", [original]),
+        ("target_slot_constraints", {"slot_02": constraint}),
+        ("rejection_feedback", [feedback]),
+    ):
+        encoded = package.user_prompt.split(f"<{tag}>\n", 1)[1].split(f"\n</{tag}>", 1)[0]
+        assert json.loads(encoded) == expected
     prompt_text = " ".join(package.user_prompt.split())
-    assert "Local repair never changes required_visible_subjects" in prompt_text
-    assert "keep the original required_visible_subjects" in prompt_text
-    assert "visually_static" in prompt_text
-    assert "source_segments_too_short" in prompt_text
-    assert "visual_slot_not_relevant" in prompt_text
+    assert "may keep the original Segment" in prompt_text
+    assert "All other editorial fields may be revised" in prompt_text
+    assert "allowed_source_segments contains compact Material Memory" in prompt_text
+    assert "Legal availability is not proof of semantic suitability" in prompt_text
+    assert "Historical advice to change Segment is not a permanent ban" in prompt_text
+    assert "repair_requirement is mandatory" not in package.user_prompt
+    assert "event_intent" not in package.user_prompt
+
+    anchor_package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.SLOT_ARRANGEMENT,
+        SlotArrangementDetails(
+            target_duration_sec=9.0,
+            target_clip_duration_sec=3.0,
+            allowed_segment_ids=[],
+            retry_note="",
+            mode="targeted",
+            existing_slots=[{
+                **original,
+                "dialogue_anchor": {"source_video_timestamp": "00:48:51,000-00:48:54,000"},
+            }],
+            target_slot_constraints={"slot_02": constraint},
+            rejection_feedback=[feedback],
+        ),
+    )
+    anchor_package.response_contract.validate_structure({"slots": [original]})
+    for name, value in revised.items():
+        if value != original[name]:
+            with pytest.raises(ValueError):
+                anchor_package.response_contract.validate_structure(
+                    {"slots": [{**original, name: value}]}
+                )
+    with pytest.raises(ValueError):
+        anchor_package.response_contract.validate_structure(
+            {"slots": [{**original, "source_segment_id": "segment_0026"}]}
+        )
+    assert "Preserve every existing Anchor Slot's editorial fields" in anchor_package.user_prompt
 
 
-def test_candidate_retrieval_uses_each_slot_as_the_only_editorial_target() -> None:
+def test_candidate_retrieval_receives_history_as_evidence_not_requirements() -> None:
+    history = [{
+        "slot_ids": ["slot_02"],
+        "source_segment_id": "segment_0025",
+        "planned_content_description": "The named defender heads the ball in.",
+        "required_visible_subjects": ["named defender"],
+        "reason_code": "required_subject_not_visually_confirmed",
+        "diagnosis": "Header visible; the player's identity could not be verified.",
+        "timestamp": "00:48:51,000-00:48:54,000",
+    }]
     package = prompt_registry.build(
         PromptStage.PLANNERS,
         PromptTask.CANDIDATE_RETRIEVAL,
         CandidateRetrievalDetails(
-            operation="Candidate retrieval round 1 slot slot_01",
-            candidates_per_slot=1,
-            slots=[
-                {
-                    "slot_id": "slot_01",
-                    "content_description": "A child fan carries a trophy toward the stadium.",
-                    "required_visible_subjects": ["child fan", "trophy"],
-                    "planned_duration_sec": 4.0,
-                    "source_segment_ids": ["segment_0001"],
-                }
-            ],
-            confirmed_candidates={"slot_01": []},
-            excluded_ranges={"slot_01": []},
-            source_segments_by_slot={
-                "slot_01": [
-                    {
-                        "segment_id": "segment_0001",
-                        "time_range": {"start_sec": 0.0, "end_sec": 10.0},
-                        "shots": [],
-                    }
-                ]
-            },
+            operation="Retrieve repaired group",
+            trajectories_per_group=2,
+            group={"group_id": "group_002"},
+            slots=[{
+                "slot_id": "slot_02",
+                "content_description": "An attacking team player heads the ball in.",
+                "required_visible_subjects": ["attacking team"],
+                "planned_duration_ms": 3000,
+            }],
+            planning_segment={"segment_id": "segment_0025", "shots": []},
+            rejection_feedback=history,
         ),
     )
-
-    assert package.prompt_version == "2.3"
-    assert package.response_contract.version == "1.2"
-    assert package.context_keys == ("video_summary",)
-    assert "sole editorial target" in package.user_prompt
-    assert "Slot contract" in package.user_prompt
-    assert "maintained request" not in package.user_prompt
+    encoded = package.user_prompt.split("<rejection_feedback>\n", 1)[1].split(
+        "\n</rejection_feedback>", 1
+    )[0]
+    assert json.loads(encoded) == history
     prompt_text = " ".join(package.user_prompt.split())
-    assert "different source Shots are independent" in prompt_text
-    assert "Small timestamp displacements or overlapping windows" in prompt_text
-    assert "same Shot is allowed when its time window does not overlap" in prompt_text
-    assert "candidates for the same Slot may overlap" not in package.user_prompt
-
-
-def test_candidate_visual_scoring_is_strictly_slot_local_with_legacy_shape() -> None:
-    package = prompt_registry.build(
-        PromptStage.PLANNERS,
-        PromptTask.CANDIDATE_VISUAL_SCORING,
-        CandidateVisualScoringDetails(
-            operation="Visual candidate validation round 1 slot slot_01",
-            candidates=[
-                {
-                    "candidate_id": "candidate_01",
-                    "slot_id": "slot_01",
-                    "intended_visible_content": (
-                        "A child fan carries a trophy toward the stadium."
-                    ),
-                    "required_visible_subjects": ["child fan", "trophy"],
-                    "source_segment_video_descriptions": [],
-                }
-            ],
-        ),
-    )
-    item_schema = package.response_contract.schema["properties"]["items"]["items"]
-
-    assert package.prompt_version == "2.1"
-    assert package.response_contract.version == "2.2"
-    assert package.context_keys == ()
-    assert item_schema["required"] == [
-        "candidate_id",
-        "visible_description",
-        "visible_subjects",
-        "required_subject_visibility",
-        "visual_slot_relevance",
-        "visual_evidence",
-    ]
-    assert set(item_schema["properties"]) == set(item_schema["required"])
-    prompt_text = " ".join(
-        (package.system_prompt + "\n" + package.user_prompt).split()
-    )
-    assert "weakest required subject" in prompt_text
-    assert "current Slot's required_visible_subjects" in prompt_text
-    assert "only against intended_visible_content" in prompt_text
-    assert "maintained request" not in prompt_text
-    assert "requested focal subject" not in prompt_text
-    assert "source title" not in prompt_text
-    assert "match_mode" not in prompt_text
-    assert "match_mode" not in json.dumps(package.response_contract.schema)
+    assert "Historical diagnoses are soft evidence, not additional subject requirements" in prompt_text
+    assert "not a timestamp or Segment blacklist" in prompt_text
+    assert "current supplied Slots remain the complete subject contract" in prompt_text
+    assert package.context_keys == ("video_summary",)
+    assert package.prompt_version == "3.5"
 
 
 def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
@@ -369,8 +451,10 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
             slots=[
                 {
                     "slot_id": "slot_01",
+                    "group_id": "group_001",
+                    "planned_duration_ms": 4000,
                     "planned_duration_sec": 4.0,
-                    "source_segment_ids": ["segment_0001"],
+                    "source_segment_id": "segment_0001",
                 }
             ],
             video_summary={
@@ -421,10 +505,24 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
             dialogue_constraints_by_slot={
                 "slot_01": {
                     "allowed_segment_ids": ["segment_0001"],
+                    "allowed_last_dialogue_ids_by_segment_and_first": {
+                        "segment_0001": {"7": ["8"]}
+                    },
+                    "output_audio_end_sec_by_segment_and_first_and_last": {
+                        "segment_0001": {"7": {"8": 1.4}}
+                    },
                     "min_audio_duration_sec": 1.0,
                     "max_audio_duration_sec": 60.0,
                     "planned_picture_duration_sec": 4.0,
                     "output_audio_start_sec": 0.0,
+                    "has_same_segment_sibling_slots": True,
+                    "preferred_anchor_picture_range": {
+                        "source_segment_id": "segment_0001",
+                        "start_sec": 10.0,
+                        "end_sec": 20.0,
+                        "left_slot_count": 0,
+                        "right_slot_count": 0,
+                    },
                 }
             },
             max_anchors=3,
@@ -432,9 +530,14 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
         ),
     )
     schema = package.response_contract.schema
-    anchor = schema["properties"]["anchors"]["items"]["oneOf"][0]
+    anchors = schema["properties"]["anchors"]
+    anchor = anchors["items"]["oneOf"][0]
 
-    assert package.response_contract.version == "4.0"
+    assert package.response_contract.version == "4.4"
+    assert anchors["minItems"] == 0
+    package.response_contract.validate_structure({"anchors": []})
+    assert "valid to return no Anchor" in package.user_prompt
+    assert package.prompt_version == "4.8"
     assert anchor["required"] == [
         "slot_id",
         "source_segment_id",
@@ -451,18 +554,170 @@ def test_dialogue_anchor_contract_selects_a_contiguous_range() -> None:
     ]
     assert anchor["properties"]["first_dialogue_id"]["enum"] == ["7", "8"]
     assert anchor["properties"]["last_dialogue_id"]["enum"] == ["7", "8"]
+    assert "allOf" not in anchor
     assert "<source_shots>" not in package.user_prompt
     assert "inclusive endpoints" in package.user_prompt
+    assert "allowed_last_dialogue_ids_by_segment_and_first" not in package.user_prompt
+    assert "output_audio_end_sec_by_segment_and_first_and_last" not in package.user_prompt
+    assert "allowed_passages" not in package.user_prompt
+    assert '"8": 1.4' not in package.user_prompt
     assert "validates continuity" in package.user_prompt
     assert "same L-cut layout" in package.user_prompt
+    assert "preferred_anchor_picture_range" in package.user_prompt
+    assert "soft guidance, not a hard constraint" in package.user_prompt
+    assert "anchor_picture_edge_imbalance_ms_by_segment_and_first" not in (
+        package.user_prompt
+    )
     assert "audio_cut_style" not in anchor["properties"]
     assert "<video_summary>" in package.user_prompt
     assert "<dialogue_constraints_by_slot>" in package.user_prompt
+    assert "<preserved_anchors>" not in package.user_prompt
     assert "<valid_dialogue_ranges_by_slot>" not in package.user_prompt
     assert "Mia presses Sebastian for the truth." in package.user_prompt
     assert "<full_dialogue_context>" not in package.user_prompt
     assert "music_profile" not in package.context_keys
+    assert "planners_feedback" in package.context_keys
     assert "lip" not in package.user_prompt.lower()
+
+
+def test_dialogue_anchor_contract_stays_compact_for_many_endpoint_pairs() -> None:
+    first_ids = [f"first_{index:03d}" for index in range(100)]
+    last_ids = [f"last_{index:03d}" for index in range(30)]
+    dialogue_ids = [*first_ids, *last_ids]
+    allowed_last_ids = {
+        first_dialogue_id: list(last_ids)
+        for first_dialogue_id in first_ids
+    }
+    output_end_by_endpoint = {
+        first_dialogue_id: {
+            last_dialogue_id: round(2.0 + index * 0.01, 6)
+            for index, last_dialogue_id in enumerate(last_ids)
+        }
+        for first_dialogue_id in first_ids
+    }
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.DIALOGUE_ANCHOR_SELECTION,
+        DialogueAnchorSelectionDetails(
+            slots=[{"slot_id": "slot_01"}],
+            video_summary={"story": "A compact contract test."},
+            source_segments=[
+                {
+                    "segment_id": "segment_0001",
+                    "dialogue_items": [
+                        {
+                            "dialogue_id": dialogue_id,
+                            "speaker": "Speaker",
+                            "text": dialogue_id,
+                        }
+                        for dialogue_id in dialogue_ids
+                    ],
+                }
+            ],
+            dialogue_constraints_by_slot={
+                "slot_01": {
+                    "allowed_segment_ids": ["segment_0001"],
+                    "allowed_last_dialogue_ids_by_segment_and_first": {
+                        "segment_0001": allowed_last_ids
+                    },
+                    "output_audio_end_sec_by_segment_and_first_and_last": {
+                        "segment_0001": output_end_by_endpoint
+                    },
+                    "output_audio_start_sec": 0.0,
+                }
+            },
+            max_anchors=1,
+            min_anchor_duration_sec=1.0,
+        ),
+    )
+
+    anchor_schema = package.response_contract.schema["properties"]["anchors"][
+        "items"
+    ]["oneOf"][0]
+    assert "allOf" not in anchor_schema
+    assert len(anchor_schema["properties"]["first_dialogue_id"]["enum"]) == len(
+        dialogue_ids
+    )
+    assert len(anchor_schema["properties"]["last_dialogue_id"]["enum"]) == len(
+        dialogue_ids
+    )
+    assert "allowed_last_dialogue_ids_by_segment_and_first" not in package.user_prompt
+    assert len(package.user_prompt) < 200_000
+    assert len(json.dumps(package.response_contract.schema)) < 30_000
+
+
+def test_candidate_retrieval_contract_returns_indivisible_group_trajectories() -> None:
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_RETRIEVAL,
+        CandidateRetrievalDetails(
+            operation="Candidate retrieval batch group_001",
+            trajectories_per_group=2,
+            group={
+                "group_id": "group_001",
+                "planning_segment_id": "segment_0001_01",
+                "slot_ids": ["slot_01", "slot_02"],
+            },
+            slots=[
+                {"slot_id": "slot_01", "planned_duration_ms": 2000},
+                {"slot_id": "slot_02", "planned_duration_ms": 3000},
+            ],
+            planning_segment={
+                "planning_segment_id": "segment_0001_01",
+                "start_ms": 10000,
+                "end_ms": 20000,
+            },
+        ),
+    )
+    trajectories = package.response_contract.schema["properties"]["trajectories"]
+    trajectory_contract = trajectories["items"]["anyOf"][0]
+    items = trajectory_contract["properties"]["items"]
+
+    assert package.response_contract.version == "2.3"
+    assert package.prompt_version == "3.5"
+    assert trajectories["minItems"] == 0
+    assert trajectories["maxItems"] == 2
+    assert trajectories["items"]["anyOf"][1] == {}
+    assert "uniqueItems" not in trajectories
+    assert package.response_contract.template["trajectories"][0] == {
+        "items": [
+            {
+                "slot_id": "slot_01",
+                "source_start_ms": "<integer>",
+                "description": "<non-empty string>",
+                "semantic_relevance": "<number: 0.0 to 1.0>",
+                "emotional_intensity": "<number: 0.0 to 1.0>",
+                "salience": "<number: 0.0 to 1.0>",
+            }
+        ]
+    }
+    assert items["minItems"] == 2
+    assert items["maxItems"] == 2
+    assert {
+        schema["properties"]["slot_id"]["const"]
+        for schema in items["items"]["oneOf"]
+    } == {"slot_01", "slot_02"}
+    assert all(
+        schema["properties"]["source_start_ms"] == {"type": "integer"}
+        for schema in items["items"]["oneOf"]
+    )
+    assert all(
+        "timestamp" not in schema["properties"]
+        for schema in items["items"]["oneOf"]
+    )
+    assert "one indivisible choice" in package.user_prompt
+    assert "exactly one item for every supplied Slot" in package.user_prompt
+    assert "one supplied Planning Segment" in package.user_prompt
+    assert "internally ordered and non-overlapping" in package.user_prompt
+    assert "different source Shots" in package.user_prompt
+    assert "nominal alternatives" in package.user_prompt
+    assert "Return only source_start_ms" in package.user_prompt
+    assert "derives each end" in package.user_prompt
+    assert "initial phase" not in package.user_prompt
+    assert "<rejection_feedback>\n[]\n</rejection_feedback>" in package.user_prompt
+    assert package.context_keys == ("video_summary",)
+    assert "global user request is intentionally not supplied" in package.user_prompt
+
 
 
 def test_video_summary_contract_is_grounded_in_known_segments() -> None:
@@ -495,14 +750,14 @@ def test_registry_rebuilds_prompt_with_accumulated_failure_reasons() -> None:
 
     retried = package.retry_builder(
         (
-            "Candidate is shorter than planned_duration_sec",
+            "Candidate duration differs from planned_duration_ms",
             "Duplicate candidate range for slot_01",
         )
     )
 
     assert '"attempt": 1' in retried.user_prompt
     assert '"attempt": 2' in retried.user_prompt
-    assert "Candidate is shorter than planned_duration_sec" in retried.user_prompt
+    assert "Candidate duration differs from planned_duration_ms" in retried.user_prompt
     assert "Duplicate candidate range for slot_01" in retried.user_prompt
     assert retried.user_prompt.count('"reason_code": "response_validation_failed"') == 2
     assert retried.user_prompt.count('"diagnosis":') >= 2
@@ -519,18 +774,22 @@ def test_prompt_failure_catalog_covers_every_reason_code() -> None:
     )
 
 
-def test_visual_slot_relevance_failure_has_independent_repair_requirement() -> None:
-    failure = build_prompt_failure(
-        PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT,
-        candidate_id="candidate_01",
-        timestamp="00:00:01,000-00:00:05,000",
-        visual_slot_relevance_likert=2,
-        visual_slot_relevance_likert_threshold=3,
-        visual_evidence="The goalkeeper is visible but no save occurs.",
+def test_group_retrieval_failures_use_trajectory_contract() -> None:
+    rejected = build_prompt_failure(
+        PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+        group_id="group_001",
+        candidate_rejections=[],
+    )
+    exhausted = build_prompt_failure(
+        PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
+        shortages={"group_001": 0},
     )
 
-    assert failure["reason_code"] == "visual_slot_not_relevant"
-    assert "Subject presence alone" in failure["repair_requirement"]
+    assert "complete trajectory" in rejected["diagnosis"]
+    assert "source_segment_id" in rejected["repair_requirement"]
+    assert "source_segment_ids" not in rejected["repair_requirement"]
+    assert "no valid complete trajectory" in exhausted["diagnosis"]
+    assert "preserve legal Anchors" in exhausted["repair_requirement"]
 
 
 def test_prompt_failure_requires_template_details() -> None:

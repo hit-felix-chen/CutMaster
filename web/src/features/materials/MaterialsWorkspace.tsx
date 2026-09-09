@@ -50,6 +50,8 @@ import {
   api,
   collectionItems,
   type ExecutionSummary,
+  type MaterialAnalysisNodeProgress,
+  type MaterialAnalysisProgress,
   type MaterialDetail,
   type MaterialSubmission,
   type MaterialSummary,
@@ -297,6 +299,120 @@ function blockerText(blocker: unknown) {
   return identity.length ? identity.join(' · ') : null
 }
 
+const materialAnalysisNodeStates = new Set(['queued', 'running', 'complete'])
+
+function isFiniteProgressValue(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isMaterialAnalysisNodeProgress(
+  value: unknown,
+): value is MaterialAnalysisNodeProgress {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const node = value as Record<string, unknown>
+  return (
+    typeof node.id === 'string' &&
+    node.id.length > 0 &&
+    typeof node.state === 'string' &&
+    materialAnalysisNodeStates.has(node.state) &&
+    isFiniteProgressValue(node.completed) &&
+    isFiniteProgressValue(node.total) &&
+    node.completed <= node.total &&
+    typeof node.unit === 'string' &&
+    node.unit.length > 0
+  )
+}
+
+function isMaterialAnalysisProgress(value: unknown): value is MaterialAnalysisProgress {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const progress = value as Record<string, unknown>
+  return (
+    progress.schema_version === '2.0' &&
+    progress.phase === 'analyser' &&
+    (progress.material_type === 'video' || progress.material_type === 'music') &&
+    typeof progress.state === 'string' &&
+    isFiniteProgressValue(progress.completed) &&
+    isFiniteProgressValue(progress.total) &&
+    progress.completed <= progress.total &&
+    progress.unit === 'node' &&
+    (progress.active_node === null || typeof progress.active_node === 'string') &&
+    Array.isArray(progress.nodes) &&
+    progress.nodes.every(isMaterialAnalysisNodeProgress)
+  )
+}
+
+function MaterialNodeProgress({ progress }: { progress: MaterialAnalysisProgress }) {
+  const { t } = useTranslation('common')
+  const columns = `repeat(${Math.max(1, progress.nodes.length)}, minmax(4.25rem, 1fr))`
+  return (
+    <div className="material-execution__node-progress">
+      <div className="material-execution__node-flow-heading">
+        <strong>
+          {t('materials.analysisNodes.completed', {
+            completed: progress.completed,
+            total: progress.total,
+          })}
+        </strong>
+      </div>
+      <div className="material-execution__node-board">
+        <ol
+          className="material-execution__node-flow"
+          style={{ gridTemplateColumns: columns }}
+        >
+          {progress.nodes.map((node) => {
+            const name = t(`materials.analysisNodes.names.${node.id}`, {
+              defaultValue: node.id.replaceAll('_', ' '),
+            })
+            return (
+              <li
+                className={`material-execution__node material-execution__node--${node.state}`}
+                key={node.id}
+                aria-current={progress.active_node === node.id ? 'step' : undefined}
+              >
+                <span className="material-execution__node-marker" aria-hidden="true" />
+                <span>{name}</span>
+                <small>{t(`materials.analysisNodes.states.${node.state}`)}</small>
+              </li>
+            )
+          })}
+        </ol>
+        <div
+          className="material-execution__node-bars"
+          style={{ gridTemplateColumns: columns }}
+        >
+          {progress.nodes.map((node) => {
+            const name = t(`materials.analysisNodes.names.${node.id}`, {
+              defaultValue: node.id.replaceAll('_', ' '),
+            })
+            const measurable = node.total > 0
+            const percent = measurable
+              ? Math.min(100, Math.max(0, (node.completed / node.total) * 100))
+              : 0
+            return (
+              <div className="material-execution__node-bar" key={node.id}>
+                <div
+                  role="progressbar"
+                  aria-label={t('materials.analysisNodes.progressLabel', {
+                    node: name,
+                  })}
+                  aria-valuemin={0}
+                  aria-valuemax={measurable ? node.total : 1}
+                  aria-valuenow={measurable ? node.completed : 0}
+                >
+                  <span style={{ width: `${percent}%` }} />
+                </div>
+                <small>
+                  {node.completed} / {node.total}
+                </small>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function MaterialExecution({ execution }: { execution: ExecutionSummary }) {
   const { t } = useTranslation('common')
   const progress = execution.job.progress
@@ -304,6 +420,7 @@ function MaterialExecution({ execution }: { execution: ExecutionSummary }) {
     typeof progress === 'object' && progress !== null && !Array.isArray(progress)
       ? progress
       : null
+  const nodeProgress = isMaterialAnalysisProgress(progress) ? progress : null
   const completed = progressRecord?.completed
   const total = progressRecord?.total
   const hasMeasuredProgress =
@@ -329,7 +446,9 @@ function MaterialExecution({ execution }: { execution: ExecutionSummary }) {
             : phase}
         </p>
       ) : null}
-      {hasMeasuredProgress ? (
+      {nodeProgress ? (
+        <MaterialNodeProgress progress={nodeProgress} />
+      ) : hasMeasuredProgress ? (
         <div className="material-execution__progress">
           <div
             role="progressbar"
@@ -373,16 +492,13 @@ function MaterialDrawer({
   const navigate = useNavigate()
   const location = useLocation()
   const queryClient = useQueryClient()
-  const { isConnected } = useEventStream()
   const drawerRef = useRef<HTMLElement>(null)
   const [deleteArmed, setDeleteArmed] = useState(false)
   const detail = useQuery({
     queryKey: ['material', materialId],
     queryFn: () => api.materials.detail(materialId),
     refetchInterval: (query) =>
-      !isConnected && isActiveExecution(query.state.data?.latest_execution)
-        ? 2000
-        : false,
+      isActiveExecution(query.state.data?.latest_execution) ? 2000 : false,
   })
   const parent = `/materials/${type}${location.search}`
   const close = useCallback(() => {

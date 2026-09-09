@@ -337,6 +337,8 @@ def test_planners_result_round_trip_preserves_plan_identity(tmp_path: Path) -> N
         render_plan_path=render_plan_path,
         music_profile_path=tmp_path / "music_profile.json",
         edit_plan_path=tmp_path / "edit_plan.json",
+        planning_segments_path=tmp_path / "planning_segments.json",
+        planning_groups_path=tmp_path / "planning_groups.json",
         dialogue_anchors_path=tmp_path / "dialogue_anchors.json",
         candidate_pool_path=tmp_path / "candidate_pool.json",
         raw_script_path=tmp_path / "raw_script.json",
@@ -356,6 +358,8 @@ def test_planners_result_round_trip_preserves_plan_identity(tmp_path: Path) -> N
 
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     assert payload["plan_id"] == plan.plan_id
+    assert payload["planning_segments"] == str(tmp_path / "planning_segments.json")
+    assert payload["planning_groups"] == str(tmp_path / "planning_groups.json")
     assert PlannersResult.read(result_path) == result
 
     payload["plan_id"] = "mismatched-plan-id"

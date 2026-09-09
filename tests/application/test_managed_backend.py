@@ -638,6 +638,10 @@ def test_run_snapshots_adapter_planning_options_separately_from_configuration(
         "video_title": "Feature",
         "max_clip_duration_sec": 7.0,
     }
+    assert submission.run.configuration["planners"]["aster_team"] == {
+        "max_rounds": 3,
+        "max_local_replans": 2,
+    }
     assert "managed_request" not in submission.run.configuration["planners"]
 
 

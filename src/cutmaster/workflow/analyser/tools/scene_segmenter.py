@@ -7,6 +7,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import cv2
@@ -19,7 +20,12 @@ from cutmaster.workflow.analyser.tools.cache import (
     write_json_checkpoint,
 )
 from cutmaster.workflow.contracts.video import SpeechMode, TimelineRole
-from cutmaster.workflow.ports import CancellationToken, raise_if_cancelled
+from cutmaster.workflow.ports import (
+    CancellationToken,
+    ProgressReporter,
+    ProgressUpdate,
+    raise_if_cancelled,
+)
 from cutmaster.workflow.prompting import (
     PromptFailureCode,
     PromptStage,
@@ -335,12 +341,21 @@ def detect_scene_boundaries(
     frame_directory: Path,
     checkpoint_directory: Path,
     cancellation_token: CancellationToken | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> list[dict[str, Any]]:
     """Run context-focus Scene boundary classification with window checkpoints."""
     raise_if_cancelled(cancellation_token)
     windows = build_scene_windows(len(shots), scene_config)
     if not windows:
+        if progress_reporter is not None:
+            progress_reporter.report(
+                ProgressUpdate(1, 1, "scene_segmentation", "task")
+            )
         return []
+    if progress_reporter is not None:
+        progress_reporter.report(
+            ProgressUpdate(0, len(windows), "scene_segmentation", "window")
+        )
     checkpoint_directory.mkdir(parents=True, exist_ok=True)
     frames = prepare_scene_frames(
         video_path,
@@ -355,8 +370,11 @@ def detect_scene_boundaries(
         description="Scene-VLM boundary detection",
         unit="window",
     )
+    completed_windows = 0
+    completed_windows_lock = Lock()
 
     def process(window: SceneWindow) -> list[dict[str, Any]]:
+        nonlocal completed_windows
         raise_if_cancelled(cancellation_token)
         window_shots = [contextual_shots[index] for index in window.context_indexes]
         focus_shot_ids = [
@@ -477,6 +495,17 @@ def detect_scene_boundaries(
         else:
             raise_if_cancelled(cancellation_token)
         progress.update()
+        if progress_reporter is not None:
+            with completed_windows_lock:
+                completed_windows += 1
+                progress_reporter.report(
+                    ProgressUpdate(
+                        completed_windows,
+                        len(windows),
+                        "scene_segmentation",
+                        "window",
+                    )
+                )
         return decisions
 
     worker_count = max(1, min(vlm_config.max_concurrency, len(windows)))

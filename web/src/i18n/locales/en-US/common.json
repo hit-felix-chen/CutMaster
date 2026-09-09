@@ -166,35 +166,35 @@
     "editLabel": "Edit {{sequence}}",
     "basedOn": "Based on Edit {{sequence}}",
     "variantLabel": "Variant {{number}}",
-    "inspector": "Slot and Candidate Inspector",
+    "inspector": "Slot and Group Trajectory Inspector",
     "slotNumber": "Slot {{number}}",
     "storyAnchor": "Story Anchor",
     "outputRange": "Output range",
     "sourceRange": "Source range",
-    "candidateSpace": "Candidate Space",
-    "candidateCount_one": "{{count}} candidate",
-    "candidateCount_other": "{{count}} candidates",
+    "candidateSpace": "Group trajectories",
+    "trajectoryCount_one": "{{count}} trajectory",
+    "trajectoryCount_other": "{{count}} trajectories",
     "anchorLocked": "Story Anchor Slots are locked to protect the narrative and original dialogue.",
     "currentChoice": "Current choice",
     "visualScore": "Visual",
     "semanticScore": "Relevance",
     "emotionScore": "Emotion",
     "previewSource": "Preview source",
-    "useCandidate": "Use candidate",
-    "previewingCandidate": "Previewing {{candidate}}",
-    "undoSlot": "Undo Slot",
+    "useTrajectory": "Use trajectory",
+    "previewingTrajectory": "Previewing {{trajectory}}",
+    "undoGroup": "Undo Group",
     "savingRevision": "Saving",
     "saveFailed": "The revision was not saved",
     "variantUnavailable": "This Render Variant is not ready to play",
     "timeline": "Review timeline",
     "slotTimeline": "Slot Timeline",
-    "timelineHelp": "Output timing with locked dialogue anchors and replacement state.",
+    "timelineHelp": "Output timing with locked dialogue anchors and Group trajectory replacements.",
     "dialogue": "Dialogue",
     "musicBeats": "Music beats",
     "musicBeatsUnavailable": "No real beat analysis is available",
     "noSlots": "This Frozen Edit has no Slots",
     "leaveTitle": "Discard unsaved revision?",
-    "leaveBody": "Candidate replacements exist only on this page. Save the revision, or explicitly discard them before leaving this Frozen Edit or Render Variant.",
+    "leaveBody": "Trajectory replacements exist only on this page. Save the revision, or explicitly discard them before leaving this Frozen Edit or Render Variant.",
     "stayOnPage": "Stay on page",
     "discardAndLeave": "Discard changes and leave"
   },
@@ -243,33 +243,28 @@
     "preparingBody": "The worker has started. The first agent milestone will appear shortly.",
     "legacyWorkingBody": "Agent-level milestones are not available for this active Run. Its overall status and heartbeat will continue to update.",
     "complete": "ASTER planning is complete",
-    "completeBody": "All five ASTER agents have finished and the initial Frozen Edit is ready.",
+    "completeBody": "A/S/T/E planning is complete and the initial Frozen Edit is ready.",
     "heartbeat": "Heartbeat · {{time}}",
     "agents": {
       "arrangementArchitect": {
         "name": "Arrangement Architect",
         "active": "Arrangement Architect is shaping the edit",
-        "description": "Defining Slot lengths, pacing, emotional progression, and narrative structure."
+        "description": "Defining Slot timing and grouping adjacent Slots on one Segment."
       },
       "storyEditor": {
         "name": "Story Editor",
         "active": "Story Editor is anchoring the story",
-        "description": "Selecting original dialogue that preserves key events and the editing intent."
+        "description": "Selecting original dialogue and splitting ordinary group Slots around Anchor pictures."
       },
       "timelineScout": {
         "name": "Timeline Scout",
-        "active": "Timeline Scout is retrieving candidates",
-        "description": "Searching the source timeline and validating visual candidates for each Slot."
+        "active": "Timeline Scout is retrieving group trajectories",
+        "description": "Searching the source timeline for complete, indivisible candidate trajectories for each Slot Group."
       },
       "editComposer": {
         "name": "Edit Composer",
         "active": "Edit Composer is assembling the sequence",
-        "description": "Composing a globally coherent sequence under narrative and visual constraints."
-      },
-      "revisionEditor": {
-        "name": "Revision Editor",
-        "active": "Revision Editor is reviewing the cut",
-        "description": "Reviewing the candidate sequence and replacing weak choices before freezing the edit."
+        "description": "Composing a chronological, globally coherent sequence from whole group trajectories."
       }
     }
   },
@@ -328,7 +323,27 @@
       "preparing": "Preparing the analysis workspace",
       "analysing": "Material Analyst is analysing the source",
       "publishing": "Publishing reusable Material Memory",
+      "complete": "Material analysis complete",
       "inconsistent": "Source consistency check failed"
+    },
+    "analysisNodes": {
+      "completed": "{{completed}} / {{total}} nodes complete",
+      "progressLabel": "{{node}} progress",
+      "states": {
+        "queued": "Queued",
+        "running": "Running",
+        "complete": "Complete"
+      },
+      "names": {
+        "shot_detection": "Shot detection",
+        "dialogue_preparation": "Dialogue preparation",
+        "scene_segmentation": "Scene segmentation",
+        "segment_clip_preparation": "Segment clip preparation",
+        "shot_annotation": "Shot annotation",
+        "segment_summarization": "Segment summarization",
+        "video_summary": "Video summary",
+        "music_analysis": "Music analysis"
+      }
     },
     "actions": "Material actions",
     "resumeAnalysis": "Resume analysis",
@@ -433,13 +448,7 @@
     "runContext": "{{project}} · Run {{sequence}}",
     "renderContext": "{{project}} · Run {{runSequence}} · Edit {{editVersion}} · {{audioMode}}",
     "loadMore": "Load more activity",
-    "loadingMore": "Loading more activity",
-    "manage": "Manage",
-    "selectAll": "Select all",
-    "clearSelection": "Clear selection",
-    "clearSelected": "Clear ({{count}})",
-    "doneManaging": "Done",
-    "selectAttempt": "Select {{attempt}}"
+    "loadingMore": "Loading more activity"
   },
   "executionFailures": {
     "materialAnalysis": {

@@ -17,6 +17,16 @@ from cutmaster.workflow.contracts.material import (
 
 
 ANALYSIS_RESULT_SCHEMA_VERSION = "3.0"
+VIDEO_ANALYSIS_NODE_IDS = (
+    "shot_detection",
+    "dialogue_preparation",
+    "scene_segmentation",
+    "segment_clip_preparation",
+    "shot_annotation",
+    "segment_summarization",
+    "video_summary",
+)
+MUSIC_ANALYSIS_NODE_IDS = ("music_analysis",)
 _VIDEO_ANALYSIS_RESULT_FIELDS = frozenset(
     {
         "schema_version",
@@ -332,8 +342,10 @@ __all__ = [
     "AnalyseMusicRequest",
     "AnalyseVideoRequest",
     "AnalysisWorkspace",
+    "MUSIC_ANALYSIS_NODE_IDS",
     "MusicAnalysisResult",
     "MusicAnalysisOptions",
     "VideoAnalysisResult",
     "VideoAnalysisOptions",
+    "VIDEO_ANALYSIS_NODE_IDS",
 ]

@@ -11,13 +11,19 @@ class NoFeasiblePathError(ValueError):
         self.diagnostics = diagnostics
 
 
-class TargetedRepairUnrepairableError(ValueError):
-    """Raised when backend constraints prove a local repair domain impossible."""
+class GroupNoCandidateError(ValueError):
+    """Raised when retrieval finds no complete trajectory for a Slot Group."""
 
     def __init__(self, diagnostics: dict[str, Any]) -> None:
-        reason = str(diagnostics.get("reason") or "no local repair domain remains")
-        super().__init__(f"Targeted Slot repair domain is unrepairable: {reason}")
+        failed_group_ids = [
+            str(value) for value in diagnostics.get("failed_group_ids") or []
+        ]
+        label = ", ".join(failed_group_ids) or "unknown group"
+        super().__init__(f"No complete candidate trajectory remains for {label}")
         self.diagnostics = diagnostics
 
 
-__all__ = ["NoFeasiblePathError", "TargetedRepairUnrepairableError"]
+__all__ = [
+    "GroupNoCandidateError",
+    "NoFeasiblePathError",
+]

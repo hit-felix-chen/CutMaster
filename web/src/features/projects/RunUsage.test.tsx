@@ -65,6 +65,7 @@ const fullSummary = {
     dialogue_anchor_selection: bucket,
     pairwise_scoring: bucket,
     script_review: bucket,
+    revision_editor: bucket,
     slot_arrangement: bucket,
   },
 }
@@ -153,7 +154,9 @@ describe('Run model usage projection', () => {
     expect(screen.getByLabelText('Story Editor')).toHaveTextContent('S')
     expect(screen.getAllByLabelText('Timeline Scout')).toHaveLength(1)
     expect(screen.getByLabelText('Edit Composer')).toHaveTextContent('E')
-    expect(screen.getByLabelText('Revision Editor')).toHaveTextContent('R')
+    expect(screen.queryByLabelText('Revision Editor (legacy)')).not.toBeInTheDocument()
+    expect(screen.queryByText('script_review')).not.toBeInTheDocument()
+    expect(screen.queryByText('revision_editor')).not.toBeInTheDocument()
     const taskSection = screen
       .getByRole('heading', { name: 'By ASTER task' })
       .closest('section')
@@ -167,9 +170,8 @@ describe('Run model usage projection', () => {
       'candidate_retrieval',
       'candidate_visual_scoring',
       'pairwise_scoring',
-      'script_review',
     ])
-    expect(taskSection?.querySelectorAll('.run-usage__task-group')).toHaveLength(5)
+    expect(taskSection?.querySelectorAll('.run-usage__task-group')).toHaveLength(4)
     const timelineScoutGroup = screen
       .getByLabelText('Timeline Scout')
       .closest('article')

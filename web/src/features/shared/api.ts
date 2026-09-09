@@ -155,6 +155,28 @@ export type JobProgress = JobProgressBase &
     | { agent: AsterAgent; state: 'running' | 'complete' }
   )
 
+export type MaterialAnalysisNodeState = 'queued' | 'running' | 'complete'
+
+export interface MaterialAnalysisNodeProgress {
+  id: string
+  state: MaterialAnalysisNodeState
+  completed: number
+  total: number
+  unit: string
+}
+
+export interface MaterialAnalysisProgress {
+  schema_version: '2.0'
+  phase: 'analyser'
+  material_type: MaterialType
+  state: string
+  completed: number
+  total: number
+  unit: 'node'
+  active_node: string | null
+  nodes: MaterialAnalysisNodeProgress[]
+}
+
 export interface JobSummary {
   job_id: string
   attempt_id: string
@@ -163,7 +185,7 @@ export interface JobSummary {
   worker_id?: string | null
   process_id?: number | null
   heartbeat_at?: string | null
-  progress: JobProgress | Record<string, unknown>
+  progress: JobProgress | MaterialAnalysisProgress | Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -356,6 +378,7 @@ export interface ReviewMediaBinding {
 
 export interface ReviewSlot {
   slot_id: string
+  group_id: string
   position: number
   is_anchor: boolean
   output_start_sec: number
@@ -364,6 +387,7 @@ export interface ReviewSlot {
   source_end_sec: number
   source_timestamp: string
   selected_candidate_id: string
+  selected_trajectory_id: string
   picture: string
   selection_scores: Record<string, number>
   dialogue_anchor: Record<string, unknown> | null
@@ -383,9 +407,16 @@ export interface ReviewCandidate {
   kinetic_energy: number | null
   salience: number | null
   visual_evidence: string | null
+  media_url: string
+}
+
+export interface ReviewTrajectory {
+  trajectory_id: string
+  group_id: string
+  planning_segment_id: string
+  items: ReviewCandidate[]
   selected: boolean
   eligible_for_replacement: boolean
-  media_url: string
 }
 
 export type ReviewRenderVariant = RenderVariant
@@ -414,7 +445,7 @@ export interface FrozenEditReview {
     music: ReviewMediaBinding
   }
   slots: ReviewSlot[]
-  candidates: Record<string, ReviewCandidate[]>
+  candidates: Record<string, ReviewTrajectory[]>
   variants: ReviewRenderVariant[]
   timeline: ReviewTimeline
 }
@@ -888,7 +919,7 @@ export const api = {
       ),
     createRevision: (
       editId: string,
-      replacements: Array<{ slot_id: string; candidate_id: string }>,
+      replacements: Array<{ group_id: string; trajectory_id: string }>,
     ) =>
       apiRequest<CreateRevisionResult>(
         `/api/frozen-edits/${encodeURIComponent(editId)}/revisions`,
@@ -962,15 +993,6 @@ export const api = {
             }).toString()}`
       return apiRequest<ActivityCollection>(path)
     },
-    dismiss: (attemptIds: string[]) =>
-      apiRequest<{ attempt_ids: string[]; dismissed: number }>(
-        '/api/activity/dismiss',
-        {
-          method: 'POST',
-          headers: commandHeaders(),
-          body: JSON.stringify({ attempt_ids: attemptIds }),
-        },
-      ),
   },
   attempts: {
     logs: (attemptId: string) =>

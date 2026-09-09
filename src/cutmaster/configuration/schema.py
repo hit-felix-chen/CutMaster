@@ -78,21 +78,28 @@ class AnalyserConfig:
 
 
 @dataclass(frozen=True)
+class AsterTeamConfig:
+    max_rounds: int = 3
+    max_local_replans: int = 2
+
+
+@dataclass(frozen=True)
 class ArrangementArchitectConfig:
     target_clip_duration_sec: float = 4.0
-    replan_max_rounds: int = 3
+    max_model_requests: int = 3
 
 
 @dataclass(frozen=True)
 class DialogueAnchorConfig:
+    enabled: bool = True
     max_anchors: int = 4
     min_anchor_duration_sec: float = 1.5
+    max_model_requests: int = 3
 
 
 @dataclass(frozen=True)
 class CandidateRetrievalConfig:
-    candidates_per_slot: int = 3
-    retrieval_max_rounds: int = 3
+    target_trajectories_per_group: int = 3
     motion_sample_fps: float = 2.0
     motion_workers: int = 4
     static_kinetic_energy_threshold: float = 0.01
@@ -102,12 +109,8 @@ class CandidateRetrievalConfig:
 
 @dataclass(frozen=True)
 class BeamSearchConfig:
+    selection_mode: str = "beam"
     beam_width: int = 8
-
-
-@dataclass(frozen=True)
-class ScriptReviewConfig:
-    review_rounds: int = 1
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ class SourceWindowOptimizationConfig:
 
 @dataclass(frozen=True)
 class PlannersConfig:
+    aster_team: AsterTeamConfig = field(default_factory=AsterTeamConfig)
     arrangement_architect: ArrangementArchitectConfig = field(
         default_factory=ArrangementArchitectConfig
     )
@@ -129,7 +133,6 @@ class PlannersConfig:
         default_factory=CandidateRetrievalConfig
     )
     beam_search: BeamSearchConfig = field(default_factory=BeamSearchConfig)
-    script_review: ScriptReviewConfig = field(default_factory=ScriptReviewConfig)
     source_window_optimization: SourceWindowOptimizationConfig = field(
         default_factory=SourceWindowOptimizationConfig
     )
@@ -175,6 +178,7 @@ __all__ = [
     "ASRConfig",
     "AnalyserConfig",
     "AppConfig",
+    "AsterTeamConfig",
     "BeamSearchConfig",
     "CandidateRetrievalConfig",
     "DialogueAnchorConfig",
@@ -185,7 +189,6 @@ __all__ = [
     "PlannersConfig",
     "RendererConfig",
     "SceneSegmentationConfig",
-    "ScriptReviewConfig",
     "ShotAnnotationConfig",
     "ShotDetectionConfig",
     "ArrangementArchitectConfig",

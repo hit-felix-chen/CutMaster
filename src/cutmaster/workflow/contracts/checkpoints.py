@@ -15,7 +15,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-PLANNERS_CHECKPOINT_SCHEMA_VERSION = "1.0"
+PLANNERS_CHECKPOINT_SCHEMA_VERSION = "4.0"
 TOKEN_USAGE_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
@@ -45,7 +45,12 @@ class PlannersCheckpointStage(StrEnum):
     STORY = "story_editor"
     TIMELINE = "timeline_scout"
     EDIT = "edit_composer"
-    REVISION = "revision_editor"
+    REVISION = "revision_editor"  # Read-only compatibility with historical runs.
+
+
+class PlannersReplanScope(StrEnum):
+    GLOBAL = "global"
+    CANDIDATE_LOCAL = "candidate_local"
 
 
 _STAGE_ORDER = {
@@ -62,11 +67,18 @@ _CHECKPOINT_KEYS = frozenset(
         "schema_version",
         "completed_stage",
         "aster_attempt",
+        "replan_scope",
+        "local_replan_attempt",
         "music_profile",
         "slots",
+        "arrangement_groups",
+        "planning_segments",
+        "planning_groups",
         "dialogue_anchors",
         "candidate_pool",
+        "replan_reuse",
         "beam_path",
+        "selected_trajectory_ids",
         "selection",
         "pairwise_scores",
         "raw_script",
@@ -74,6 +86,17 @@ _CHECKPOINT_KEYS = frozenset(
         "stage_timings_sec",
         "prior_model_usage",
         "prior_model_call_count",
+    }
+)
+
+_REPLAN_REUSE_KEYS = frozenset(
+    {
+        "previous_slots",
+        "previous_planning_segments",
+        "previous_planning_groups",
+        "previous_dialogue_anchors",
+        "previous_candidate_pool",
+        "affected_parent_group_ids",
     }
 )
 
@@ -220,9 +243,14 @@ class PlannersCheckpoint:
     aster_attempt: int
     music_profile: Mapping[str, Any]
     slots: tuple[Mapping[str, Any], ...]
+    arrangement_groups: tuple[Mapping[str, Any], ...]
+    planning_segments: tuple[Mapping[str, Any], ...] | None
+    planning_groups: tuple[Mapping[str, Any], ...] | None
     dialogue_anchors: tuple[Mapping[str, Any], ...] | None
     candidate_pool: Mapping[str, tuple[Mapping[str, Any], ...]] | None
+    replan_reuse: Mapping[str, Any] | None
     beam_path: tuple[Mapping[str, Any], ...] | None
+    selected_trajectory_ids: Mapping[str, Any] | None
     selection: Mapping[str, Any] | None
     pairwise_scores: Mapping[str, Any] | None
     raw_script: tuple[Mapping[str, Any], ...] | None
@@ -230,6 +258,8 @@ class PlannersCheckpoint:
     stage_timings_sec: Mapping[str, float]
     prior_model_usage: Mapping[str, Any]
     prior_model_call_count: int
+    replan_scope: PlannersReplanScope | None = None
+    local_replan_attempt: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.completed_stage, PlannersCheckpointStage):
@@ -246,17 +276,47 @@ class PlannersCheckpoint:
             or self.prior_model_call_count < 0
         ):
             raise ValueError("prior_model_call_count must be non-negative")
+        if self.replan_scope is not None and not isinstance(
+            self.replan_scope,
+            PlannersReplanScope,
+        ):
+            raise TypeError("replan_scope must be a PlannersReplanScope or None")
+        if (
+            not isinstance(self.local_replan_attempt, int)
+            or isinstance(self.local_replan_attempt, bool)
+            or self.local_replan_attempt < 0
+        ):
+            raise ValueError("local_replan_attempt must be non-negative")
 
         music_profile = _object(self.music_profile, "music_profile")
         slots = _object_list(self.slots, "slots")
         if not slots:
             raise ValueError("slots must not be empty")
+        arrangement_groups = _object_list(
+            self.arrangement_groups,
+            "arrangement_groups",
+        )
+        if not arrangement_groups:
+            raise ValueError("arrangement_groups must not be empty")
+        planning_segments = self._optional_object_list(
+            self.planning_segments,
+            "planning_segments",
+        )
+        planning_groups = self._optional_object_list(
+            self.planning_groups,
+            "planning_groups",
+        )
         dialogue_anchors = self._optional_object_list(
             self.dialogue_anchors,
             "dialogue_anchors",
         )
         candidate_pool = self._optional_candidate_pool(self.candidate_pool)
+        replan_reuse = self._optional_replan_reuse(self.replan_reuse)
         beam_path = self._optional_object_list(self.beam_path, "beam_path")
+        selected_trajectory_ids = self._optional_object(
+            self.selected_trajectory_ids,
+            "selected_trajectory_ids",
+        )
         selection = self._optional_object(self.selection, "selection")
         pairwise_scores = self._optional_object(
             self.pairwise_scores,
@@ -267,6 +327,15 @@ class PlannersCheckpoint:
             self.planners_feedback,
             "planners_feedback",
         )
+        if planners_feedback is not None:
+            # Older checkpoints treated semantic candidate failures as permanent
+            # Group/Segment exclusions. They are diagnostic evidence, not bans;
+            # only verified static Source Segments remain unavailable.
+            planners_feedback = MappingProxyType({
+                key: value
+                for key, value in planners_feedback.items()
+                if key != "forbidden_group_segment_bindings"
+            })
         timings = _object(self.stage_timings_sec, "stage_timings_sec")
         for key, value in timings.items():
             if (
@@ -285,10 +354,81 @@ class PlannersCheckpoint:
         if self.completed_stage is PlannersCheckpointStage.REPLAN_PENDING:
             if planners_feedback is None:
                 raise ValueError("planners_feedback is required at a replan boundary")
+            if self.replan_scope is None:
+                raise ValueError("replan_scope is required at a replan boundary")
+            if self.replan_scope is PlannersReplanScope.CANDIDATE_LOCAL:
+                diagnostics = planners_feedback.get("diagnostics")
+                failed_parent_group_ids = (
+                    diagnostics.get("failed_parent_group_ids")
+                    if isinstance(diagnostics, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(failed_parent_group_ids, list)
+                    or not failed_parent_group_ids
+                    or any(
+                        not isinstance(group_id, str) or not group_id.strip()
+                        for group_id in failed_parent_group_ids
+                    )
+                    or len(set(failed_parent_group_ids))
+                    != len(failed_parent_group_ids)
+                ):
+                    raise ValueError(
+                        "candidate_local replan checkpoint requires unique, "
+                        "non-empty failed_parent_group_ids"
+                    )
+        if (
+            self.replan_scope is not None
+            and self.completed_stage
+            not in {
+                PlannersCheckpointStage.REPLAN_PENDING,
+                PlannersCheckpointStage.STORY,
+            }
+        ):
+            raise ValueError(
+                "replan_scope is allowed only while repair or candidate reuse is pending"
+            )
+        if (
+            replan_reuse is not None
+            and self.replan_scope is not PlannersReplanScope.CANDIDATE_LOCAL
+        ):
+            raise ValueError("replan_reuse is reserved for candidate_local repair")
+        if (
+            self.replan_scope is PlannersReplanScope.GLOBAL
+            and self.completed_stage is not PlannersCheckpointStage.REPLAN_PENDING
+        ):
+            raise ValueError("global replan_scope is valid only at a replan boundary")
+        if (
+            self.replan_scope is PlannersReplanScope.CANDIDATE_LOCAL
+            and replan_reuse is None
+        ):
+            raise ValueError("candidate_local replan_scope requires replan_reuse")
+        if self.replan_scope is PlannersReplanScope.CANDIDATE_LOCAL:
+            if self.local_replan_attempt < 1:
+                raise ValueError(
+                    "candidate_local replan_scope requires a positive local_replan_attempt"
+                )
+        # local_replan_attempt is the invocation-wide consumed repair budget.
+        # It remains non-zero after a successful local repair so a resumed
+        # checkpoint cannot regain already-consumed attempts.
+        if (
+            replan_reuse is not None
+            and self.completed_stage
+            not in {
+                PlannersCheckpointStage.REPLAN_PENDING,
+                PlannersCheckpointStage.STORY,
+            }
+        ):
+            raise ValueError(
+                "replan_reuse is allowed only while repair or candidate reuse is pending"
+            )
         required = (
+            (2, planning_segments, "planning_segments"),
+            (2, planning_groups, "planning_groups"),
             (2, dialogue_anchors, "dialogue_anchors"),
             (3, candidate_pool, "candidate_pool"),
             (4, beam_path, "beam_path"),
+            (4, selected_trajectory_ids, "selected_trajectory_ids"),
             (4, selection, "selection"),
             (4, pairwise_scores, "pairwise_scores"),
             (5, raw_script, "raw_script"),
@@ -309,9 +449,22 @@ class PlannersCheckpoint:
             "slots",
             tuple(MappingProxyType(item) for item in slots),
         )
+        object.__setattr__(
+            self,
+            "arrangement_groups",
+            tuple(MappingProxyType(item) for item in arrangement_groups),
+        )
+        object.__setattr__(self, "planning_segments", planning_segments)
+        object.__setattr__(self, "planning_groups", planning_groups)
         object.__setattr__(self, "dialogue_anchors", dialogue_anchors)
         object.__setattr__(self, "candidate_pool", candidate_pool)
+        object.__setattr__(self, "replan_reuse", replan_reuse)
         object.__setattr__(self, "beam_path", beam_path)
+        object.__setattr__(
+            self,
+            "selected_trajectory_ids",
+            selected_trajectory_ids,
+        )
         object.__setattr__(self, "selection", selection)
         object.__setattr__(self, "pairwise_scores", pairwise_scores)
         object.__setattr__(self, "raw_script", raw_script)
@@ -343,20 +496,98 @@ class PlannersCheckpoint:
             return None
         raw = _object(value, "candidate_pool")
         result: dict[str, tuple[Mapping[str, Any], ...]] = {}
-        for slot_id, candidates in raw.items():
-            result[slot_id] = tuple(
+        for group_id, trajectories in raw.items():
+            result[group_id] = tuple(
                 MappingProxyType(item)
-                for item in _object_list(candidates, f"candidate_pool[{slot_id!r}]")
+                for item in _object_list(
+                    trajectories,
+                    f"candidate_pool[{group_id!r}]",
+                )
             )
         return MappingProxyType(result)
+
+    @staticmethod
+    def _optional_replan_reuse(
+        value: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        if value is None:
+            return None
+        raw = _object(value, "replan_reuse")
+        if set(raw) != _REPLAN_REUSE_KEYS:
+            raise ValueError("replan_reuse fields do not match schema 4.0")
+        previous_slots = _object_list(
+            raw["previous_slots"],
+            "replan_reuse previous_slots",
+        )
+        if not previous_slots:
+            raise ValueError("replan_reuse previous_slots must not be empty")
+        planning_segments = _object_list(
+            raw["previous_planning_segments"],
+            "replan_reuse previous_planning_segments",
+        )
+        planning_groups = _object_list(
+            raw["previous_planning_groups"],
+            "replan_reuse previous_planning_groups",
+        )
+        dialogue_anchors = _object_list(
+            raw["previous_dialogue_anchors"],
+            "replan_reuse previous_dialogue_anchors",
+        )
+        pool_raw = _object(
+            raw["previous_candidate_pool"],
+            "replan_reuse previous_candidate_pool",
+        )
+        candidate_pool = {
+            group_id: _object_list(
+                trajectories,
+                f"replan_reuse previous_candidate_pool[{group_id!r}]",
+            )
+            for group_id, trajectories in pool_raw.items()
+        }
+        affected = raw["affected_parent_group_ids"]
+        if (
+            not isinstance(affected, list)
+            or any(not isinstance(value, str) or not value for value in affected)
+            or len(set(affected)) != len(affected)
+        ):
+            raise ValueError(
+                "replan_reuse affected_parent_group_ids must be unique strings"
+            )
+        return MappingProxyType(
+            {
+                "previous_slots": previous_slots,
+                "previous_planning_segments": planning_segments,
+                "previous_planning_groups": planning_groups,
+                "previous_dialogue_anchors": dialogue_anchors,
+                "previous_candidate_pool": candidate_pool,
+                "affected_parent_group_ids": list(affected),
+            }
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": PLANNERS_CHECKPOINT_SCHEMA_VERSION,
             "completed_stage": self.completed_stage.value,
             "aster_attempt": self.aster_attempt,
+            "replan_scope": (
+                None if self.replan_scope is None else self.replan_scope.value
+            ),
+            "local_replan_attempt": self.local_replan_attempt,
             "music_profile": dict(self.music_profile),
             "slots": [dict(item) for item in self.slots],
+            "arrangement_groups": [
+                dict(item) for item in self.arrangement_groups
+            ],
+            "planning_segments": (
+                None
+                if self.planning_segments is None
+                else [dict(item) for item in self.planning_segments]
+            ),
+            "planning_groups": (
+                None
+                if self.planning_groups is None
+                else [dict(item) for item in self.planning_groups]
+            ),
             "dialogue_anchors": (
                 None
                 if self.dialogue_anchors is None
@@ -366,14 +597,22 @@ class PlannersCheckpoint:
                 None
                 if self.candidate_pool is None
                 else {
-                    slot_id: [dict(item) for item in candidates]
-                    for slot_id, candidates in self.candidate_pool.items()
+                    group_id: [dict(item) for item in trajectories]
+                    for group_id, trajectories in self.candidate_pool.items()
                 }
+            ),
+            "replan_reuse": (
+                None if self.replan_reuse is None else dict(self.replan_reuse)
             ),
             "beam_path": (
                 None
                 if self.beam_path is None
                 else [dict(item) for item in self.beam_path]
+            ),
+            "selected_trajectory_ids": (
+                None
+                if self.selected_trajectory_ids is None
+                else dict(self.selected_trajectory_ids)
             ),
             "selection": None if self.selection is None else dict(self.selection),
             "pairwise_scores": (
@@ -402,23 +641,49 @@ class PlannersCheckpoint:
             not isinstance(key, str) for key in value
         ):
             raise TypeError("ASTER checkpoint must be a string-keyed mapping")
-        if set(value) != _CHECKPOINT_KEYS:
-            raise ValueError("ASTER checkpoint fields do not match schema 1.0")
         if value.get("schema_version") != PLANNERS_CHECKPOINT_SCHEMA_VERSION:
             raise ValueError(
                 f"Unsupported ASTER checkpoint schema: {value.get('schema_version')!r}"
             )
+        if set(value) != _CHECKPOINT_KEYS:
+            raise ValueError("ASTER checkpoint fields do not match schema 4.0")
         stage_raw = value.get("completed_stage")
         if not isinstance(stage_raw, str):
             raise TypeError("completed_stage must be a string")
         stage = PlannersCheckpointStage(stage_raw)
         aster_attempt = value.get("aster_attempt")
+        scope_raw = value.get("replan_scope")
+        if scope_raw is not None and not isinstance(scope_raw, str):
+            raise TypeError("replan_scope must be a string or null")
+        replan_scope = (
+            None if scope_raw is None else PlannersReplanScope(scope_raw)
+        )
+        local_replan_attempt = value.get("local_replan_attempt")
         prior_model_call_count = value.get("prior_model_call_count")
         return cls(
             completed_stage=stage,
             aster_attempt=aster_attempt,  # type: ignore[arg-type]
+            replan_scope=replan_scope,
+            local_replan_attempt=local_replan_attempt,  # type: ignore[arg-type]
             music_profile=_object(value.get("music_profile"), "music_profile"),
             slots=tuple(_object_list(value.get("slots"), "slots")),
+            arrangement_groups=tuple(
+                _object_list(value.get("arrangement_groups"), "arrangement_groups")
+            ),
+            planning_segments=(
+                None
+                if value.get("planning_segments") is None
+                else tuple(
+                    _object_list(value.get("planning_segments"), "planning_segments")
+                )
+            ),
+            planning_groups=(
+                None
+                if value.get("planning_groups") is None
+                else tuple(
+                    _object_list(value.get("planning_groups"), "planning_groups")
+                )
+            ),
             dialogue_anchors=(
                 None
                 if value.get("dialogue_anchors") is None
@@ -439,10 +704,23 @@ class PlannersCheckpoint:
                     ).items()
                 }
             ),
+            replan_reuse=(
+                None
+                if value.get("replan_reuse") is None
+                else _object(value.get("replan_reuse"), "replan_reuse")
+            ),
             beam_path=(
                 None
                 if value.get("beam_path") is None
                 else tuple(_object_list(value.get("beam_path"), "beam_path"))
+            ),
+            selected_trajectory_ids=(
+                None
+                if value.get("selected_trajectory_ids") is None
+                else _object(
+                    value.get("selected_trajectory_ids"),
+                    "selected_trajectory_ids",
+                )
             ),
             selection=(
                 None
@@ -490,6 +768,7 @@ __all__ = [
     "PLANNERS_CHECKPOINT_SCHEMA_VERSION",
     "PlannersCheckpoint",
     "PlannersCheckpointStage",
+    "PlannersReplanScope",
     "PlannersCheckpointStore",
     "normalize_checkpoint_usage",
 ]

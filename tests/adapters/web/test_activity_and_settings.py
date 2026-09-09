@@ -11,7 +11,6 @@ from cutmaster.application import CutMasterApplication
 from cutmaster.application.jobs import (
     ClaimJobCommand,
     EnqueueMaterialAnalysisCommand,
-    FailAttemptCommand,
 )
 from cutmaster.application.projects import (
     CreateProjectCommand,
@@ -49,78 +48,6 @@ def test_activity_and_events_read_durable_state(client: TestClient) -> None:
     assert events.status_code == 200
     assert events.json()["items"][0]["event_type"] == "project.created"
     assert events.json()["last_event_id"] >= 1
-
-
-def test_activity_can_dismiss_selected_terminal_attempts_without_deleting_history(
-    client: TestClient,
-    application: CutMasterApplication,
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "dismiss.mp4"
-    source.write_bytes(b"video")
-    material = application.materials.add(source, "video", "Dismiss Activity")
-    submission = application.jobs.enqueue_material_analysis(
-        EnqueueMaterialAnalysisCommand(str(uuid4()), material.material_id)
-    )
-    claimed = application.jobs.claim_next(
-        ClaimJobCommand("dismiss-worker", 42, submission.job.job_id)
-    )
-    assert claimed is not None
-    failed = application.jobs.mark_failed(
-        FailAttemptCommand(submission.attempt.attempt_id, "Provider failed")
-    )
-    attempt_id = str(failed.attempt.attempt_id)
-    headers = key()
-
-    before = client.get("/api/activity")
-    dismissed = client.post(
-        "/api/activity/dismiss",
-        headers=headers,
-        json={"attempt_ids": [attempt_id]},
-    )
-    replay = client.post(
-        "/api/activity/dismiss",
-        headers=headers,
-        json={"attempt_ids": [attempt_id]},
-    )
-    after = client.get("/api/activity")
-
-    assert any(
-        item["attempt"]["attempt_id"] == attempt_id for item in before.json()["items"]
-    )
-    assert dismissed.status_code == 200
-    assert dismissed.json() == {"attempt_ids": [attempt_id], "dismissed": 1}
-    assert replay.json() == dismissed.json()
-    assert all(
-        item["attempt"]["attempt_id"] != attempt_id for item in after.json()["items"]
-    )
-    assert application.jobs.get_attempt(failed.attempt.attempt_id).status.value == "failed"
-    assert application.jobs.activity(
-        owner_type="material",
-        owner_id=str(material.material_id),
-    )[0].attempt_id == failed.attempt.attempt_id
-
-
-def test_activity_rejects_dismissing_an_active_attempt(
-    client: TestClient,
-    application: CutMasterApplication,
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "active.mp4"
-    source.write_bytes(b"video")
-    material = application.materials.add(source, "video", "Active Activity")
-    submission = application.jobs.enqueue_material_analysis(
-        EnqueueMaterialAnalysisCommand(str(uuid4()), material.material_id)
-    )
-
-    response = client.post(
-        "/api/activity/dismiss",
-        headers=key(),
-        json={"attempt_ids": [str(submission.attempt.attempt_id)]},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["code"] == "activity_attempt_not_terminal"
 
 
 def test_activity_projects_canonical_navigation_context_for_each_owner(

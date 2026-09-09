@@ -35,12 +35,6 @@ class StopAttemptCommand:
 
 
 @dataclass(frozen=True)
-class DismissActivityAttemptsCommand:
-    command_id: str
-    attempt_ids: tuple[AttemptId, ...]
-
-
-@dataclass(frozen=True)
 class ClaimJobCommand:
     worker_id: str
     process_id: int
@@ -92,7 +86,6 @@ __all__ = [
     "ClaimJobCommand",
     "ClaimSupervisedJobCommand",
     "EnqueueMaterialAnalysisCommand",
-    "DismissActivityAttemptsCommand",
     "FailAttemptCommand",
     "HeartbeatJobCommand",
     "InterruptOrphansCommand",

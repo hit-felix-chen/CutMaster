@@ -2,14 +2,16 @@ import json
 
 import pytest
 
-from cutmaster.configuration.schema import LLMConfig
+from cutmaster.configuration.schema import LLMConfig, VLMConfig
 from cutmaster.workflow.prompting import (
     PromptModality,
     PromptPackage,
     PromptStage,
     PromptTask,
     ResponseContract,
+    prompt_registry,
 )
+from cutmaster.workflow.prompting.planners import CandidateVisualScoringDetails
 from cutmaster.infrastructure.models.openai_compatible import (
     ModelResponse,
     ModelUsage,
@@ -97,6 +99,71 @@ def test_context_persists_artifacts_without_model_call_history(
     assert "context_snapshot" not in persisted
     assert "raw_responses" not in persisted
     assert persisted_data["script_versions"][0]["source"] == "beam_search"
+
+
+def test_candidate_visual_call_does_not_send_global_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+
+    def generate(prompt, *_args, **_kwargs):
+        prompts.append(prompt)
+        return model_response(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "candidate_id": "candidate_01",
+                            "visible_description": "The coach directs defenders.",
+                            "visible_subjects": ["Coach", "Defenders"],
+                            "required_subject_visibility": 5,
+                            "visual_slot_relevance": 5,
+                            "visual_evidence": "Both requirements are visible.",
+                        }
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.shared.execution_context.generate_text",
+        generate,
+    )
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact(
+        "request",
+        {"instruction": "Create a global goalkeeper highlight."},
+    )
+    package = prompt_registry.build(
+        PromptStage.PLANNERS,
+        PromptTask.CANDIDATE_VISUAL_SCORING,
+        CandidateVisualScoringDetails(
+            operation="Candidate visual validation",
+            candidates=[
+                {
+                    "candidate_id": "candidate_01",
+                    "slot_id": "slot_01",
+                    "intended_visible_content": "The coach directs the defensive line.",
+                    "required_visible_subjects": ["Coach", "Defenders"],
+                    "source_segment_video_descriptions": [],
+                }
+            ],
+        ),
+    )
+
+    context.call_prompt(
+        package=package,
+        config=VLMConfig(model="test", base_url="", api_key="test"),
+        image_data_urls=["data:image/jpeg;base64,test"],
+        image_labels=["candidate_01"],
+    )
+
+    assert len(prompts) == 1
+    assert "# Maintained workflow context" not in prompts[0]
+    assert "global goalkeeper highlight" not in prompts[0]
+    assert "Coach" in prompts[0]
+    assert "Defenders" in prompts[0]
 
 
 def test_context_never_loads_existing_state(tmp_path) -> None:

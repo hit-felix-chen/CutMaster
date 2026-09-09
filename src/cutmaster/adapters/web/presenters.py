@@ -234,14 +234,20 @@ def frozen_edit_view(value: FrozenEditView) -> dict[str, Any]:
 def frozen_edit_review_view(value: FrozenEditReviewView) -> dict[str, Any]:
     video_source_url = f"/api/materials/{value.video_material_id}/source"
     candidates = {
-        slot_id: [
+        group_id: [
             {
-                **json_value(candidate),
-                "media_url": video_source_url,
+                **json_value(trajectory),
+                "items": [
+                    {
+                        **json_value(candidate),
+                        "media_url": video_source_url,
+                    }
+                    for candidate in trajectory["items"]
+                ],
             }
-            for candidate in values
+            for trajectory in values
         ]
-        for slot_id, values in value.candidates.items()
+        for group_id, values in value.candidates.items()
     }
     return {
         "edit": frozen_edit_view(value.edit),

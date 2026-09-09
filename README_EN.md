@@ -27,15 +27,17 @@ The complete CutMaster workflow is organized as a **MASTER** team:
 | **M** | **Material Analyst** | `workflow/analyser/material_analyst.py` | Builds reusable memory for video Shots, Segments, dialogue, and story summaries, as well as complete music tracks |
 | **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | Projects Music Memory onto the target duration and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
 | **S** | **Story Editor** | `workflow/planners/story_editor.py` | Uses key source dialogue to anchor plot, character arcs, and prompt intent |
-| **T** | **Timeline Scout** | `workflow/planners/timeline_scout.py` | Searches the source timeline and validates candidates for every Slot |
-| **E** | **Edit Composer** | `workflow/planners/edit_composer.py` | Combines unary visual quality and pairwise transitions with Beam Search |
-| **R** | **Revision Editor** | `workflow/planners/revision_editor.py` | Reviews the cut and replaces weak shots within the validated candidate pool |
+| **T** | **Timeline Scout** | `workflow/planners/timeline_scout.py` | Retrieves and validates complete candidate trajectories for each Slot Group |
+| **E** | **Edit Composer** | `workflow/planners/edit_composer.py` | Selects whole trajectories with visual scoring and Beam Search |
+| **R** | **Renderer** | `workflow/renderer/renderer.py` | Renders the frozen plan without another model review |
 
 In short:
 
 ```text
 M       = Analyser
-ASTER   = Planners team
+A/S/T/E = Planners team
+R       = Renderer
+ASTER   = Planning + rendering
 M + ASTER = MASTER
 ```
 
@@ -44,8 +46,8 @@ CLI and Benchmark invoke synchronous complete workflows through
 `CutMasterApplication.workflows`; Web maps HTTP/SSE to grouped Application use
 cases; Worker executes Application-owned durable Jobs. The Application Layer
 owns the managed Material, Project, Run, Frozen Edit, Render Variant, and Job
-lifecycles. `ASTERTeam` remains the sole coordinator for the five editorial
-agents: agents never call one another directly, and the team coordinator owns
+lifecycles. `ASTERTeam` remains the sole coordinator for the four planning
+agents; Application separately dispatches R (Renderer): agents never call one another directly, and the team coordinator owns
 all forward collaboration and repair feedback.
 
 ## Architecture
@@ -85,12 +87,11 @@ flowchart LR
     S --> T["T · Timeline Scout"]
     VM --> T
     T --> E["E · Edit Composer"]
-    E --> R["R · Revision Editor"]
-    R --> RP["RenderPlan"]
-    RP --> RD["Renderer"]
+    E --> RP["RenderPlan"]
+    RP --> RD["R · Renderer"]
     RD --> O["Final video"]
 
-    T -. "candidate shortage / targeted repair" .-> A
+    T -. "zero valid group trajectory / targeted repair" .-> A
     E -. "no feasible chronological path / replan" .-> A
     A -. "refresh anchors after Slot changes" .-> S
 ```
@@ -149,31 +150,71 @@ Complete-track music analysis belongs to the Material Analyst in Analyser. The P
 - its emotional, shot-scale, and motion intent;
 - its structural relation to neighboring Slots.
 
-Slot Arrangement defines what the cut needs before deciding which exact shot should fill it.
+Adjacent Slots may bind to the same Segment and form one Slot Group. Only Slots
+in the same group share a Segment; Segment identifiers are strictly increasing
+between groups. After music alignment, CutMaster uses integer milliseconds to
+verify that the complete group fits inside its Segment. An over-capacity response
+is rejected and Arrangement retries with the measured requirement and capacity.
+
+Slot Arrangement defines what the cut needs and which Segment each group uses
+before deciding which exact source windows fill it.
 
 ### 3. Source dialogue as story anchors
 
 The Story Editor selects a small number of high-value dialogue passages from Material Memory and binds them to their source-synchronous visuals. These anchors preserve essential plot points, character relations, and prompt intent within a visual montage.
 
+When an Anchor falls inside a multi-Slot group, its Slot leaves ordinary
+retrieval. Ordinary Slots before and after it become separate child groups bound
+to Planning Segments cut by the fixed Anchor picture, such as
+`segment_0010_01` and `segment_0010_02`. Every child group must fit inside its
+Planning Segment; an impossible split rejects the Anchor response and retries
+Story planning.
+Story Editor selects consecutive dialogue endpoints. The backend validates the
+complete picture window and partition capacity, keeps the largest legal subset
+when returned Anchors conflict, and permits no Anchor when none is strong and legal.
+
 Ordinary clips keep their source audio muted. Only selected Dialogue Anchors are prepared and mixed with the BGM, with automatic music ducking during speech.
 
 ### 4. Candidate space with closed-loop repair
 
-The Timeline Scout searches the original timeline for non-anchor Slots and validates protagonist identity, relevance, visibility, and motion. After exhausting the assigned Segment, it expands only once to the previous, current, and next Segments, retrieves three times the remaining candidate deficit, and keeps the highest-scoring alternatives. Alternative windows may overlap or shift slightly; only exact timestamp duplicates are rejected. If a Slot still lacks viable candidates, the Scout returns explicit diagnostics to the Arrangement Architect for targeted repair. When Slot semantics change, the Story Editor revalidates the anchors.
+Timeline Scout retrieves one complete trajectory for a Slot Group at a time.
+That trajectory contains one ordered, non-overlapping source window for every
+member Slot, all inside the assigned Segment or Planning Segment. If any item
+fails duration, motion, or VLM validation, the complete trajectory is rejected;
+items from different trajectories are never mixed.
+
+Each group issues one batch request, normally for three complete trajectories,
+and validates every returned trajectory independently. Fewer trajectories or an
+empty array are valid responses; no retry fills the batch. One accepted trajectory
+is sufficient. Model, media, and VLM execution failures propagate as system
+errors; missing decoded frames are not evidence of static content. Only a normally
+returned empty batch, or one whose trajectories are all semantically or visually rejected,
+triggers whole-group Arrangement repair with concrete rejection evidence, and the failed Group/Segment binding is
+then forbidden by backend validation. If every item of every batch trajectory is
+static, the Segment itself becomes unavailable. Targeted repair preserves every
+still-legal Anchor, deterministically rebuilds Story partitions, and retrieves
+only changed complete group contracts. Retrieval never widens one Slot into an
+adjacent Segment.
 
 ### 5. Efficient global sequence composition
 
 The Edit Composer considers:
 
-- unary candidate fitness for each Slot;
-- visual continuity and transition quality between adjacent shots;
-- hard constraints such as strict source chronology.
+- unary candidate fitness for every Slot in a trajectory;
+- visual continuity inside trajectories and between adjacent groups;
+- hard constraints for source chronology, non-overlap, and a feasible suffix.
 
-Sequence selection uses Beam Search. VLM transition scores are computed lazily only for edges that can still survive in promising beams, retaining a global combination space while controlling inference cost. The default score is `0.60 × unary + 0.40 × pairwise`.
+Sequence selection uses Beam Search and always selects a complete group
+trajectory. A choice is expanded only when at least one legal path still exists
+through all remaining groups. VLM transition scores are computed lazily for
+edges that can survive in promising beams. The default score is
+`0.60 × unary + 0.40 × pairwise`.
 
-### 6. Candidate-constrained revision
+### 6. Freeze and render
 
-The Revision Editor reviews the sequence and replaces weak shots only within the validated candidate pool. The Planners stage then compiles a frame-exact `RenderPlan`; Renderer can reuse that plan for BGM-only and dialogue variants.
+Edit Composer choices compile directly into a frame-exact `RenderPlan`.
+R (Renderer) renders that plan. Automatic Revision Editor is removed;
+human Guided Revision remains an independent operation on a Frozen Edit.
 
 ## Case Study: Power Transfer in *The Godfather*
 
@@ -187,11 +228,11 @@ This example follows the prompt “Create a montage of the key events in *The Go
 
 <p align="center"><em>Starting from the prompt and Material Memory, the ASTER team arranges, anchors, retrieves, composes, and revises a 60-second timeline of the Corleone power transfer. Click the image for the full-size view.</em></p>
 
-- **Arrangement Architect** maps the music into five acts—Established Authority, Assassination Crisis, Michael’s Retaliation, Loss & Succession, and Power Consolidation—and fixes each Slot’s content, source scope, visible subjects, and duration constraints.
-- **Story Editor** anchors decisive plot turns with source dialogue and lets longer lines continue across adjacent visual Slots through L-cuts.
-- **Timeline Scout** validates several candidates for ordinary Slots, rejecting and retrieving again when identity, visual relevance, or protagonist visibility is insufficient.
-- **Edit Composer** combines unary shot scores with pairwise compatibility and searches the candidate graph for a globally coherent chronological path.
-- **Revision Editor** reviews weak shots and replaces them within the validated candidate pool, producing a final montage that preserves source chronology, narrative coverage, and musical pacing.
+- **Arrangement Architect** maps the music into five acts and binds adjacent Slots into Segment-backed groups with exact duration budgets.
+- **Story Editor** anchors decisive plot turns with source dialogue, splits surrounding ordinary Slots into child groups, and lets longer lines continue through L-cuts.
+- **Timeline Scout** validates complete candidate trajectories for those groups, rejecting the whole trajectory when any member fails identity, relevance, visibility, or motion checks.
+- **Edit Composer** combines unary shot scores with pairwise compatibility and selects a globally coherent chronological path of whole trajectories.
+- **Renderer** realizes the frozen plan without changing candidate selections.
 
 ## Quick start
 
@@ -425,10 +466,16 @@ The file follows the ownership boundaries of the architecture:
 |---|---|---|
 | `[llm]`, `[vlm]` | Infrastructure / Workflow | Models, endpoints, timeouts, retries, concurrency, and input/cached-input/output prices |
 | `[analyser.*]` | Analyser | ASR, shot/scene annotation, complete-track music analysis, and Material Memory reuse |
+| `[planners.aster_team]` | ASTER Team | Maximum complete planning attempts |
 | `[planners.*]` | Planners | Arrangement, anchor, retrieval, Beam, review, and source-window controls |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer | Canvas, encoding, vocal separation, and mixing |
 
 The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `600` seconds. Every field and default is documented inline in `config.toml`.
+
+By default, ASTER runs at most three complete planning attempts and shares at
+most two local Candidate repairs across the whole invocation. Arrangement and
+Anchor each make at most three model requests per transaction. Candidate
+retrieval makes one batch request per targeted group.
 
 All model prices use CNY per million tokens. Every call snapshots the active prices in its usage artifact, so later configuration changes never reprice historical calls. Uncached input, cache-hit input, and output are charged separately; reasoning tokens are already part of output tokens and are not charged twice.
 

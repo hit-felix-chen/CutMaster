@@ -278,5 +278,7 @@ def test_application_snapshot_materializes_defaults_and_has_one_storage_authorit
 
     assert values["llm"]["max_retries"] == 3
     assert isinstance(values["llm"]["max_tokens"], int)
+    assert values["planners"]["aster_team"]["max_rounds"] == 3
+    assert values["planners"]["aster_team"]["max_local_replans"] == 2
     assert "material_analysis" not in values["analyser"]
     assert effective.data_root == tmp_path / ".cutmaster"

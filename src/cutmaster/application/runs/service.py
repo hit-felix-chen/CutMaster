@@ -30,7 +30,6 @@ from cutmaster.application.ports.data_root import (
 from cutmaster.application.ports.material_catalog import MaterialBinding
 from cutmaster.application.renders.service import RendersService
 from cutmaster.application.runs.commands import (
-    CandidateReplacement,
     CompleteRunCommand,
     CreateRevisionCommand,
     CreateRunCommand,
@@ -38,6 +37,7 @@ from cutmaster.application.runs.commands import (
     RecoverRunCommand,
     RunAgainCommand,
     SaveGuidedRevisionCommand,
+    TrajectoryReplacement,
 )
 from cutmaster.application.runs.checkpoints import (
     ManagedRunCheckpointRepository,
@@ -323,7 +323,12 @@ class RunsService:
         candidate_pool = bundle.get("candidate_pool")
         if not isinstance(candidate_pool, Mapping):
             raise ReviewArtifactUnavailableError("Candidate Space is invalid")
-        candidates = project_candidates(plan, candidate_pool)
+        candidates = project_candidates(
+            plan,
+            candidate_pool,
+            bundle.get("planning_segments"),
+            bundle.get("planning_groups"),
+        )
         beats, beats_available = self._music_beats(plan)
         return FrozenEditReviewView(
             edit=edit,
@@ -362,7 +367,12 @@ class RunsService:
             raise ReviewArtifactUnavailableError("Candidate Space is invalid")
         # Validate the complete Candidate Space before accepting a mutation.
         # A replacement cannot repair or conceal a corrupt unrelated Slot.
-        project_candidates(plan, pool)
+        project_candidates(
+            plan,
+            pool,
+            bundle.get("planning_segments"),
+            bundle.get("planning_groups"),
+        )
         replacements = self._validate_replacements(command.replacements, plan, pool)
         clips = self._apply_replacements(plan, replacements, pool)
         self._validate_revision_chronology(clips)
@@ -370,7 +380,10 @@ class RunsService:
         metadata["guided_revision"] = {
             "source_plan_id": plan.plan_id,
             "replacements": [
-                {"slot_id": value.slot_id, "candidate_id": value.candidate_id}
+                {
+                    "group_id": value.group_id,
+                    "trajectory_id": value.trajectory_id,
+                }
                 for value in replacements
             ],
         }
@@ -385,7 +398,10 @@ class RunsService:
         )
         replacement_payload = json.dumps(
             [
-                {"slot_id": value.slot_id, "candidate_id": value.candidate_id}
+                {
+                    "group_id": value.group_id,
+                    "trajectory_id": value.trajectory_id,
+                }
                 for value in replacements
             ],
             sort_keys=True,
@@ -688,89 +704,131 @@ class RunsService:
 
     @staticmethod
     def _validate_replacements(
-        raw_replacements: tuple[CandidateReplacement, ...],
+        raw_replacements: tuple[TrajectoryReplacement, ...],
         plan: RenderPlan,
         pool: Mapping[str, Any],
-    ) -> tuple[CandidateReplacement, ...]:
+    ) -> tuple[TrajectoryReplacement, ...]:
         if not raw_replacements:
             raise InvalidCandidateReplacementError(
                 "Guided Revision requires at least one replacement"
             )
-        clips = {str(clip["slot_id"]): clip for clip in plan.clips}
+        clips_by_group: dict[str, list[Mapping[str, Any]]] = {}
+        group_position: dict[str, int] = {}
+        for position, clip in enumerate(plan.clips):
+            group_id = str(clip.get("group_id") or "")
+            clips_by_group.setdefault(group_id, []).append(clip)
+            group_position.setdefault(group_id, position)
         seen: set[str] = set()
-        normalized: list[CandidateReplacement] = []
+        normalized: list[TrajectoryReplacement] = []
         for replacement in raw_replacements:
-            if not isinstance(replacement, CandidateReplacement):
-                raise TypeError("replacements must contain CandidateReplacement values")
-            slot_id = replacement.slot_id.strip()
-            candidate_id = replacement.candidate_id.strip()
-            if not slot_id or not candidate_id or slot_id in seen:
-                raise InvalidCandidateReplacementError(
-                    "Revision Slots and Candidates must be non-empty and unique"
+            if not isinstance(replacement, TrajectoryReplacement):
+                raise TypeError(
+                    "replacements must contain TrajectoryReplacement values"
                 )
-            seen.add(slot_id)
-            clip = clips.get(slot_id)
-            if clip is None:
+            group_id = replacement.group_id.strip()
+            trajectory_id = replacement.trajectory_id.strip()
+            if not group_id or not trajectory_id or group_id in seen:
                 raise InvalidCandidateReplacementError(
-                    f"Unknown Revision Slot: {slot_id}"
+                    "Revision Groups and trajectories must be non-empty and unique"
                 )
-            if isinstance(clip.get("dialogue_anchor"), Mapping):
-                raise AnchorLockedError(f"Story Anchor Slot is locked: {slot_id}")
-            if candidate_id == str(clip["candidate_id"]):
+            seen.add(group_id)
+            group_clips = clips_by_group.get(group_id)
+            if group_clips is None:
                 raise InvalidCandidateReplacementError(
-                    f"Replacement for {slot_id} does not change its Candidate"
+                    f"Unknown Revision Group: {group_id}"
                 )
-            values = pool.get(slot_id)
+            if any(
+                isinstance(clip.get("dialogue_anchor"), Mapping)
+                for clip in group_clips
+            ):
+                raise AnchorLockedError(f"Story Anchor Group is locked: {group_id}")
+            selected_ids = {
+                str(clip.get("trajectory_id") or "") for clip in group_clips
+            }
+            if trajectory_id in selected_ids:
+                raise InvalidCandidateReplacementError(
+                    f"Replacement for {group_id} does not change its trajectory"
+                )
+            values = pool.get(group_id)
             if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
                 raise InvalidCandidateReplacementError(
-                    f"Candidate Space has no Slot {slot_id}"
+                    f"Candidate Space has no Group {group_id}"
                 )
             match = next(
                 (
                     value
                     for value in values
                     if isinstance(value, Mapping)
-                    and str(value.get("candidate_id")) == candidate_id
-                    and str(value.get("slot_id") or slot_id) == slot_id
+                    and str(value.get("trajectory_id")) == trajectory_id
+                    and str(value.get("group_id")) == group_id
                 ),
                 None,
             )
             if match is None:
                 raise InvalidCandidateReplacementError(
-                    f"Candidate {candidate_id} does not belong to {slot_id}"
+                    f"Trajectory {trajectory_id} does not belong to {group_id}"
                 )
-            source_start, source_end = parse_range(str(match.get("timestamp") or ""))
-            output_frames = clip["output_frame_range"]
-            output_duration = (int(output_frames[1]) - int(output_frames[0])) / plan.fps
-            if source_end - source_start + (1 / plan.fps) < output_duration:
+            raw_items = match.get("items")
+            if not isinstance(raw_items, Sequence) or isinstance(
+                raw_items, (str, bytes)
+            ):
                 raise InvalidCandidateReplacementError(
-                    f"Candidate {candidate_id} is shorter than Slot {slot_id}"
+                    f"Trajectory {trajectory_id} has no items"
                 )
-            normalized.append(CandidateReplacement(slot_id, candidate_id))
-        return tuple(sorted(normalized, key=lambda value: value.slot_id))
+            for clip, item in zip(group_clips, raw_items, strict=True):
+                if not isinstance(item, Mapping):
+                    raise InvalidCandidateReplacementError(
+                        f"Trajectory {trajectory_id} contains an invalid item"
+                    )
+                source_start, source_end = parse_range(
+                    str(item.get("timestamp") or "")
+                )
+                output_frames = clip["output_frame_range"]
+                output_duration = (
+                    int(output_frames[1]) - int(output_frames[0])
+                ) / plan.fps
+                if source_end - source_start + (1 / plan.fps) < output_duration:
+                    raise InvalidCandidateReplacementError(
+                        f"Trajectory {trajectory_id} is shorter than Slot "
+                        f"{clip['slot_id']}"
+                    )
+            normalized.append(TrajectoryReplacement(group_id, trajectory_id))
+        return tuple(
+            sorted(normalized, key=lambda value: group_position[value.group_id])
+        )
 
     @staticmethod
     def _apply_replacements(
         plan: RenderPlan,
-        replacements: tuple[CandidateReplacement, ...],
+        replacements: tuple[TrajectoryReplacement, ...],
         pool: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
-        replacements_by_slot = {value.slot_id: value for value in replacements}
+        replacements_by_group = {value.group_id: value for value in replacements}
+        trajectory_items: dict[str, dict[str, Mapping[str, Any]]] = {}
+        for group_id, requested in replacements_by_group.items():
+            trajectory = next(
+                value
+                for value in pool[group_id]
+                if isinstance(value, Mapping)
+                and str(value.get("trajectory_id")) == requested.trajectory_id
+            )
+            trajectory_items[group_id] = {
+                str(item["slot_id"]): item
+                for item in trajectory["items"]
+                if isinstance(item, Mapping)
+            }
         clips: list[dict[str, Any]] = []
         for original in plan.clips:
             slot_id = str(original["slot_id"])
-            requested = replacements_by_slot.get(slot_id)
+            group_id = str(original["group_id"])
+            requested = replacements_by_group.get(group_id)
             if requested is None:
                 clips.append(dict(original))
                 continue
-            values = pool[slot_id]
-            candidate = next(
-                value
-                for value in values
-                if isinstance(value, Mapping)
-                and str(value.get("candidate_id")) == requested.candidate_id
+            candidate = trajectory_items[group_id][slot_id]
+            clips.append(
+                replacement_clip(original, candidate, requested.trajectory_id)
             )
-            clips.append(replacement_clip(original, candidate))
         return clips
 
     @staticmethod

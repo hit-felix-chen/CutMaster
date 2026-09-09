@@ -1,0 +1,845 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from cutmaster.configuration.schema import LLMConfig
+from cutmaster.workflow.planners.aster_team import ASTERTeam
+from cutmaster.workflow.planners.arrangement_architect import (
+    ArrangementArchitectAgent,
+    _arrangement_groups,
+    _expand_target_group_slot_ids,
+    _plan_edit_slots_from_context,
+    _repair_window_slot_ids,
+    _targeted_slot_constraints,
+    _validate_and_align_slots,
+    _validate_group_capacity,
+    _validate_slots,
+    _validate_targeted_slots,
+    align_slots_to_music,
+    redesign_edit_slots,
+)
+
+
+def test_arrangement_agent_caps_each_plan_to_three_model_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received_retries: list[int] = []
+
+    def arrange_stub(_request, _music, model_config, *_args, **_kwargs):
+        received_retries.append(model_config.max_retries)
+        return []
+
+    def repair_stub(_slots, _failures, model_config, *_args, **_kwargs):
+        received_retries.append(model_config.max_retries)
+        return [], set()
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.arrangement_architect.plan_edit_slots",
+        arrange_stub,
+    )
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.arrangement_architect.redesign_edit_slots",
+        repair_stub,
+    )
+    config = SimpleNamespace(
+        llm=LLMConfig(
+            model="test",
+            base_url="",
+            api_key="test",
+            max_retries=9,
+        ),
+        planners=SimpleNamespace(
+            arrangement_architect=SimpleNamespace(
+                target_clip_duration_sec=4.0,
+                max_model_requests=3,
+            )
+        ),
+        renderer=SimpleNamespace(fps=30),
+    )
+    agent = ArrangementArchitectAgent(config, SimpleNamespace())
+
+    agent.arrange(SimpleNamespace(), {})
+    agent.repair([], [])
+
+    assert received_retries == [2, 2]
+
+
+def _video_description(*, duration_sec: float = 10.0) -> dict:
+    return {
+        "segments": [
+            {
+                "segment_id": f"segment_{index:04d}",
+                "time_range": {
+                    "start_sec": float(index * 20),
+                    "end_sec": float(index * 20) + duration_sec,
+                },
+            }
+            for index in range(1, 13)
+        ]
+    }
+
+
+def _raw_slots(segment_numbers: list[int], durations: list[float]) -> dict:
+    return {
+        "slots": [
+            {
+                "narrative_role": "development",
+                "content_description": f"event {index}",
+                "target_emotion": "focused",
+                "target_emotional_intensity": 0.5,
+                "target_kinetic_energy": 0.5,
+                "desired_duration_sec": duration,
+                "continuity_from_previous": "continues",
+                "source_segment_id": f"segment_{segment_number:04d}",
+                "required_visible_subjects": [],
+            }
+            for index, (segment_number, duration) in enumerate(
+                zip(segment_numbers, durations, strict=True),
+                1,
+            )
+        ]
+    }
+
+
+def test_repeated_adjacent_segments_form_deterministic_groups() -> None:
+    slots = _validate_slots(
+        _raw_slots([10, 10, 11], [2.0, 2.0, 2.0]),
+        6.0,
+        2.0,
+        _video_description(),
+    )
+
+    assert [slot["source_segment_id"] for slot in slots] == [
+        "segment_0010",
+        "segment_0010",
+        "segment_0011",
+    ]
+    assert [slot["group_id"] for slot in slots] == [
+        "group_001",
+        "group_001",
+        "group_002",
+    ]
+    assert _arrangement_groups(slots) == [
+        {
+            "group_id": "group_001",
+            "slot_ids": ["slot_01", "slot_02"],
+            "source_segment_id": "segment_0010",
+        },
+        {
+            "group_id": "group_002",
+            "slot_ids": ["slot_03"],
+            "source_segment_id": "segment_0011",
+        },
+    ]
+
+
+def test_segment_order_may_repeat_but_may_not_reverse() -> None:
+    with pytest.raises(ValueError, match="Source Group Segments.*strictly increasing"):
+        _validate_slots(
+            _raw_slots([10, 11, 10], [2.0, 2.0, 2.0]),
+            6.0,
+            2.0,
+            _video_description(),
+        )
+
+
+def test_group_capacity_accepts_equality_and_rejects_one_millisecond_overflow() -> None:
+    slots = _validate_slots(
+        _raw_slots([10, 10], [2.0, 2.0]),
+        4.0,
+        2.0,
+        _video_description(duration_sec=4.0),
+    )
+    aligned = align_slots_to_music(
+        slots,
+        {"accents_sec": [2.0], "beats_sec": [2.0]},
+        4.0,
+        1000,
+        2.0,
+    )
+
+    _validate_group_capacity(aligned, _video_description(duration_sec=4.0))
+    assert sum(slot["planned_duration_ms"] for slot in aligned) == 4000
+
+    overflow = [dict(slot) for slot in aligned]
+    overflow[-1]["planned_duration_ms"] += 1
+    overflow[-1]["planned_duration_sec"] = (
+        overflow[-1]["planned_duration_ms"] / 1000.0
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"group_001.*segment_0010.*available=4000ms required=4001ms"
+        ),
+    ):
+        _validate_group_capacity(
+            overflow,
+            _video_description(duration_sec=4.0),
+        )
+
+
+def test_capacity_is_checked_after_music_alignment() -> None:
+    parsed = _raw_slots([10, 11, 11], [2.0, 3.0, 3.0])
+
+    with pytest.raises(
+        ValueError,
+        match=r"group_002.*available=6000ms required=6500ms",
+    ):
+        _validate_and_align_slots(
+            parsed,
+            8.0,
+            3.0,
+            _video_description(duration_sec=6.0),
+            {
+                "accents_sec": [1.5, 5.0],
+                "beats_sec": [1.5, 5.0],
+            },
+            2,
+        )
+
+
+def test_targeted_replan_expands_one_slot_to_its_complete_group() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([10, 10, 11], [2.0, 2.0, 2.0]),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+
+    assert _expand_target_group_slot_ids(slots, {"slot_02"}) == {
+        "slot_01",
+        "slot_02",
+    }
+    assert _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        video_description,
+    ) == {"slot_01", "slot_02"}
+
+
+def test_targeted_replan_keeps_the_smallest_feasible_group_window() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5, 7], [2.0, 2.0, 2.0, 2.0]),
+        8.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_02"}
+
+
+def test_targeted_replan_window_ignores_unavailable_segments() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5, 7], [2.0] * 4),
+        8.0,
+        2.0,
+        video_description,
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        video_description,
+        unavailable_source_segment_ids={"segment_0002", "segment_0003", "segment_0004"},
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03"}
+
+
+def test_targeted_replan_keeps_disjoint_failed_groups_separate() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5, 7, 9], [2.0] * 5),
+        10.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0, 8.0],
+            "beats_sec": [2.0, 4.0, 6.0, 8.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_02", "slot_04"}
+
+
+def test_targeted_replan_adds_neighbors_when_original_segment_is_unavailable() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 5], [2.0] * 4),
+        8.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02"},
+        _video_description(),
+        unavailable_source_segment_ids={"segment_0002"},
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03"}
+
+
+def test_adjacent_failed_groups_may_keep_their_original_source_assignment() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 4, 5], [2.0] * 4),
+        8.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_03"},
+        _video_description(),
+    )
+
+    assert selected == {"slot_02", "slot_03"}
+
+
+def test_overlapping_repair_windows_share_one_compatible_assignment() -> None:
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 5, 6], [2.0] * 5),
+        10.0,
+        2.0,
+        _video_description(),
+        {
+            "accents_sec": [2.0, 4.0, 6.0, 8.0],
+            "beats_sec": [2.0, 4.0, 6.0, 8.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        _video_description(),
+        unavailable_source_segment_ids={"segment_0002", "segment_0005"},
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03", "slot_04"}
+
+
+def test_individually_blocked_run_can_merge_with_next_failed_run() -> None:
+    video_description = _video_description()
+    video_description["segments"] = video_description["segments"][:5]
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 2, 3, 4], [2.0] * 4),
+        8.0,
+        2.0,
+        video_description,
+        {
+            "accents_sec": [2.0, 4.0, 6.0],
+            "beats_sec": [2.0, 4.0, 6.0],
+        },
+        1000,
+    )
+
+    selected = _repair_window_slot_ids(
+        slots,
+        {"slot_02", "slot_04"},
+        video_description,
+        unavailable_source_segment_ids={"segment_0002", "segment_0004"},
+    )
+
+    assert selected == {"slot_01", "slot_02", "slot_03", "slot_04"}
+
+
+def test_targeted_replan_may_merge_distinct_arrangement_groups() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_01", "slot_02"},
+        video_description,
+    )
+    replacements = [
+        {**slot, "source_segment_id": "segment_0002"}
+        for slot in slots[:2]
+    ]
+
+    result = _validate_targeted_slots(
+        {"slots": replacements},
+        slots,
+        constraints,
+        video_description,
+    )
+
+    assert [slot["group_id"] for slot in result] == [
+        "group_001",
+        "group_001",
+        "group_002",
+    ]
+
+
+def test_targeted_replan_accepts_an_unchanged_source_assignment() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_02"},
+        video_description,
+    )
+
+    repaired = _validate_targeted_slots(
+        {"slots": [dict(slots[1])]},
+        slots,
+        constraints,
+        video_description,
+    )
+    assert repaired == slots
+
+
+def test_targeted_replan_excludes_static_sources_but_not_the_original_binding() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_02"},
+        video_description,
+        unavailable_source_segment_ids={"segment_0004"},
+    )
+
+    assert constraints["slot_02"]["allowed_segment_ids"] == [
+        "segment_0002", "segment_0003"
+    ]
+
+
+def test_targeted_replan_backend_accepts_revised_subjects_on_original_segment() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_02"},
+        video_description,
+    )
+
+    repaired = _validate_targeted_slots(
+        {"slots": [{**slots[1], "required_visible_subjects": ["visible team"]}]},
+        slots,
+        constraints,
+        video_description,
+    )
+    assert repaired[1]["source_segment_id"] == "segment_0003"
+    assert repaired[1]["required_visible_subjects"] == ["visible team"]
+
+
+def test_targeted_replan_backend_rejects_unavailable_segment() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    constraints = _targeted_slot_constraints(
+        slots,
+        {"slot_02"},
+        video_description,
+    )
+    replacement = {**slots[1], "source_segment_id": "segment_0004"}
+
+    with pytest.raises(ValueError, match="unavailable Source Segment segment_0004"):
+        _validate_targeted_slots(
+            {"slots": [replacement]},
+            slots,
+            constraints,
+            video_description,
+            unavailable_source_segment_ids={"segment_0004"},
+        )
+
+
+def test_targeted_replan_prompt_keeps_static_bans_and_discards_legacy_binding_bans() -> None:
+    video_description = _video_description()
+    slots = _validate_and_align_slots(
+        _raw_slots([1, 3, 5], [2.0] * 3),
+        6.0,
+        2.0,
+        video_description,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        1000,
+    )
+    artifacts = {
+        "video_description": video_description,
+        "planners_feedback": {
+            "forbidden_group_segment_bindings": [
+                {
+                    "parent_group_id": "old_parent_group",
+                    "slot_ids": ["slot_02"],
+                    "source_segment_id": "segment_0002",
+                }
+            ],
+            "unavailable_source_segment_ids": ["segment_0004"],
+        },
+    }
+    packages = []
+
+    class FakeContext:
+        def get_artifact(self, name, default=None):
+            return artifacts.get(name, default)
+
+        def set_artifact(self, name, value):
+            artifacts[name] = value
+
+        def call_prompt(self, *, package, **_kwargs):
+            packages.append(package)
+            raise RuntimeError("stop after prompt inspection")
+
+    with pytest.raises(RuntimeError, match="stop after prompt inspection"):
+        redesign_edit_slots(
+            slots,
+            [
+                {
+                    "slot_id": "slot_02",
+                    "group_id": "group_002",
+                    "source_segment_id": "segment_0003",
+                }
+            ],
+            LLMConfig(model="test", base_url="", api_key="test"),
+            FakeContext(),
+        )
+
+    target_schemas = packages[0].response_contract.schema["properties"][
+        "slots"
+    ]["items"]["oneOf"]
+    slot_02_schema = next(
+        schema
+        for schema in target_schemas
+        if schema["properties"]["slot_id"]["const"] == "slot_02"
+    )
+    allowed = slot_02_schema["properties"]["source_segment_id"]["enum"]
+    assert "segment_0002" in allowed
+    assert "segment_0003" in allowed
+    assert "segment_0004" not in allowed
+    assert "forbidden_group_segment_bindings" not in artifacts["planners_feedback"]
+
+
+@pytest.mark.parametrize("parent_group_id", ["group_002", "old_parent_group_999"])
+def test_full_arrangement_does_not_restore_legacy_semantic_binding_bans(parent_group_id) -> None:
+    video_description = _video_description()
+    artifacts = {
+        "video_description": video_description,
+        "video_summary": {"summary": "match"},
+        "planners_feedback": {
+            "forbidden_group_segment_bindings": [{
+                "parent_group_id": parent_group_id,
+                "slot_ids": ["slot_02"],
+                "source_segment_id": "segment_0003",
+            }],
+            "unavailable_source_segment_ids": [],
+        },
+    }
+
+    class Context:
+        def get_artifact(self, name):
+            return artifacts.get(name)
+
+        def set_artifact(self, name, value):
+            artifacts[name] = value
+
+        def call_prompt(self, *, validate_business, **_kwargs):
+            return validate_business(_raw_slots([1, 3, 5], [2.0] * 3))
+
+    result = _plan_edit_slots_from_context(
+        SimpleNamespace(target_output_length_sec=6.0),
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        LLMConfig(model="test", base_url="", api_key="test"),
+        Context(),
+        target_clip_duration_sec=2.0,
+        output_fps=1000,
+    )
+    assert result[1]["source_segment_id"] == "segment_0003"
+    assert "forbidden_group_segment_bindings" not in artifacts["planners_feedback"]
+
+
+def test_full_arrangement_rejects_an_intrinsically_unavailable_segment() -> None:
+    with pytest.raises(ValueError, match="unavailable Source Segment segment_0003"):
+        _validate_and_align_slots(
+            _raw_slots([1, 3, 5], [2.0] * 3),
+            6.0,
+            2.0,
+            _video_description(),
+            {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+            1000,
+            unavailable_source_segment_ids={"segment_0003"},
+        )
+
+
+def test_alignment_publishes_milliseconds_as_authoritative_duration() -> None:
+    slots = _validate_slots(
+        _raw_slots([10, 11, 12], [2.0, 2.0, 2.0]),
+        6.0,
+        2.0,
+        _video_description(),
+    )
+
+    aligned = align_slots_to_music(
+        slots,
+        {"accents_sec": [2.0, 4.0], "beats_sec": [2.0, 4.0]},
+        6.0,
+        30,
+        2.0,
+    )
+
+    assert [slot["planned_duration_ms"] for slot in aligned] == [2000, 2000, 2000]
+    assert all(
+        slot["planned_duration_sec"] == slot["planned_duration_ms"] / 1000.0
+        for slot in aligned
+    )
+
+
+def test_post_alignment_capacity_failure_stays_inside_prompt_retry_boundary() -> None:
+    artifacts = {
+        "video_description": _video_description(duration_sec=6.0),
+        "video_summary": {"summary": "test"},
+        "planners_feedback": {
+            "unavailable_source_segment_ids": ["segment_0009"],
+        },
+    }
+    invalid = _raw_slots([10, 11, 11], [2.0, 3.0, 3.0])
+    valid = _raw_slots([10, 11, 12], [2.0, 3.0, 3.0])
+    failures: list[str] = []
+    packages = []
+
+    class FakeContext:
+        def get_artifact(self, name, default=None):
+            return artifacts.get(name, default)
+
+        def set_artifact(self, name, value):
+            artifacts[name] = value
+
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            packages.append(package)
+            try:
+                validate_business(invalid)
+            except ValueError as exc:
+                failures.append(str(exc))
+            return validate_business(valid)
+
+    result = _plan_edit_slots_from_context(
+        SimpleNamespace(target_output_length_sec=8.0),
+        {"accents_sec": [1.5, 5.0], "beats_sec": [1.5, 5.0]},
+        LLMConfig(model="test", base_url="", api_key="test"),
+        FakeContext(),
+        target_clip_duration_sec=3.0,
+        output_fps=2,
+    )
+
+    assert len(failures) == 1
+    assert "available=6000ms required=6500ms" in failures[0]
+    allowed = packages[0].response_contract.schema["properties"]["slots"][
+        "items"
+    ]["properties"]["source_segment_id"]["enum"]
+    assert "segment_0009" not in allowed
+    assert [slot["group_id"] for slot in result] == [
+        "group_001",
+        "group_002",
+        "group_003",
+    ]
+    assert artifacts["arrangement_groups"] == _arrangement_groups(result)
+
+
+def test_repair_groups_maps_story_child_to_complete_parent_before_story() -> None:
+    def slot(slot_id: str, group_id: str, *, parent_group_id: str | None = None):
+        item = {
+            "slot_id": slot_id,
+            "group_id": group_id,
+            "source_segment_id": "segment_0001",
+            "content_description": f"event {slot_id}",
+        }
+        if parent_group_id is not None:
+            item["parent_group_id"] = parent_group_id
+        return item
+
+    runtime_slots = [
+        slot("slot_01", "group_001_01", parent_group_id="group_001"),
+        slot("slot_02", "group_001_anchor_01", parent_group_id="group_001"),
+        slot("slot_03", "group_001_02", parent_group_id="group_001"),
+        slot("slot_04", "group_002"),
+    ]
+    arrangement_slots = [
+        slot("slot_01", "group_001"),
+        slot("slot_02", "group_001"),
+        slot("slot_03", "group_001"),
+        slot("slot_04", "group_002"),
+    ]
+    repaired_slots = [
+        {**item, "source_segment_id": "segment_0002"}
+        if item["group_id"] == "group_001"
+        else item
+        for item in arrangement_slots
+    ]
+    refreshed_slots = [
+        slot("slot_01", "group_001_01", parent_group_id="group_001"),
+        slot("slot_02", "group_001_anchor_01", parent_group_id="group_001"),
+        slot("slot_03", "group_001_02", parent_group_id="group_001"),
+        slot("slot_04", "group_002"),
+    ]
+    calls: list[tuple[str, object]] = []
+
+    class StoryEditor:
+        def restore_arrangement_slots(self, received):
+            calls.append(("restore", received))
+            return arrangement_slots
+
+        def anchor(self, received):
+            calls.append(("anchor", received))
+            return refreshed_slots
+
+    class ArrangementArchitect:
+        def repair(self, received, failures):
+            calls.append(("repair", (received, failures)))
+            return repaired_slots, {"slot_01", "slot_02", "slot_03"}
+
+    class TimelineScout:
+        def scout(self, received, cancellation_token=None):
+            calls.append(("scout", received))
+            return {"group_001_01": [{"trajectory_id": "trajectory_001"}]}
+
+    team = ASTERTeam.__new__(ASTERTeam)
+    team.story_editor = StoryEditor()
+    team.arrangement_architect = ArrangementArchitect()
+    team.timeline_scout = TimelineScout()
+    team.context = SimpleNamespace(get_artifact=lambda _name: None)
+
+    repaired, replanned = team.repair_groups(
+        runtime_slots,
+        {
+            "failed_group_ids": ["group_001_02"],
+            "failed_slot_ids": ["slot_03"],
+            "reason_code": "required_subject_not_visually_confirmed",
+            "diagnosis": "The goalkeeper was not visible.",
+            "repair_requirement": "Change the failed parent Group binding.",
+        },
+    )
+    pool = team.scout(repaired)
+
+    repair_input, failures = calls[1][1]
+    assert repair_input == arrangement_slots
+    assert [failure["slot_id"] for failure in failures] == ["slot_03"]
+    assert "reason" not in failures[0]
+    assert failures[0]["reason_code"] == (
+        "required_subject_not_visually_confirmed"
+    )
+    assert failures[0]["diagnosis"] == "The goalkeeper was not visible."
+    assert calls[2] == ("scout", repaired_slots)
+    assert repaired == repaired_slots
+    assert replanned == {"slot_01", "slot_02", "slot_03"}
+    assert pool["group_001_01"][0]["trajectory_id"] == "trajectory_001"
+
+
+def test_repair_groups_preserves_anchor_and_can_repair_ordinary_sibling() -> None:
+    runtime_slots = [
+        {
+            "slot_id": "slot_01",
+            "group_id": "group_001_anchor_01",
+            "parent_group_id": "group_001",
+            "source_segment_id": "segment_0001",
+            "content_description": "An anchored line.",
+            "dialogue_anchor": {"anchor_id": "dialogue_01"},
+        },
+        {
+            "slot_id": "slot_02",
+            "group_id": "group_001_01",
+            "parent_group_id": "group_001",
+            "source_segment_id": "segment_0001",
+            "content_description": "An unsupported visible subject.",
+        },
+    ]
+    received_calls = []
+
+    class ArrangementArchitect:
+        def repair(self, slots, failures):
+            received_calls.append((slots, failures))
+            return slots, {"slot_01", "slot_02"}
+
+    class StoryEditor:
+        def restore_arrangement_slots(self, received):
+            return [{**slot, "group_id": slot["parent_group_id"]} for slot in received]
+
+    team = ASTERTeam.__new__(ASTERTeam)
+    team.story_editor = StoryEditor()
+    team.arrangement_architect = ArrangementArchitect()
+    team.context = SimpleNamespace(get_artifact=lambda _name: {})
+
+    repaired, targeted = team.repair_groups(
+        runtime_slots,
+        {
+            "failed_group_ids": ["group_001_01"],
+            "failed_parent_group_ids": ["group_001"],
+            "failed_slot_ids": ["slot_02"],
+        },
+    )
+    assert targeted == {"slot_01", "slot_02"}
+    assert len(received_calls) == 1
+    assert received_calls[0][1][0]["slot_id"] == "slot_02"
+    assert repaired[0]["dialogue_anchor"] == runtime_slots[0]["dialogue_anchor"]

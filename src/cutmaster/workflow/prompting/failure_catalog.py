@@ -13,17 +13,11 @@ class PromptFailureCode(StrEnum):
     MODEL_REQUEST_FAILED = "model_request_failed"
     MODEL_RETRY_EXHAUSTED = "model_retry_exhausted"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
-    PLANNERS_STAGE_ATTEMPT_INFEASIBLE = "planners_stage_attempt_infeasible"
     RESPONSE_VALIDATION_FAILED = "response_validation_failed"
-    CANDIDATE_RETRIEVAL_FAILED = "candidate_retrieval_failed"
-    TARGETED_SLOT_REDESIGN_FAILED = "targeted_slot_redesign_failed"
-    TARGETED_REPAIR_DOMAIN_UNREPAIRABLE = "targeted_repair_domain_unrepairable"
-    SOURCE_SEGMENTS_TOO_SHORT = "source_segments_too_short"
     VISUALLY_STATIC = "visually_static"
     REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED = (
         "required_subject_not_visually_confirmed"
     )
-    VISUAL_SLOT_NOT_RELEVANT = "visual_slot_not_relevant"
     DUPLICATE_CANDIDATE_RANGE = "duplicate_candidate_range"
     NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS = (
         "no_candidate_passed_visual_diagnostics"
@@ -32,12 +26,6 @@ class PromptFailureCode(StrEnum):
         "insufficient_visually_grounded_candidates"
     )
     SOURCE_CHRONOLOGY_OR_OVERLAP = "source_chronology_or_overlap"
-    PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH = (
-        "patch_degrades_or_requires_unscored_path"
-    )
-    PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET = (
-        "patch_excluded_by_maximal_feasible_subset"
-    )
     PROVIDER_IMAGE_INSPECTION_FAILED = "provider_image_inspection_failed"
     PROVIDER_DATA_INSPECTION_FAILED = "provider_data_inspection_failed"
     PROVIDER_REQUEST_LIMIT_EXCEEDED = "provider_request_limit_exceeded"
@@ -121,17 +109,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "payload so it fits the provider limit, then submit it again."
         ),
     ),
-    PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE: PromptFailureDefinition(
-        diagnosis=(
-            "ASTER attempt {attempt} became infeasible during {stage}: "
-            "{error_message}"
-        ),
-        repair_requirement=(
-            "Use the attached per-Slot diagnostics to change the failing source "
-            "assignments or candidate choices, while preserving fixed Slots and all "
-            "chronology, duration, visual-grounding, and capacity constraints."
-        ),
-    ),
     PromptFailureCode.RESPONSE_VALIDATION_FAILED: PromptFailureDefinition(
         diagnosis=(
             "The previous model response failed executable validation: "
@@ -142,54 +119,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "to the supplied response contract. Do not repeat the rejected value."
         ),
     ),
-    PromptFailureCode.CANDIDATE_RETRIEVAL_FAILED: PromptFailureDefinition(
-        diagnosis=(
-            "Candidate retrieval for {slot_id} failed before a valid candidate set "
-            "could be accepted: {error_message}"
-        ),
-        repair_requirement=(
-            "Return the required number of valid, fixed-duration candidate timestamps "
-            "inside the supplied source Segments. Candidate alternatives must use "
-            "different source Shots or clearly non-overlapping time windows."
-        ),
-    ),
-    PromptFailureCode.TARGETED_SLOT_REDESIGN_FAILED: PromptFailureDefinition(
-        diagnosis=(
-            "Targeted Slot redesign failed before a valid local repair could be "
-            "applied: {error_message}"
-        ),
-        repair_requirement=(
-            "End this local repair path and let the outer ASTER attempt create a new "
-            "complete arrangement using the accumulated retrieval diagnostics."
-        ),
-    ),
-    PromptFailureCode.TARGETED_REPAIR_DOMAIN_UNREPAIRABLE: PromptFailureDefinition(
-        diagnosis=(
-            "Backend validation proved that the current local repair domain cannot "
-            "satisfy Slots {failed_slot_ids}: {reason}"
-        ),
-        repair_requirement=(
-            "Do not ask the local Arrangement model to guess inside this domain. "
-            "Expand through an immediately adjacent movable blocking Slot; if no such "
-            "Slot exists, end the local repair and let the next complete Arrangement "
-            "use the accumulated evidence."
-        ),
-    ),
-    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The longest available source Segment for {slot_id} is "
-                "{longest_segment_duration_sec} seconds, which is not longer than the "
-                "planned clip duration of {planned_duration_sec} seconds."
-            ),
-            repair_requirement=(
-                "Keep the Slot's visible-event semantics and required_visible_subjects "
-                "unchanged. Assign a different source Segment whose duration is "
-                "longer than {planned_duration_sec} seconds. Only one complete clip "
-                "must fit; overlapping alternative candidate windows are allowed."
-            ),
-        )
-    ),
     PromptFailureCode.VISUALLY_STATIC: PromptFailureDefinition(
         diagnosis=(
             "Candidate {candidate_id} at {timestamp} has kinetic energy "
@@ -197,10 +126,8 @@ PROMPT_FAILURE_CATALOG: dict[
             "threshold {static_threshold}; it is effectively static."
         ),
         repair_requirement=(
-            "Keep the Slot's visible-event semantics and required_visible_subjects "
-            "unchanged. Do not reuse this timestamp; first select a different window, "
-            "and when local Arrangement repair is invoked, move to a different source "
-            "Segment with clearly visible motion above the configured threshold."
+            "Do not reuse this timestamp. Select source evidence with clearly visible "
+            "subject, camera, or environmental motion above the configured threshold."
         ),
     ),
     PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED: (
@@ -211,67 +138,54 @@ PROMPT_FAILURE_CATALOG: dict[
                 "was: {visual_evidence}"
             ),
             repair_requirement=(
-                "Keep required_visible_subjects unchanged; never delete or rename a "
-                "required subject to make validation pass. First select a different "
-                "window, and when local Arrangement repair is invoked, assign a "
-                "different source Segment where every required subject can be "
-                "verified. If no such evidence exists, fail this local repair so the "
-                "outer complete arrangement can reconsider the Slot."
+                "Use the local visual evidence to revise the failed Slot Group's visible "
+                "events, required_visible_subjects, or other editorial fields. You may "
+                "keep the original Segment when it remains among the legal choices, or "
+                "choose another legal Segment. Require only subjects that must appear "
+                "in this one clip and can be visibly verified; preserve the supplied "
+                "Slot structure and legal Anchors."
             ),
         )
     ),
-    PromptFailureCode.VISUAL_SLOT_NOT_RELEVANT: PromptFailureDefinition(
-        diagnosis=(
-            "Candidate {candidate_id} at {timestamp} does not visually realize the "
-            "Slot's intended visible event. Its relevance score is "
-            "{visual_slot_relevance_likert}, below the required threshold "
-            "{visual_slot_relevance_likert_threshold}. The visual evidence was: "
-            "{visual_evidence}"
-        ),
-        repair_requirement=(
-            "Keep required_visible_subjects and the Slot's narrative objective "
-            "unchanged. Choose a different visible event and source Segment whose "
-            "action, situation, and narrative meaning directly realize the Slot "
-            "content. Subject presence alone is not sufficient."
-        ),
-    ),
     PromptFailureCode.DUPLICATE_CANDIDATE_RANGE: PromptFailureDefinition(
         diagnosis=(
-            "Candidate {candidate_id} repeats the same source Shot or substantially "
-            "overlapping time window as prior evidence for {slot_id}: {timestamp}."
+            "Candidate {candidate_id} at {timestamp} reuses overlapping source "
+            "evidence from another trajectory for {slot_id}."
         ),
         repair_requirement=(
-            "Choose a different source Shot, or a clearly non-overlapping window when "
-            "Shot identity is unavailable, while preserving the planned clip duration."
+            "Use a different source Shot or a non-overlapping source window while "
+            "preserving the exact planned clip duration."
         ),
     ),
     PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS: (
         PromptFailureDefinition(
             diagnosis=(
-                "Every retrieved candidate for {slot_id} was rejected by deterministic "
-                "motion checks or visual grounding. Candidate-level diagnostics are "
-                "included in candidate_rejections."
+                "Every complete trajectory for the failed Slot Group was rejected "
+                "because at least one item failed deterministic motion checks, "
+                "source-evidence diversity, or visual grounding. Item diagnostics "
+                "are included in "
+                "candidate_rejections."
             ),
             repair_requirement=(
-                "Apply the candidate_rejections by reason: change source evidence for "
-                "static, duration, duplicate-range, or missing-subject failures; only "
-                "a visual-relevance failure permits rewriting the visible event. Keep "
-                "required_visible_subjects unchanged, especially after a missing-"
-                "subject failure, and move to a different source Segment instead of "
-                "paraphrasing unsupported evidence."
+                "Redesign the whole Slot Group's visible events, required subjects, and "
+                "other editorial fields using the concrete candidate diagnostics. You "
+                "may keep the original Segment when it remains legal, or change the "
+                "shared source_segment_id. Correct the actual unsupported requirements "
+                "rather than treating a zero-candidate batch as a permanent Segment ban."
             ),
         )
     ),
     PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES: (
         PromptFailureDefinition(
             diagnosis=(
-                "Candidate retrieval ended with fewer visually grounded candidates "
-                "than required. The per-Slot deficits are {shortages}."
+                "The single trajectory-retrieval batch left these Slot Groups with "
+                "no valid complete trajectory: {shortages}."
             ),
             repair_requirement=(
-                "Redesign every deficient Slot with different source evidence and at "
-                "least one Segment longer than the planned clip, then retrieve and "
-                "visually validate the missing candidates."
+                "Repair each failed Slot Group as a whole and preserve legal Anchors. "
+                "You may keep the original Segment when it remains legal while revising "
+                "the group's editorial requirements, or choose another legal Segment; "
+                "then retrieve one new complete-trajectory batch for the repaired group."
             ),
         )
     ),
@@ -284,30 +198,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "Keep the original source ranges strictly increasing and non-overlapping. "
             "Replace only patches that preserve this invariant."
         ),
-    ),
-    PromptFailureCode.PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The proposed replacement for {slot_id} lowers the weighted full-path "
-                "score or requires a hard-cut pair that has not been visually scored."
-            ),
-            repair_requirement=(
-                "Keep the current candidate or choose a replacement whose complete "
-                "adjacent hard-cut path is scored and does not reduce the baseline."
-            ),
-        )
-    ),
-    PromptFailureCode.PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The proposed replacement for {slot_id} is individually plausible but "
-                "cannot coexist with the higher-scoring maximal feasible patch subset."
-            ),
-            repair_requirement=(
-                "Keep the accepted subset and omit this replacement unless a jointly "
-                "feasible, non-overlapping, non-degrading alternative is available."
-            ),
-        )
     ),
     PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED: PromptFailureDefinition(
         diagnosis=(

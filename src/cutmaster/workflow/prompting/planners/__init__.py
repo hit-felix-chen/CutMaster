@@ -5,8 +5,8 @@ from cutmaster.workflow.prompting.planners.tasks import (
     CandidateVisualScoringDetails,
     DialogueAnchorSelectionDetails,
     PairwiseScoringDetails,
-    ScriptReviewDetails,
     SlotArrangementDetails,
+    candidate_trajectory_contract,
 )
 
 __all__ = [
@@ -14,6 +14,6 @@ __all__ = [
     "CandidateVisualScoringDetails",
     "DialogueAnchorSelectionDetails",
     "PairwiseScoringDetails",
-    "ScriptReviewDetails",
     "SlotArrangementDetails",
+    "candidate_trajectory_contract",
 ]

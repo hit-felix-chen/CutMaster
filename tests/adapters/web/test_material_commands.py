@@ -297,6 +297,20 @@ def test_material_worker_and_retry_project_real_lifecycle(
         )
     assert ready.json()["condition"] == "ready"
     assert ready.json()["analysis_available"] is True
+    progress = ready.json()["latest_execution"]["job"]["progress"]
+    assert progress["schema_version"] == "2.0"
+    assert progress["state"] == "complete"
+    assert progress["completed"] == progress["total"] == 7
+    assert [node["id"] for node in progress["nodes"]] == [
+        "shot_detection",
+        "dialogue_preparation",
+        "scene_segmentation",
+        "segment_clip_preparation",
+        "shot_annotation",
+        "segment_summarization",
+        "video_summary",
+    ]
+    assert all(node["state"] == "complete" for node in progress["nodes"])
     assert replayed_retry.status_code == 202
     assert (
         replayed_retry.json()["attempt"]["attempt_id"]
@@ -349,6 +363,17 @@ def test_music_import_runs_through_same_real_worker_boundary(
         )
     assert ready.json()["condition"] == "ready"
     assert ready.json()["memory_summary"]["tempo_bpm"] == 100.0
+    progress = ready.json()["latest_execution"]["job"]["progress"]
+    assert progress["completed"] == progress["total"] == 1
+    assert progress["nodes"] == [
+        {
+            "id": "music_analysis",
+            "state": "complete",
+            "completed": 1,
+            "total": 1,
+            "unit": "task",
+        }
+    ]
 
 
 def test_material_stop_before_canonical_publish_is_interrupted_and_not_ready(

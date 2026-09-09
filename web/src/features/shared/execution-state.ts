@@ -67,7 +67,8 @@ export function isJobProgress(value: unknown): value is JobProgress {
     Number.isInteger(record.completed) &&
     record.completed >= 0 &&
     record.completed <= 5 &&
-    record.total === 5 &&
+    (record.total === 4 || record.total === 5) &&
+    record.completed <= record.total &&
     record.unit === 'agent' &&
     Array.isArray(milestones) &&
     milestones.every((milestone) => {

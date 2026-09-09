@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { EventStreamContext } from '@/app/providers/event-stream-context'
 import { MaterialsWorkspace } from '@/features/materials/MaterialsWorkspace'
 import i18n from '@/i18n'
 
@@ -23,14 +24,22 @@ function queryClient() {
   })
 }
 
-function renderWorkspace(path = '/materials/video') {
+function renderWorkspace(path = '/materials/video', eventStreamConnected = false) {
   const router = createMemoryRouter(
     [{ path: '/materials/:type/:materialId?', element: <MaterialsWorkspace /> }],
     { initialEntries: [path] },
   )
   render(
     <QueryClientProvider client={queryClient()}>
-      <RouterProvider router={router} />
+      <EventStreamContext.Provider
+        value={{
+          connectionState: eventStreamConnected ? 'connected' : 'unsupported',
+          isConnected: eventStreamConnected,
+          pollingFallback: !eventStreamConnected,
+        }}
+      >
+        <RouterProvider router={router} />
+      </EventStreamContext.Provider>
     </QueryClientProvider>,
   )
   return router
@@ -409,6 +418,111 @@ describe('Material import and lifecycle actions', () => {
     expect(progress).toHaveAttribute('aria-valuemax', '3')
     expect(screen.getByRole('button', { name: 'Delete material' })).toBeDisabled()
     expect(screen.getByText(/active analysis/)).toBeVisible()
+  })
+
+  it('shows the analyser node flow and per-node progress for schema 2.0', async () => {
+    const nodes = [
+      { id: 'shot_detection', state: 'complete', completed: 12, total: 12 },
+      { id: 'dialogue_preparation', state: 'complete', completed: 1, total: 1 },
+      { id: 'scene_segmentation', state: 'running', completed: 4, total: 10 },
+      { id: 'segment_clip_preparation', state: 'queued', completed: 0, total: 10 },
+      { id: 'shot_annotation', state: 'queued', completed: 0, total: 12 },
+      { id: 'segment_summarization', state: 'queued', completed: 0, total: 10 },
+      { id: 'video_summary', state: 'queued', completed: 0, total: 1 },
+    ].map((node) => ({ ...node, unit: 'item' }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.startsWith('/api/materials?')) {
+          return jsonResponse({ items: [{ ...material, condition: 'analysing' }] })
+        }
+        if (url === '/api/materials/material_1') {
+          const currentAttempt = { ...attempt, status: 'running' }
+          return jsonResponse({
+            ...material,
+            condition: 'analysing',
+            analysis_available: false,
+            references: [],
+            attempts: [currentAttempt],
+            latest_execution: {
+              attempt: currentAttempt,
+              job: {
+                ...job,
+                status: 'running',
+                progress: {
+                  schema_version: '2.0',
+                  phase: 'analyser',
+                  material_type: 'video',
+                  state: 'analysing',
+                  completed: 2,
+                  total: 7,
+                  unit: 'node',
+                  active_node: 'scene_segmentation',
+                  nodes,
+                },
+              },
+            },
+          })
+        }
+        return new Response(null, { status: 404 })
+      }),
+    )
+    renderWorkspace('/materials/video/material_1')
+
+    expect(await screen.findByText('2 / 7 nodes complete')).toBeVisible()
+    expect(screen.getByText('Shot detection')).toBeVisible()
+    expect(screen.getByText('Video summary')).toBeVisible()
+    expect(screen.getByText('Scene segmentation').closest('li')).toHaveAttribute(
+      'aria-current',
+      'step',
+    )
+    const activeProgress = screen.getByRole('progressbar', {
+      name: 'Scene segmentation progress',
+    })
+    expect(activeProgress).toHaveAttribute('aria-valuenow', '4')
+    expect(activeProgress).toHaveAttribute('aria-valuemax', '10')
+    expect(screen.getAllByRole('progressbar')).toHaveLength(7)
+    expect(i18n.t('materials.analysisNodes.names.music_analysis')).toBe(
+      'Music analysis',
+    )
+  })
+
+  it('polls active material detail while the event stream is connected', async () => {
+    let detailRequests = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.startsWith('/api/materials?')) {
+          return jsonResponse({ items: [{ ...material, condition: 'analysing' }] })
+        }
+        if (url === '/api/materials/material_1') {
+          detailRequests += 1
+          const currentAttempt = { ...attempt, status: 'running' }
+          return jsonResponse({
+            ...material,
+            condition: 'analysing',
+            analysis_available: false,
+            references: [],
+            attempts: [currentAttempt],
+            latest_execution: {
+              attempt: currentAttempt,
+              job: { ...job, status: 'running' },
+            },
+          })
+        }
+        return new Response(null, { status: 404 })
+      }),
+    )
+    renderWorkspace('/materials/video/material_1', true)
+
+    expect(await screen.findByText('Analysis attempts')).toBeVisible()
+    const initialRequests = detailRequests
+    expect(initialRequests).toBeGreaterThan(0)
+    await waitFor(() => expect(detailRequests).toBeGreaterThan(initialRequests), {
+      timeout: 2600,
+    })
   })
 
   it('stops an active analysis Attempt and keeps its stopping state live', async () => {

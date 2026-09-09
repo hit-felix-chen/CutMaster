@@ -9,7 +9,6 @@ from cutmaster.application.jobs.commands import (
     AdoptSupervisedJobCommand,
     ClaimJobCommand,
     ClaimSupervisedJobCommand,
-    DismissActivityAttemptsCommand,
     EnqueueMaterialAnalysisCommand,
     FailAttemptCommand,
     HeartbeatJobCommand,
@@ -213,24 +212,6 @@ class JobsService:
         )
 
     @root_shared_operation
-    def dismiss_activity_attempts(
-        self,
-        command: DismissActivityAttemptsCommand,
-    ) -> tuple[AttemptId, ...]:
-        if not command.attempt_ids:
-            raise ValueError("attempt_ids must not be empty")
-        for attempt_id in command.attempt_ids:
-            _require_attempt_id(attempt_id)
-        value = self._store.dismiss_activity_attempts(
-            command.command_id,
-            command.attempt_ids,
-        ).value
-        identifiers = value.get("attempt_ids")
-        if not isinstance(identifiers, list):
-            raise TypeError("Invalid dismissed Activity result")
-        return tuple(AttemptId.parse(str(item)) for item in identifiers)
-
-    @root_shared_operation
     def mark_retrying(self, attempt_id: AttemptId) -> JobSubmissionView:
         _require_attempt_id(attempt_id)
         return _submission(self._store.mark_attempt_retrying(attempt_id))
@@ -335,7 +316,6 @@ class JobsService:
         owner_type: str | None = None,
         owner_id: str | None = None,
         statuses: tuple[AttemptStatus, ...] = (),
-        include_dismissed: bool = True,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[AttemptView, ...]:
@@ -345,7 +325,6 @@ class JobsService:
                 owner_type=owner_type,
                 owner_id=owner_id,
                 statuses=statuses,
-                include_dismissed=include_dismissed,
                 limit=limit,
                 offset=offset,
             )

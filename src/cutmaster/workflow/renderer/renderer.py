@@ -29,6 +29,11 @@ from cutmaster.infrastructure.observability.progress import progress_bar
 from cutmaster.workflow.shared.timecode import parse_range
 
 
+# Match the Compiler's millisecond/frame-grid tolerance without importing a
+# Planners implementation into the deterministic Renderer.
+_FROZEN_WINDOW_QUANTIZATION_TOLERANCE_SEC = 0.001001
+
+
 def _video_filter(config: RendererConfig) -> str:
     return (
         f"scale={config.width}:{config.height}:force_original_aspect_ratio=decrease,"
@@ -56,6 +61,28 @@ def _align_source_window_to_video_end(
     return math.floor((video_duration - clip_duration) * 1000.0) / 1000.0
 
 
+def _frozen_window_needs_tail_padding(
+    start: float,
+    source_end: float,
+    frame_count: int,
+    fps: int,
+    video_duration: float,
+) -> bool:
+    """Allow only millisecond quantization at EOF, never move a frozen window."""
+
+    render_end = start + frame_count / fps
+    overflow = max(source_end, render_end) - video_duration
+    if overflow > _FROZEN_WINDOW_QUANTIZATION_TOLERANCE_SEC:
+        raise RenderError(
+            "Frozen source window exceeds source video duration: "
+            f"source_end={source_end:.6f}s, render_end={render_end:.6f}s, "
+            f"video_duration={video_duration:.6f}s"
+        )
+    # Even exact EOF can lose output frames when a millisecond seek falls
+    # between source frames (for example 23.976/29.97 fps converted to 30 fps).
+    return overflow >= -_FROZEN_WINDOW_QUANTIZATION_TOLERANCE_SEC
+
+
 def render_clip(
     source: Path,
     output: Path,
@@ -63,6 +90,8 @@ def render_clip(
     frame_count: int,
     config: RendererConfig,
     encoder: str,
+    *,
+    pad_last_frame: bool = False,
 ) -> None:
     if frame_count <= 0:
         raise RenderError("Rendered clip must contain at least one frame")
@@ -72,9 +101,13 @@ def render_clip(
         "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source),
     ]
     command.extend(["-map", "0:v:0", "-an"])
+    # A frozen millisecond seek can omit the final source frame at EOF. Clone
+    # at most one source frame before fps conversion, then keep the frame cap.
+    tail_padding = "tpad=stop_mode=clone:stop=1," if pad_last_frame else ""
     command.extend([
         "-vf",
-        f"{_video_filter(config)},trim=end_frame={frame_count},setpts=N/({config.fps}*TB)",
+        f"{tail_padding}{_video_filter(config)},"
+        f"trim=end_frame={frame_count},setpts=N/({config.fps}*TB)",
         "-frames:v",
         str(frame_count),
     ])
@@ -227,6 +260,7 @@ def render_montage(
     *,
     include_dialogue_audio: bool = True,
     output_filename: str = "output.mp4",
+    preserve_source_windows: bool = False,
 ) -> tuple[Path, Path]:
     check_media_tools()
     if config.original_volume > 0:
@@ -257,19 +291,35 @@ def render_montage(
         unit="clip",
     ) as progress:
         for index, item in progress:
-            start, _ = parse_range(str(item["timestamp"]))
+            start, source_end = parse_range(str(item["timestamp"]))
             output_frames = item.get("output_frame_range")
             if not isinstance(output_frames, list) or len(output_frames) != 2:
                 raise RenderError(f"Clip {index} is missing output_frame_range")
             output_start_frame, output_end_frame = map(int, output_frames)
             frame_count = output_end_frame - output_start_frame
             original_start = start
-            start = _align_source_window_to_video_end(
-                start,
-                frame_count,
-                config.fps,
-                video_duration,
+            frozen_window = (
+                preserve_source_windows
+                or item.get("dialogue_anchor") is not None
+                or item.get("group_id") is not None
+                or item.get("trajectory_id") is not None
             )
+            pad_last_frame = False
+            if frozen_window:
+                pad_last_frame = _frozen_window_needs_tail_padding(
+                    start,
+                    source_end,
+                    frame_count,
+                    config.fps,
+                    video_duration,
+                )
+            else:
+                start = _align_source_window_to_video_end(
+                    start,
+                    frame_count,
+                    config.fps,
+                    video_duration,
+                )
             if start != original_start:
                 log_event(
                     "INFO",
@@ -295,6 +345,7 @@ def render_montage(
                 source_end_sec=end,
                 frames=frame_count,
             )
+            render_options = {"pad_last_frame": True} if pad_last_frame else {}
             try:
                 render_clip(
                     video_path,
@@ -303,6 +354,7 @@ def render_montage(
                     frame_count,
                     config,
                     encoder,
+                    **render_options,
                 )
             except RenderError:
                 if config.encoder != "auto" or encoder == "libx264":
@@ -324,6 +376,7 @@ def render_montage(
                     frame_count,
                     config,
                     encoder,
+                    **render_options,
                 )
             clip_paths.append(clip_path)
 
@@ -350,7 +403,7 @@ def render_montage(
 
 def _montage_signature(plan: RenderPlan, config: RendererConfig) -> dict[str, Any]:
     return {
-        "render_schema_version": 2,
+        "render_schema_version": 3,
         "plan_id": plan.plan_id,
         "width": config.width,
         "height": config.height,
@@ -448,6 +501,7 @@ class Renderer:
                 self.config.dialogue_audio,
                 include_dialogue_audio=request.options.audio_mode == "dialogue",
                 output_filename=request.output_target.output_filename,
+                preserve_source_windows=True,
             )
         actual_frames = media_frame_count(output_path)
         if actual_frames != plan.total_frames:

@@ -3017,7 +3017,6 @@ class SQLiteApplicationStore:
         owner_type: str | None = None,
         owner_id: str | None = None,
         statuses: Sequence[AttemptStatus] = (),
-        include_dismissed: bool = True,
         limit: int = 100,
         offset: int = 0,
     ) -> list[JsonObject]:
@@ -3045,13 +3044,6 @@ class SQLiteApplicationStore:
             placeholders = ",".join("?" for _ in statuses)
             conditions.append(f"status IN ({placeholders})")
             parameters.extend(status.value for status in statuses)
-        if not isinstance(include_dismissed, bool):
-            raise TypeError("include_dismissed must be a boolean")
-        if not include_dismissed:
-            conditions.append(
-                "NOT EXISTS (SELECT 1 FROM activity_dismissals "
-                "WHERE activity_dismissals.attempt_id = attempts.attempt_id)"
-            )
         where = "" if not conditions else "WHERE " + " AND ".join(conditions)
         parameters.extend((limit, offset))
         with self._read() as connection:
@@ -3063,53 +3055,6 @@ class SQLiteApplicationStore:
                 parameters,
             ).fetchall()
             return [self._attempt_record(connection, row[0]) for row in rows]
-
-    def dismiss_activity_attempts(
-        self,
-        command_id: str,
-        attempt_ids: Sequence[AttemptId],
-    ) -> IdempotentResult:
-        identifiers = tuple(str(value) for value in attempt_ids)
-        if not identifiers:
-            raise ValueError("attempt_ids must not be empty")
-        if len(identifiers) > 500:
-            raise ValueError("attempt_ids must contain at most 500 entries")
-        if len(set(identifiers)) != len(identifiers):
-            raise ValueError("attempt_ids must not contain duplicates")
-        request = {"attempt_ids": list(identifiers)}
-
-        def action(connection: sqlite3.Connection, now: str) -> JsonObject:
-            placeholders = ",".join("?" for _ in identifiers)
-            rows = connection.execute(
-                f"SELECT attempt_id, status FROM attempts "
-                f"WHERE attempt_id IN ({placeholders})",
-                identifiers,
-            ).fetchall()
-            by_id = {str(row["attempt_id"]): str(row["status"]) for row in rows}
-            for attempt_id in identifiers:
-                if attempt_id not in by_id:
-                    raise ManagedStateNotFound("attempt", attempt_id)
-                if AttemptStatus(by_id[attempt_id]) not in TERMINAL_ATTEMPT_STATUSES:
-                    raise ManagedStateConflict(
-                        "activity_attempt_not_terminal",
-                        f"Activity Attempt {attempt_id!r} is not terminal",
-                    )
-            connection.executemany(
-                """
-                INSERT INTO activity_dismissals (attempt_id, dismissed_at)
-                VALUES (?, ?)
-                ON CONFLICT(attempt_id) DO NOTHING
-                """,
-                ((attempt_id, now) for attempt_id in identifiers),
-            )
-            return {"attempt_ids": list(identifiers), "dismissed": len(identifiers)}
-
-        return self._idempotent(
-            command_id,
-            "activity.dismiss_attempts",
-            request,
-            action,
-        )
 
     def event_bounds(self) -> tuple[int | None, int | None]:
         """Return the currently replayable inclusive durable Event bounds."""

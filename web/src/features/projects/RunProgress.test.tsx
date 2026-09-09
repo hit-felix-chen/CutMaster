@@ -224,7 +224,9 @@ describe('live ASTER execution progress', () => {
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getAllByText('Running')[0]).toBeVisible()
     expect(screen.getByText('Elapsed time · 01:30')).toBeVisible()
-    expect(screen.getByText('Timeline Scout is retrieving candidates')).toBeVisible()
+    expect(
+      screen.getByText('Timeline Scout is retrieving group trajectories'),
+    ).toBeVisible()
 
     await act(async () => vi.advanceTimersByTimeAsync(2000))
     await flushPromises()
@@ -236,7 +238,7 @@ describe('live ASTER execution progress', () => {
     expect(runRequests).toBe(2)
   })
 
-  it('renders planners as Running with the real A/S/T/E/R milestone and heartbeat', async () => {
+  it('renders planners with only A/S/T/E milestones and heartbeat, without R', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -258,14 +260,15 @@ describe('live ASTER execution progress', () => {
     )
 
     expect(
-      await screen.findByText('Timeline Scout is retrieving candidates'),
+      await screen.findByText('Timeline Scout is retrieving group trajectories'),
     ).toBeVisible()
     expect(screen.getAllByText('Running')[0]).toBeVisible()
     expect(screen.getByText('Arrangement Architect')).toBeVisible()
     expect(screen.getByText('Story Editor')).toBeVisible()
     expect(screen.getByText('Timeline Scout')).toBeVisible()
     expect(screen.getByText('Edit Composer')).toBeVisible()
-    expect(screen.getByText('Revision Editor')).toBeVisible()
+    expect(screen.queryByText('Revision Editor')).not.toBeInTheDocument()
+    expect(screen.queryByText(/R · Renderer/)).not.toBeInTheDocument()
     expect(screen.getByText(/Heartbeat/)).toBeVisible()
   })
 
@@ -275,7 +278,7 @@ describe('live ASTER execution progress', () => {
     expect(screen.getByText('ASTER planning is complete')).toBeVisible()
     expect(
       screen.getByText(
-        'All five ASTER agents have finished and the initial Frozen Edit is ready.',
+        'A/S/T/E planning is complete and the initial Frozen Edit is ready.',
       ),
     ).toBeVisible()
     expect(
@@ -417,7 +420,9 @@ describe('live ASTER execution progress', () => {
     })
     await act(async () => vi.advanceTimersByTimeAsync(1))
     expect(screen.getByRole('heading', { name: 'Running' })).toBeVisible()
-    expect(screen.getByText('Timeline Scout is retrieving candidates')).toBeVisible()
+    expect(
+      screen.getByText('Timeline Scout is retrieving group trajectories'),
+    ).toBeVisible()
 
     await act(async () => vi.advanceTimersByTimeAsync(2000))
     await flushPromises()

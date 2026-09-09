@@ -5,6 +5,21 @@ import pytest
 from cutmaster.configuration.loader import load_config, load_renderer_config
 
 
+@pytest.mark.parametrize("enabled, mode", [(True, "beam"), (False, "first")])
+def test_ablation_switches(tmp_path, enabled, mode):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[llm]\nmodel = "test"\napi_key = "secret"\n'
+        '[vlm]\nmodel = "test"\napi_key = "secret"\n'
+        '[analyser.asr]\napi_key = "secret"\n'
+        f'[planners.dialogue_anchors]\nenabled = {str(enabled).lower()}\n'
+        f'[planners.beam_search]\nselection_mode = "{mode}"\n'
+    )
+    config = load_config(path)
+    assert config.planners.dialogue_anchors.enabled is enabled
+    assert config.planners.beam_search.selection_mode == mode
+
+
 def test_workflow_ordered_config_maps_each_stage(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CUTMASTER_TEST_KEY", "secret")
     path = tmp_path / "config.toml"
@@ -48,13 +63,18 @@ shot_sample_frames = 5
 max_images_per_request = 200
 max_shots_per_request = 16
 
+[planners.aster_team]
+max_rounds = 3
+max_local_replans = 2
+
 [planners.arrangement_architect]
 target_clip_duration_sec = 4.5
-replan_max_rounds = 2
+max_model_requests = 3
 
 [planners.dialogue_anchors]
 max_anchors = 3
 min_anchor_duration_sec = 2.0
+max_model_requests = 3
 
 [renderer.dialogue_audio]
 enable_vocal_separation = false
@@ -66,8 +86,7 @@ separator_padding_sec = 0.75
 separated_loudness_lufs = -18.0
 
 [planners.candidate_retrieval]
-candidates_per_slot = 3
-retrieval_max_rounds = 2
+target_trajectories_per_group = 3
 visual_sample_frames = 4
 protagonist_visibility_likert_threshold = 4
 motion_sample_fps = 3.0
@@ -77,8 +96,6 @@ static_kinetic_energy_threshold = 0.07
 [planners.beam_search]
 beam_width = 6
 
-[planners.script_review]
-review_rounds = 1
 
 [planners.source_window_optimization]
 search_margin_sec = 1.5
@@ -117,8 +134,13 @@ threads = 2
     assert config.analyser.shot_annotation.shot_sample_frames == 5
     assert config.analyser.shot_annotation.max_images_per_request == 200
     assert config.analyser.shot_annotation.max_shots_per_request == 16
+    assert config.planners.aster_team.max_rounds == 3
+    assert config.planners.aster_team.max_local_replans == 2
     assert config.planners.arrangement_architect.target_clip_duration_sec == 4.5
-    assert config.planners.arrangement_architect.replan_max_rounds == 2
+    assert config.planners.arrangement_architect.max_model_requests == 3
+    assert (
+        config.planners.candidate_retrieval.target_trajectories_per_group == 3
+    )
     assert (
         config.planners.candidate_retrieval.protagonist_visibility_likert_threshold
         == 4
@@ -129,13 +151,13 @@ threads = 2
     )
     assert config.planners.dialogue_anchors.max_anchors == 3
     assert config.planners.dialogue_anchors.min_anchor_duration_sec == 2.0
+    assert config.planners.dialogue_anchors.max_model_requests == 3
     assert config.renderer.dialogue_audio.enable_vocal_separation is False
     assert config.renderer.dialogue_audio.separator_device == "cpu"
     assert config.renderer.dialogue_audio.separator_segment_sec == 6
     assert config.renderer.dialogue_audio.separator_padding_sec == 0.75
     assert config.renderer.dialogue_audio.separated_loudness_lufs == -18.0
     assert config.planners.beam_search.beam_width == 6
-    assert config.planners.script_review.review_rounds == 1
     assert config.planners.source_window_optimization.max_workers == 3
     assert config.renderer.fps == 24
 
@@ -284,6 +306,68 @@ protagonist_visibility_likert_threshold = 3.5
     )
 
     with pytest.raises(ValueError, match="must be an integer from 1 to 5"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "legacy_key",
+    ["candidates_per_slot", "retrieval_max_rounds", "max_rounds"],
+)
+def test_legacy_candidate_retrieval_keys_are_rejected(
+    tmp_path,
+    legacy_key: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"""
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.asr]
+api_key = "secret"
+
+[planners.candidate_retrieval]
+{legacy_key} = 3
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=rf"Unknown keys.*{legacy_key}"):
+        load_config(path)
+
+
+def test_per_round_local_replan_budget_key_is_rejected(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+model = "test"
+api_key = "secret"
+
+[vlm]
+model = "test"
+api_key = "secret"
+
+[analyser.asr]
+api_key = "secret"
+
+[planners.aster_team]
+max_local_replans_per_round = 2
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown keys.*max_local_replans_per_round",
+    ):
         load_config(path)
 
 

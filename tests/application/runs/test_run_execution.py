@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,9 +17,12 @@ from cutmaster.application.materials import MaterialsService
 from cutmaster.application.ports.material_catalog import MaterialBinding
 from cutmaster.application.runs import (
     ExecuteRunPlanningCommand,
+    RunPlanningArtifacts,
     RunPlanningExecutor,
     RunView,
 )
+from cutmaster.application.runs.review import load_review_bundle
+from cutmaster.application.workflow.run_job import _publish_review_bundle
 from cutmaster.configuration.effective import EffectiveConfiguration
 from cutmaster.domain.ids import MaterialId, ProjectId, RunId
 from cutmaster.domain.materials import (
@@ -180,6 +184,8 @@ def _planner_result(request, workspace: Path) -> PlannersResult:
         for name in (
             "music_profile",
             "edit_plan",
+            "planning_segments",
+            "planning_groups",
             "dialogue_anchors",
             "candidate_pool",
             "raw_script",
@@ -196,6 +202,8 @@ def _planner_result(request, workspace: Path) -> PlannersResult:
         render_plan_path=render_plan,
         music_profile_path=paths["music_profile"],
         edit_plan_path=paths["edit_plan"],
+        planning_segments_path=paths["planning_segments"],
+        planning_groups_path=paths["planning_groups"],
         dialogue_anchors_path=paths["dialogue_anchors"],
         candidate_pool_path=paths["candidate_pool"],
         raw_script_path=paths["raw_script"],
@@ -286,6 +294,10 @@ def test_executor_uses_run_snapshot_ids_options_and_runtime_capabilities(
     assert catalog.active == set()
     assert token.polls == 3
     assert result.render_plan == (workspace / "render_plan.json").resolve()
+    assert result.planning_segments == (
+        workspace / "planning_segments.json"
+    ).resolve()
+    assert result.planning_groups == (workspace / "planning_groups.json").resolve()
     assert result.model_usage_summary == {"total_tokens": 123}
     with pytest.raises(TypeError):
         result.model_usage_summary["total_tokens"] = 456
@@ -295,6 +307,93 @@ def test_executor_uses_run_snapshot_ids_options_and_runtime_capabilities(
     assert str(music.material.material_id) in serialized_plan
     assert str(video.source_path) not in serialized_plan
     assert str(music.source_path) not in serialized_plan
+
+
+def test_review_bundle_keeps_planning_partitions_after_workspace_cleanup(
+    managed_configuration: EffectiveConfiguration,
+    tmp_path: Path,
+) -> None:
+    video = _binding(tmp_path, MaterialType.VIDEO, "Managed Video")
+    music = _binding(tmp_path, MaterialType.MUSIC, "Managed Music")
+    run = _run(
+        managed_configuration,
+        video.material.material_id,
+        music.material.material_id,
+    )
+    workspace = (tmp_path / "temporary-planning").resolve()
+    workspace.mkdir()
+    request = type(
+        "Request",
+        (),
+        {
+            "video": type(
+                "Video",
+                (),
+                {
+                    "material": type(
+                        "VideoMaterial",
+                        (),
+                        {
+                            "material_id": video.material.material_id,
+                            "expected_fingerprint": video.material.fingerprint,
+                        },
+                    )()
+                },
+            )(),
+            "music": type(
+                "Music",
+                (),
+                {
+                    "material": type(
+                        "MusicMaterial",
+                        (),
+                        {
+                            "material_id": music.material.material_id,
+                            "expected_fingerprint": music.material.fingerprint,
+                        },
+                    )()
+                },
+            )(),
+            "brief": run.creative_brief,
+        },
+    )()
+    result = _planner_result(request, workspace)
+    planning_segments = [
+        {
+            "planning_segment_id": "segment_0001_01",
+            "source_segment_id": "segment_0001",
+            "start_ms": 0,
+            "end_ms": 1000,
+        }
+    ]
+    planning_groups = [
+        {
+            "group_id": "group_001",
+            "parent_group_id": "group_001",
+            "source_segment_id": "segment_0001",
+            "planning_segment_id": "segment_0001_01",
+            "slot_ids": ["slot_01"],
+        }
+    ]
+    result.planning_segments_path.write_text(
+        json.dumps(planning_segments), encoding="utf-8"
+    )
+    result.planning_groups_path.write_text(
+        json.dumps(planning_groups), encoding="utf-8"
+    )
+    result.edit_plan_path.write_text("[]", encoding="utf-8")
+    artifacts = RunPlanningArtifacts.from_result(result, workspace)
+    published = tmp_path / "published"
+    published.mkdir()
+    plan_path = published / "plan.json"
+    shutil.copy2(result.render_plan_path, plan_path)
+
+    _publish_review_bundle(artifacts, published)
+    shutil.rmtree(workspace)
+    bundle = load_review_bundle(plan_path)
+
+    assert bundle["planning_segments"] == planning_segments
+    assert bundle["planning_groups"] == planning_groups
 
 
 def test_executor_reads_only_canonical_material_memory_results(
