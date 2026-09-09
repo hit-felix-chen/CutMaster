@@ -4,7 +4,7 @@
 
 **CutMaster: Let the MASTER team edit.**
 
-CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它将素材理解、节奏设计、故事锚定、候选检索、序列组接和成片复核拆分给六个职责明确的角色，在同一条剪辑链路中平衡：
+CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。MASTER 团队由五个分析与规划智能体（M/A/S/T/E）和确定性渲染器（R）组成，分别负责素材理解、节奏设计、故事锚定、候选检索、序列组接和最终渲染，在同一条剪辑链路中平衡：
 
 - **叙事导向**：关键原声锚定情节、人物和提示词意图；
 - **情绪导向**：Slot 结构跟随音乐段落、节拍和能量曲线；
@@ -13,7 +13,9 @@ CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它�
 > CutMaster employs a MASTER team of specialized agents that progressively transforms long-form footage into a narrative-aligned, emotionally paced, and visually coherent montage.
 
 <p align="center">
-  <img src="assets/framework.png" alt="CutMaster MASTER 多智能体剪辑架构示意图" width="100%">
+  <a href="assets/framework.png">
+    <img src="assets/framework.png" alt="CutMaster MASTER 架构：素材记忆、A/S/T/E 规划闭环与 R 渲染" width="100%">
+  </a>
 </p>
 
 <p align="center"><em>CutMaster 从长视频素材与用户意图出发，由 MASTER 团队协同完成素材理解、剪辑决策、序列优化与最终渲染。</em></p>
@@ -22,7 +24,7 @@ CutMaster 是一个面向长视频素材的多智能体自动剪辑框架。它�
 
 CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 
-| 字母        | 智能体                          | 代码入口                                       | 剪辑职责                                                                     |
+| 字母        | 角色                            | 代码入口                                       | 剪辑职责                                                                     |
 | ----------- | ------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------- |
 | **M** | **Material Analyst**      | `workflow/analyser/material_analyst.py`      | 建立视频的 Shot、Segment、台词与故事摘要，以及完整音乐的可复用素材记忆       |
 | **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | 编排 Slot，并把相邻 Slot 分组后绑定到同一个 Segment                           |
@@ -84,7 +86,7 @@ flowchart LR
 
     T -. "任一轮后整组 0 轨迹 / 定向修复" .-> A
     E -. "无可行时序路径 / 重新规划" .-> A
-    A -. "Slot Group 变化后刷新锚点" .-> S
+    A -. "保留合法锚点 / 重建分区" .-> S
 ```
 
 完整调用关系：
@@ -100,7 +102,7 @@ Worker Adapter --------> ManagedJobExecutor
                                        ├── ManagedMaterialAnalysisExecutor
                                        │   └── Analyser → MaterialAnalystAgent
                                        ├── RunPlanningExecutor
-                                       │   └── Planners → ASTERTeam → A/S/T/E/R
+                                       │   └── Planners → ASTERTeam → A/S/T/E
                                        └── ManagedRenderExecutor → Renderer
 ```
 
@@ -110,7 +112,7 @@ Worker 负责一个 durable Job 的进程入口，Benchmark Adapter 负责评测
 
 ### 智能体与工具的边界
 
-- **Agent 负责决策**：理解素材、规划结构、选择故事锚点、构造候选空间、组接序列和复核脚本。
+- **Agent 负责决策**：理解素材、规划结构、选择故事锚点、构造候选空间和组接序列；没有额外的自动脚本复核阶段。
 - **Tool 负责能力**：ASR、完整音乐分析、媒体读取、Music Profile 投影、运动计算、视觉评分和 ASTER 协作反馈分别位于 `workflow/analyser/tools/` 与 `workflow/planners/tools/`；素材生命周期属于 `app.materials`。
 - **Planners 交付精确计划**：源窗口优化、Beat 微调和输出帧分配都属于剪辑决策，最终固化为不可变的 `RenderPlan`。
 - **Renderer 负责执行**：只按照 `RenderPlan` 准备人声、执行 FFmpeg 渲染和混音，不访问 LLM/VLM，也不修改规划。
@@ -167,8 +169,9 @@ Timeline Scout 以 Slot Group 为最小单位检索。一次候选轨迹必须�
 每组只发起一次批量检索，默认请求 3 条完整轨迹并逐条校验；允许少于 3 条或空数组，
 不会为凑数重试，任意一条通过即可进入下一阶段。模型、媒体或 VLM 执行异常直接上抛，
 缺帧不会被视为静态。正常返回空数组，或整批候选都被语义或视觉规则拒绝时，
-才把该组的具体拒绝证据立即交给 Arrangement Architect；
-该 Group 与 Segment 的失败绑定会被后端禁止重用。若整批所有候选的所有片段都为静态，
+才把该组的具体拒绝证据、合法可选 Segment 与相邻约束交给 Arrangement Architect。
+它可以修改内容、人物要求和 Segment 绑定，也可以保留仍合法的原 Segment；语义失败
+不会永久禁止该绑定。若整批所有候选的所有片段都为静态，
 该 Segment 会被标记为素材不可用。局部修复保留仍合法的旧 Anchor，确定性重建 Story
 分区，并只重新检索合同发生变化的完整组；其他组按精确合同复用候选。检索不会把单个
 Slot 扩展到相邻 Segment。
@@ -204,10 +207,14 @@ Edit Composer 的选择直接编译为精确到帧的 `RenderPlan`，由 R · Re
 
 <p align="center"><em>从提示词和 Material Memory 出发，ASTER 团队将《教父》的权力交接叙事编排、锚定、检索、组接并渲染为一条 60 秒时间线。点击图片可查看完整尺寸。</em></p>
 
+图中以单个 Slot 展开候选和相邻片段评分；实际检索与搜索以完整 Slot Group 轨迹为单位。
+“Retrieve Again” 表达失败反馈与修复的概念，不代表当前实现会为每个被拒绝的候选补检：
+同批有一条完整轨迹通过即可继续，只有整组零有效轨迹才触发局部重规划与后续检索。
+
 - **Arrangement Architect** 将音乐结构映射为“权威建立—刺杀危机—迈克尔反击—失去与继承—权力巩固”五幕，把相邻 Slot 分组并为每组固定 Segment、主体和时长约束。
 - **Story Editor** 用具有叙事转折价值的原声台词固定关键情节，并用锚点画面把同组普通 Slot 切分到前后的子 Segment；长台词仍可通过 L-cut 跨越相邻画面 Slot。
-- **Timeline Scout** 为每个普通 Slot Group 验证多条完整轨迹；当任一片段的人物身份、视觉相关性或主体可见性不合格时，拒绝整条轨迹并重新检索。
-- **Edit Composer** 联合片段得分、轨迹内部和组间镜头兼容度，在候选图上搜索可延伸到结尾的全局最优时序路径。
+- **Timeline Scout** 为每个普通 Slot Group 验证多条完整轨迹；任一片段未通过核验即拒绝其所属轨迹，保留其他通过的轨迹。整组无候选时，将失败证据交回局部重规划。
+- **Edit Composer** 联合片段得分、轨迹内部和组间镜头兼容度，通过 Beam Search 选择可延伸到结尾的高分时序路径，不保证数学意义上的全局最优。
 - **Renderer** 按冻结方案执行视频和音频渲染，不改变候选选择。
 
 ## 快速开始
@@ -282,7 +289,7 @@ Analyser；失败或中断后可 Retry/Resume，活动工作可 Stop，删除受
 
 项目内部使用 **Project Setup / Runs / Outputs** 三个标签。保存素材、剪辑
 意图与目标时长后，**Start editing** 创建不可变 ASTER Run，并由本地子进程
-执行真实 Planners。失败 Run 可 Retry；中断 Run 仅从已校验的完整 A/S/T/E/R
+执行真实 Planners。失败 Run 可 Retry；中断 Run 仅从已校验的完整 A/S/T/E
 代理边界（包括待重新规划边界）Resume；成功 Run 可 Run again，历史 Run 可在
 安全时永久删除。Run 详情和 Activity 展示统一的持久化进度与模型用量。
 

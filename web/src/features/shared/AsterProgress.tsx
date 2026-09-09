@@ -98,7 +98,7 @@ export function AsterProgress({
         ) : null}
       </header>
       <ol className="aster-progress__milestones">
-        {agents.map(([letter, agent]) => {
+        {agents.map(([letter, agent], index) => {
           const state = runComplete
             ? 'complete'
             : (milestoneStates.get(agent) ?? 'queued')
@@ -110,7 +110,7 @@ export function AsterProgress({
                 <strong>{t(`progress.agents.${key}.name`)}</strong>
                 {!compact ? <small>{t(`activity.${state}`)}</small> : null}
               </span>
-              <MilestoneIcon state={state} />
+              {index < agents.length - 1 ? <MilestoneIcon state={state} /> : null}
             </li>
           )
         })}

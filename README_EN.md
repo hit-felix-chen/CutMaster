@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 **CutMaster: Let the MASTER team edit.**
 
-CutMaster is a multi-agent automatic editing framework for long-form video. It assigns material understanding, rhythmic arrangement, story anchoring, candidate retrieval, sequence composition, and final review to six specialized roles, balancing three editorial objectives in one workflow:
+CutMaster is a multi-agent automatic editing framework for long-form video. Its MASTER team consists of five analysis and planning agents (M/A/S/T/E) and a deterministic Renderer (R), covering material understanding, rhythmic arrangement, story anchoring, candidate retrieval, sequence composition, and final rendering. It balances three editorial objectives in one workflow:
 
 - **Narrative alignment**: key source dialogue anchors the story, characters, and prompt intent.
 - **Emotional pacing**: the Slot structure follows musical sections, beats, accents, and energy.
@@ -13,7 +13,9 @@ CutMaster is a multi-agent automatic editing framework for long-form video. It a
 > CutMaster employs a MASTER team of specialized agents that progressively transforms long-form footage into a narrative-aligned, emotionally paced, and visually coherent montage.
 
 <p align="center">
-  <img src="assets/framework.png" alt="CutMaster MASTER multi-agent editing architecture" width="100%">
+  <a href="assets/framework.png">
+    <img src="assets/framework.png" alt="CutMaster MASTER architecture: Material Memory, A/S/T/E planning loop, and R rendering" width="100%">
+  </a>
 </p>
 
 <p align="center"><em>Starting from long-form footage and user intent, the MASTER team collaborates on material understanding, editorial decisions, sequence optimization, and final rendering.</em></p>
@@ -22,7 +24,7 @@ CutMaster is a multi-agent automatic editing framework for long-form video. It a
 
 The complete CutMaster workflow is organized as a **MASTER** team:
 
-| Letter | Agent | Code entry | Editorial responsibility |
+| Letter | Role | Code entry | Editorial responsibility |
 |---|---|---|---|
 | **M** | **Material Analyst** | `workflow/analyser/material_analyst.py` | Builds reusable memory for video Shots, Segments, dialogue, and story summaries, as well as complete music tracks |
 | **A** | **Arrangement Architect** | `workflow/planners/arrangement_architect.py` | Projects Music Memory onto the target duration and arranges Slot duration, rhythm, emotional pacing, and narrative structure |
@@ -93,7 +95,7 @@ flowchart LR
 
     T -. "zero valid group trajectory / targeted repair" .-> A
     E -. "no feasible chronological path / replan" .-> A
-    A -. "refresh anchors after Slot changes" .-> S
+    A -. "retain legal anchors / rebuild partitions" .-> S
 ```
 
 The executable call structure is:
@@ -109,7 +111,7 @@ Worker Adapter --------> ManagedJobExecutor
                                        ├── ManagedMaterialAnalysisExecutor
                                        │   └── Analyser → MaterialAnalystAgent
                                        ├── RunPlanningExecutor
-                                       │   └── Planners → ASTERTeam → A/S/T/E/R
+                                       │   └── Planners → ASTERTeam → A/S/T/E
                                        └── ManagedRenderExecutor → Renderer
 ```
 
@@ -121,7 +123,7 @@ tools, repositories, or output directories.
 
 ### Agent–tool boundary
 
-- **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, compose the sequence, and review the script.
+- **Agents make editorial decisions**: they understand material, plan structure, select story anchors, construct the candidate space, and compose the sequence. There is no additional automatic script-review stage.
 - **Tools provide capabilities**: ASR, complete-track music analysis, media access, Music Profile projection, motion computation, visual scoring, and ASTER coordination feedback live under `workflow/analyser/tools/` and `workflow/planners/tools/`; Material lifecycle belongs to `app.materials`.
 - **The Planners stage finalizes the edit**: source-window optimization, beat adjustment, and output-frame allocation are frozen in an immutable `RenderPlan`.
 - **Renderer executes the plan**: it prepares dialogue audio, renders, and mixes without accessing LLM/VLM services or mutating ASTER artifacts.
@@ -167,8 +169,7 @@ When an Anchor falls inside a multi-Slot group, its Slot leaves ordinary
 retrieval. Ordinary Slots before and after it become separate child groups bound
 to Planning Segments cut by the fixed Anchor picture, such as
 `segment_0010_01` and `segment_0010_02`. Every child group must fit inside its
-Planning Segment; an impossible split rejects the Anchor response and retries
-Story planning.
+Planning Segment.
 Story Editor selects consecutive dialogue endpoints. The backend validates the
 complete picture window and partition capacity, keeps the largest legal subset
 when returned Anchors conflict, and permits no Anchor when none is strong and legal.
@@ -177,8 +178,8 @@ Ordinary clips keep their source audio muted. Only selected Dialogue Anchors are
 
 ### 4. Candidate space with closed-loop repair
 
-Timeline Scout retrieves one complete trajectory for a Slot Group at a time.
-That trajectory contains one ordered, non-overlapping source window for every
+Timeline Scout retrieves a batch of complete trajectories for each Slot Group.
+Each trajectory contains one ordered, non-overlapping source window for every
 member Slot, all inside the assigned Segment or Planning Segment. If any item
 fails duration, motion, or VLM validation, the complete trajectory is rejected;
 items from different trajectories are never mixed.
@@ -189,8 +190,10 @@ empty array are valid responses; no retry fills the batch. One accepted trajecto
 is sufficient. Model, media, and VLM execution failures propagate as system
 errors; missing decoded frames are not evidence of static content. Only a normally
 returned empty batch, or one whose trajectories are all semantically or visually rejected,
-triggers whole-group Arrangement repair with concrete rejection evidence, and the failed Group/Segment binding is
-then forbidden by backend validation. If every item of every batch trajectory is
+triggers whole-group Arrangement repair with concrete rejection evidence, legal
+Segment choices, and neighboring constraints. Arrangement can revise content,
+required subjects, and Segment bindings, or retain the original Segment when legal;
+semantic failures do not permanently ban a binding. If every item of every batch trajectory is
 static, the Segment itself becomes unavailable. Targeted repair preserves every
 still-legal Anchor, deterministically rebuilds Story partitions, and retrieves
 only changed complete group contracts. Retrieval never widens one Slot into an
@@ -226,12 +229,18 @@ This example follows the prompt “Create a montage of the key events in *The Go
   </a>
 </p>
 
-<p align="center"><em>Starting from the prompt and Material Memory, the ASTER team arranges, anchors, retrieves, composes, and revises a 60-second timeline of the Corleone power transfer. Click the image for the full-size view.</em></p>
+<p align="center"><em>Starting from the prompt and Material Memory, the ASTER team arranges, anchors, retrieves, composes, and renders a 60-second timeline of the Corleone power transfer. Click the image for the full-size view.</em></p>
+
+The figure expands individual Slots to illustrate candidates and adjacent-clip scores;
+actual retrieval and search operate on complete Slot Group trajectories. “Retrieve Again”
+illustrates feedback and repair, not replacement of every rejected candidate: one accepted
+complete trajectory is sufficient, and only a group with zero valid trajectories triggers
+local replanning followed by retrieval.
 
 - **Arrangement Architect** maps the music into five acts and binds adjacent Slots into Segment-backed groups with exact duration budgets.
 - **Story Editor** anchors decisive plot turns with source dialogue, splits surrounding ordinary Slots into child groups, and lets longer lines continue through L-cuts.
-- **Timeline Scout** validates complete candidate trajectories for those groups, rejecting the whole trajectory when any member fails identity, relevance, visibility, or motion checks.
-- **Edit Composer** combines unary shot scores with pairwise compatibility and selects a globally coherent chronological path of whole trajectories.
+- **Timeline Scout** validates complete candidate trajectories for those groups, rejects a trajectory when any member fails validation, and retains other accepted trajectories. Only a group with no valid candidates returns its failure evidence for local replanning.
+- **Edit Composer** combines unary shot scores with pairwise compatibility and uses Beam Search to select a high-scoring chronological path of whole trajectories with a feasible suffix; this is not a guarantee of a global optimum.
 - **Renderer** realizes the frozen plan without changing candidate selections.
 
 ## Quick start
@@ -312,7 +321,7 @@ A Project has **Project Setup**, **Runs**, and **Outputs** tabs. After saving
 Materials, Editing Intent, and Target Duration, **Start editing** creates an
 immutable ASTER Run and an isolated local subprocess executes the real
 Planners call. Failed Runs support Retry; Interrupted Runs resume only from a
-validated complete A/S/T/E/R agent boundary, including the replan-pending
+validated complete A/S/T/E agent boundary, including the replan-pending
 boundary; successful Runs support Run again, and historical Runs can be
 deleted when safe. Run detail and Activity show the same durable progress and
 model-usage projection.

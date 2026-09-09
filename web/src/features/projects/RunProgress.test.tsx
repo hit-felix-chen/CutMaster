@@ -268,6 +268,10 @@ describe('live ASTER execution progress', () => {
     expect(screen.getByText('Timeline Scout')).toBeVisible()
     expect(screen.getByText('Edit Composer')).toBeVisible()
     expect(screen.queryByText('Revision Editor')).not.toBeInTheDocument()
+    const milestones = screen.getByText('Edit Composer').closest('ol')!
+    expect(milestones.children).toHaveLength(4)
+    expect(milestones.querySelectorAll('li > svg')).toHaveLength(3)
+    expect(milestones.lastElementChild?.querySelector('svg')).toBeNull()
     expect(screen.queryByText(/R · Renderer/)).not.toBeInTheDocument()
     expect(screen.getByText(/Heartbeat/)).toBeVisible()
   })
