@@ -272,6 +272,9 @@ def compile_render_plan(
         output_fps=config.renderer.fps,
         detection_config=config.analyser.shot_detection,
         optimization_config=config.planners.source_window_optimization,
+        visual_sample_frames=(
+            config.planners.candidate_retrieval.visual_sample_frames
+        ),
     )
     return RenderPlan.create(
         video_material_id=request.video.material.material_id,

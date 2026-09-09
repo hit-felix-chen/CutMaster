@@ -45,7 +45,7 @@ class PlannersCheckpointStage(StrEnum):
     STORY = "story_editor"
     TIMELINE = "timeline_scout"
     EDIT = "edit_composer"
-    REVISION = "revision_editor"
+    REVISION = "revision_editor"  # Read-only compatibility with historical runs.
 
 
 class PlannersReplanScope(StrEnum):
@@ -327,6 +327,15 @@ class PlannersCheckpoint:
             self.planners_feedback,
             "planners_feedback",
         )
+        if planners_feedback is not None:
+            # Older checkpoints treated semantic candidate failures as permanent
+            # Group/Segment exclusions. They are diagnostic evidence, not bans;
+            # only verified static Source Segments remain unavailable.
+            planners_feedback = MappingProxyType({
+                key: value
+                for key, value in planners_feedback.items()
+                if key != "forbidden_group_segment_bindings"
+            })
         timings = _object(self.stage_timings_sec, "stage_timings_sec")
         for key, value in timings.items():
             if (
@@ -399,10 +408,9 @@ class PlannersCheckpoint:
                 raise ValueError(
                     "candidate_local replan_scope requires a positive local_replan_attempt"
                 )
-        elif self.local_replan_attempt != 0:
-            raise ValueError(
-                "local_replan_attempt is allowed only for candidate_local repair"
-            )
+        # local_replan_attempt is the invocation-wide consumed repair budget.
+        # It remains non-zero after a successful local repair so a resumed
+        # checkpoint cannot regain already-consumed attempts.
         if (
             replan_reuse is not None
             and self.completed_stage

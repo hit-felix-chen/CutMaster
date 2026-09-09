@@ -21,13 +21,11 @@ from cutmaster.workflow.prompting.failure_catalog import (
 from cutmaster.infrastructure.observability.logging import log_event
 from cutmaster.workflow.shared.execution_context import WorkflowContext
 from cutmaster.workflow.ports import CancellationToken
-from cutmaster.workflow.planners.revision_editor import RevisionEditorAgent
 from cutmaster.workflow.planners.edit_composer import (
     EditComposerAgent,
     _trajectory_units,
 )
 from cutmaster.workflow.planners.tools.errors import (
-    GroupNoCandidateError,
     NoFeasiblePathError,
 )
 from cutmaster.workflow.planners.tools.planners_feedback import merge_planners_feedback
@@ -147,7 +145,6 @@ class ASTERTeam:
             config,
             context,
         )
-        self.revision_editor = RevisionEditorAgent(config, context)
         self.timeline_scout = TimelineScoutAgent(
             media,
             config,
@@ -245,16 +242,70 @@ class ASTERTeam:
         )
         if not failed_parent_group_ids:
             raise ValueError("ASTER group repair requires at least one failed group")
+        # Story normalization removes runtime partitions and candidates, but the
+        # failed parent or an expanded neighbor can contain a preserved Anchor.
+        # Keep its fixed picture contract for DP, prompt and backend validation;
+        # an ordinary Slot can be repaired without changing its Source Segment.
+        preserved_anchors_by_slot_id = {
+            str(slot["slot_id"]): dict(slot["dialogue_anchor"])
+            for slot in slots
+            if isinstance(slot.get("dialogue_anchor"), dict)
+        }
+        arrangement_slots = [
+            {
+                **slot,
+                "dialogue_anchor": preserved_anchors_by_slot_id[str(slot["slot_id"])],
+            }
+            if str(slot["slot_id"]) in preserved_anchors_by_slot_id
+            else slot
+            for slot in arrangement_slots
+        ]
+        precise_failed_slot_ids = {
+            str(value)
+            for value in diagnostics.get("failed_slot_ids") or []
+            if str(value)
+        }
+        representative_by_parent: dict[str, dict[str, Any]] = {}
+        for slot in arrangement_slots:
+            parent_group_id = str(slot["group_id"])
+            if parent_group_id not in failed_parent_group_ids:
+                continue
+            representative_by_parent.setdefault(parent_group_id, slot)
+            if str(slot["slot_id"]) in precise_failed_slot_ids:
+                representative_by_parent[parent_group_id] = slot
+        accumulated_evidence = (
+            self.context.get_artifact("planners_feedback") or {}
+        ).get("candidate_failure_evidence") or []
+        slot_ids_by_parent = {
+            parent_group_id: {
+                str(slot["slot_id"])
+                for slot in arrangement_slots
+                if str(slot["group_id"]) == parent_group_id
+            }
+            for parent_group_id in representative_by_parent
+        }
         failures = [
             {
                 "slot_id": str(slot["slot_id"]),
-                "group_id": str(slot["group_id"]),
+                "group_id": parent_group_id,
+                "parent_group_id": parent_group_id,
                 "source_segment_id": str(slot["source_segment_id"]),
                 "content_description": str(slot["content_description"]),
-                "reason": diagnostics,
+                "reason_code": str(diagnostics.get("reason_code") or ""),
+                "diagnosis": str(diagnostics.get("diagnosis") or ""),
+                "repair_requirement": str(
+                    diagnostics.get("repair_requirement") or ""
+                ),
+                "diagnostics": dict(diagnostics),
+                "candidate_failure_evidence": [
+                    evidence
+                    for evidence in accumulated_evidence
+                    if slot_ids_by_parent[parent_group_id].intersection(
+                        str(value) for value in evidence.get("slot_ids") or []
+                    )
+                ],
             }
-            for slot in arrangement_slots
-            if str(slot["group_id"]) in failed_parent_group_ids
+            for parent_group_id, slot in sorted(representative_by_parent.items())
         ]
         if not failures:
             raise ValueError(
@@ -268,7 +319,7 @@ class ASTERTeam:
             "WARNING",
             "aster.arrangement",
             "fallback.apply",
-            "Replanned complete Slot Groups; Story Editor will run next",
+            "Replanned complete Slot Groups; Story partitions will be rebuilt next",
             failed_group_ids=sorted(failed_group_ids),
             failed_parent_group_ids=sorted(failed_parent_group_ids),
             replanned_slot_ids=sorted(replanned_slot_ids),
@@ -281,8 +332,8 @@ class ASTERTeam:
         *,
         previous_slots: list[dict[str, Any]],
         replanned_slot_ids: set[str],
-    ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
-        """Refresh Story for repaired Slots, retaining verified healthy groups."""
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        """Rebuild Story partitions while retaining every still-legal Anchor."""
 
         refreshed_slots = self.story_editor.anchor_groups(
             slots,
@@ -307,7 +358,7 @@ class ASTERTeam:
             for slot_id in replanned_slot_ids
         }
         affected_parent_group_ids.discard("")
-        return refreshed_slots, replanned_slot_ids, affected_parent_group_ids
+        return refreshed_slots, affected_parent_group_ids
 
     def scout_with_reuse(
         self,
@@ -337,6 +388,24 @@ class ASTERTeam:
             current_segments,
             slots,
         )
+        # Expansion into an affected healthy parent is not a retrieval failure.
+        # Invalidate only the latest failed Slots (mapped through the previous
+        # topology), even if Arrangement keeps their exact semantic contract.
+        diagnostics = (
+            self.context.get_artifact("planners_feedback") or {}
+        ).get("diagnostics") or {}
+        failed_group_ids = {
+            str(value) for value in diagnostics.get("failed_group_ids") or []
+        }
+        failed_slot_ids = {
+            str(value) for value in diagnostics.get("failed_slot_ids") or []
+        }
+        failed_slot_ids.update(
+            str(slot_id)
+            for group in previous_planning_groups
+            if str(group["group_id"]) in failed_group_ids
+            for slot_id in group.get("slot_ids") or []
+        )
         reusable: dict[str, list[dict[str, Any]]] = {}
         retrieve_group_ids: set[str] = set()
         for group in current_groups:
@@ -346,6 +415,9 @@ class ASTERTeam:
             trajectories = previous_candidate_pool.get(group_id)
             if (
                 current_contract is not None
+                and not failed_slot_ids.intersection(
+                    str(value) for value in group.get("slot_ids") or []
+                )
                 and old_contract == current_contract
                 and _candidate_trajectories_match(
                     group_id,
@@ -478,7 +550,7 @@ class ASTERTeam:
             candidate_pool,
             beam_path,
             selected_ids,
-            pairwise_scores,
+            None if selection.get("selection_mode") == "first" else pairwise_scores,
         )
 
     def validate_revision_checkpoint(
@@ -533,20 +605,6 @@ class ASTERTeam:
     ) -> list[dict[str, Any]]:
         return self.edit_composer.build_script(slots, selected_path)
 
-    def revise(
-        self,
-        slots: list[dict[str, Any]],
-        candidate_pool: dict[str, list[dict[str, Any]]],
-        script: list[dict[str, Any]],
-        pairwise_scores: dict[str, dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        return self.revision_editor.revise(
-            slots,
-            candidate_pool,
-            script,
-            pairwise_scores,
-        )
-
     def record_failure(
         self,
         *,
@@ -561,15 +619,11 @@ class ASTERTeam:
             error=error,
             diagnostics=diagnostics,
             failed_slots=failed_slots,
-            target_trajectories_per_group=(
-                self.config.planners.candidate_retrieval.target_trajectories_per_group
-            ),
         )
         self.context.set_artifact("planners_feedback", feedback)
 
 
 __all__ = [
     "ASTERTeam",
-    "GroupNoCandidateError",
     "NoFeasiblePathError",
 ]

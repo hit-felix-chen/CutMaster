@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from cutmaster.workflow.planners.edit_composer import (
     _trajectory_units,
     flatten_trajectory_path,
     path_to_script,
+    select_first_trajectory_path,
     validate_chronological_path,
     validate_script_against_selection,
     validate_selected_trajectory_path,
@@ -89,6 +91,41 @@ def test_future_check_removes_a_locally_valid_dead_end() -> None:
         {"trajectory_middle"},
         {"trajectory_final"},
     ]
+
+    # The ablation must not silently replace the first choice with a feasible
+    # higher-ranked/later alternative, even though the full composer can.
+    with pytest.raises(NoFeasiblePathError):
+        select_first_trajectory_path(slots, pool)
+
+
+def test_first_candidate_selection_uses_pool_order_without_scoring(tmp_path, monkeypatch):
+    slot = _slot("slot_01", "group_001", "segment_0001")
+    first = _trajectory("group_001", "first", slot, "00:00:00,000-00:00:02,000")
+    better = _trajectory("group_001", "better", slot, "00:00:03,000-00:00:05,000")
+    first["items"][0]["semantic_relevance"] = 0.1
+    better["items"][0]["semantic_relevance"] = 1.0
+    path, diagnostics, pairwise = select_first_trajectory_path([slot], {"group_001": [first, better]})
+    assert path[0]["trajectory_id"] == "first"
+    assert diagnostics["pairwise_score_count"] == 0
+    assert pairwise == {}
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.edit_composer.select_paths",
+        lambda *_args, **_kwargs: pytest.fail("First mode must not score or search"),
+    )
+    context = WorkflowContext(tmp_path / "context.json")
+    agent = EditComposerAgent(
+        None,
+        Path("video.mp4"),
+        SimpleNamespace(planners=SimpleNamespace(
+            beam_search=SimpleNamespace(selection_mode="first")
+        )),
+        context,
+    )
+    selected, diagnostic, scores = agent.compose([slot], {"group_001": [first, better]})
+    assert selected == path
+    assert diagnostic == diagnostics
+    assert scores == {}
+    assert context.get_artifact("selected_trajectory_ids") == {"group_001": "first"}
 
 
 def test_preflight_rejects_when_no_complete_future_path_exists() -> None:
@@ -349,6 +386,11 @@ def test_script_keeps_authoritative_planned_duration_ms() -> None:
         "candidate_id": "candidate_01",
         "group_id": "group_001",
         "trajectory_id": "trajectory_01",
+        "planning_segment_id": "segment_0001_01",
+        "planning_segment_start_ms": 0,
+        "planning_segment_end_ms": 5000,
+        "source_segment_id": "segment_0001",
+        "source_shot_ids": ["shot_0001", "shot_0002"],
         "timestamp": "00:00:00,000-00:00:02,000",
         "semantic_relevance": 0.8,
         "visual_slot_relevance_likert": 4,
@@ -361,3 +403,8 @@ def test_script_keeps_authoritative_planned_duration_ms() -> None:
     script = path_to_script([slot], [candidate], Path("video.mp4"))
 
     assert script[0]["planned_duration_ms"] == 2000
+    assert script[0]["planning_segment_id"] == "segment_0001_01"
+    assert script[0]["planning_segment_start_ms"] == 0
+    assert script[0]["planning_segment_end_ms"] == 5000
+    assert script[0]["source_segment_id"] == "segment_0001"
+    assert script[0]["source_shot_ids"] == ["shot_0001", "shot_0002"]

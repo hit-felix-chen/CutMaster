@@ -4,6 +4,7 @@ import numpy as np
 from scenedetect import FrameTimecode
 
 from cutmaster.workflow.shared.shot_detection import detect_source_cuts
+from cutmaster.workflow.shared.timecode import parse_range
 from cutmaster.workflow.planners.tools.source_window_optimizer import (
     _detect_used_segment_cuts,
     choose_source_window,
@@ -121,6 +122,64 @@ def test_choose_source_window_never_moves_backward() -> None:
     assert 10.0 <= result.source_start_sec <= 12.0
 
 
+def test_choose_source_window_tolerates_millisecond_timecode_rounding_at_cap() -> None:
+    result = choose_source_window(
+        original_start_sec=6902.567,
+        clip_duration_sec=4.0,
+        output_start_sec=0.0,
+        internal_source_cuts_sec=[6904.0],
+        candidate_source_cuts_sec=[6904.0],
+        beat_times=[1.433],
+        source_duration_sec=7200.0,
+        frame_rate=30.0,
+        latest_source_start_sec=6902.566667,
+    )
+
+    assert result.source_start_sec == pytest.approx(6902.567)
+    assert result.source_shift_sec == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("source_duration_sec", [8.132, 8.13])
+def test_choose_source_window_distinguishes_float_tail_error_from_overflow(
+    source_duration_sec,
+) -> None:
+    def choose():
+        return choose_source_window(
+            original_start_sec=3.799,
+            clip_duration_sec=4.333,
+            output_start_sec=0.0,
+            internal_source_cuts_sec=[4.6656, 6.61545],
+            beat_times=[1.0, 3.0],
+            source_duration_sec=source_duration_sec,
+            frame_rate=30.0,
+        )
+
+    if source_duration_sec == 8.132:
+        result = choose()
+        assert result.source_start_sec == 3.799
+        assert result.source_shift_sec == 0.0
+    else:
+        with pytest.raises(ValueError, match="No forward source-window search range"):
+            choose()
+
+
+def test_choose_source_window_rejects_real_existing_boundary_overflow() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Existing source window exceeds its chronological or evidence boundary",
+    ):
+        choose_source_window(
+            original_start_sec=10.0,
+            clip_duration_sec=4.0,
+            output_start_sec=0.0,
+            internal_source_cuts_sec=[11.0],
+            beat_times=[1.0],
+            source_duration_sec=60.0,
+            frame_rate=30.0,
+            latest_source_start_sec=9.998,
+        )
+
+
 def test_choose_source_window_relaxes_edge_constraint_when_strict_search_is_impossible() -> None:
     result = choose_source_window(
         original_start_sec=10.0,
@@ -229,7 +288,7 @@ def test_parallel_optimization_preserves_script_order(
     assert all(item["cut_optimization"]["max_beat_distance_sec"] == 0.0 for item in optimized)
 
 
-def test_trajectory_optimization_preserves_the_verified_windows(
+def test_trajectory_clips_are_beat_optimized_without_losing_identity(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -239,56 +298,262 @@ def test_trajectory_optimization_preserves_the_verified_windows(
             "group_id": "group_001",
             "trajectory_id": "group_001_trajectory_01",
             "candidate_id": "candidate_01",
-            "timestamp": "00:00:10,000-00:00:12,000",
-            "output_frame_range": [0, 60],
+            "timestamp": "00:00:10,000-00:00:14,000",
+            "output_frame_range": [0, 40],
         },
         {
             "slot_id": "slot_02",
             "group_id": "group_001",
             "trajectory_id": "group_001_trajectory_01",
             "candidate_id": "candidate_02",
-            "timestamp": "00:00:12,000-00:00:14,000",
-            "output_frame_range": [60, 120],
+            "timestamp": "00:00:14,000-00:00:18,000",
+            "output_frame_range": [40, 80],
         },
     ]
 
-    def fail_detection(*_args, **_kwargs):
-        raise AssertionError("trajectory-locked clips must not inspect source cuts")
-
     monkeypatch.setattr(
         "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
-        fail_detection,
+        lambda *_args, **_kwargs: (
+            (11.2, 12.4, 15.2, 16.4),
+            10.0,
+            60.0,
+        ),
     )
 
     optimized = optimize_script_source_windows(
         tmp_path / "source.mp4",
         tmp_path / "segments",
         items,
-        beat_times=[1.0, 2.0, 3.0],
+        beat_times=[1.0, 2.0, 3.0, 5.0, 6.0, 7.0],
         video_description={},
-        output_fps=30,
+        output_fps=10,
         detection_config=ShotDetectionConfig(),
         optimization_config=SourceWindowOptimizationConfig(),
     )
 
-    assert [item["timestamp"] for item in optimized] == [
-        "00:00:10,000-00:00:12,000",
-        "00:00:12,000-00:00:14,000",
-    ]
+    first_start, first_end = (
+        parse_range(optimized[0]["timestamp"])
+    )
+    second_start, _ = parse_range(optimized[1]["timestamp"])
+
+    assert first_start == pytest.approx(10.0)
+    assert first_end <= second_start
+    assert 14.0 < second_start <= 14.4
     assert [item["candidate_id"] for item in optimized] == [
         "candidate_01",
         "candidate_02",
     ]
+    assert [item["group_id"] for item in optimized] == [
+        "group_001",
+        "group_001",
+    ]
+    assert [item["trajectory_id"] for item in optimized] == [
+        "group_001_trajectory_01",
+        "group_001_trajectory_01",
+    ]
+    assert optimized[0]["cut_optimization"]["mode"] == "beat_optimized"
+    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+    second_optimization = optimized[1]["cut_optimization"]
+    assert 0.0 < second_optimization["source_shift_sec"] <= 0.4
+    assert second_optimization["visual_sample_frames"] == 4
+    assert second_optimization["visual_guard_start_sec"] == pytest.approx(14.5)
+    assert second_optimization["semantic_shift_cap_sec"] == pytest.approx(0.4)
+    original_sample_times = [
+        14.0 + 4.0 * (index + 0.5) / 4
+        for index in range(4)
+    ]
     assert all(
-        item["cut_optimization"] == {
-            "mode": "trajectory_locked",
-            "source_shift_sec": 0.0,
-            "num_internal_cuts": 0,
-            "fallback_level": 0,
-            "max_beat_distance_sec": 0.0,
-        }
+        second_start <= sample_time <= second_start + 4.0
+        for sample_time in original_sample_times
+    )
+    assert all(
+        item["cut_optimization"].get("mode") != "trajectory_locked"
         for item in optimized
     )
+
+
+def test_dialogue_anchor_is_the_only_trajectory_clip_that_stays_locked(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    item = {
+        "slot_id": "slot_01",
+        "group_id": "anchor_group_001",
+        "trajectory_id": "anchor_001",
+        "candidate_id": "anchor_candidate_01",
+        "timestamp": "00:00:10,000-00:00:12,000",
+        "output_frame_range": [0, 20],
+        "dialogue_anchor": {"anchor_id": "anchor_001"},
+    }
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((11.0,), 10.0, 60.0),
+    )
+
+    optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
+        tmp_path / "segments",
+        [item],
+        beat_times=[1.0],
+        video_description={},
+        output_fps=10,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert optimized[0]["timestamp"] == item["timestamp"]
+    assert optimized[0]["group_id"] == item["group_id"]
+    assert optimized[0]["trajectory_id"] == item["trajectory_id"]
+    assert optimized[0]["cut_optimization"] == {
+        "mode": "dialogue_anchor_locked",
+        "source_shift_sec": 0.0,
+        "num_internal_cuts": 0,
+        "fallback_level": 0,
+        "max_beat_distance_sec": 0.0,
+    }
+
+
+def test_last_trajectory_clip_cannot_move_past_its_source_segment_end(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    item = {
+        "slot_id": "slot_01",
+        "group_id": "group_001",
+        "trajectory_id": "trajectory_001",
+        "candidate_id": "candidate_01",
+        "source_segment_id": "segment_0001",
+        "timestamp": "00:00:16,000-00:00:20,000",
+        "output_frame_range": [0, 40],
+    }
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((17.2, 18.4), 10.0, 60.0),
+    )
+
+    optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
+        tmp_path / "segments",
+        [item],
+        beat_times=[1.0, 2.0, 3.0],
+        video_description={
+            "source": {"duration_sec": 60.0, "fps": 10.0},
+            "segments": [
+                {
+                    "segment_id": "segment_0001",
+                    "time_range": {"start_sec": 0.0, "end_sec": 20.0},
+                    "shots": [],
+                }
+            ],
+        },
+        output_fps=10,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert optimized[0]["timestamp"] == item["timestamp"]
+    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+
+
+def test_trajectory_clip_cannot_move_into_an_unverified_shot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    item = {
+        "slot_id": "slot_01",
+        "group_id": "group_001",
+        "trajectory_id": "trajectory_001",
+        "candidate_id": "candidate_01",
+        "source_segment_id": "segment_0001",
+        "source_shot_ids": ["shot_0001"],
+        "timestamp": "00:00:16,000-00:00:20,000",
+        "output_frame_range": [0, 40],
+    }
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((17.2, 18.4), 10.0, 60.0),
+    )
+
+    optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
+        tmp_path / "segments",
+        [item],
+        beat_times=[1.0, 2.0, 3.0],
+        video_description={
+            "source": {"duration_sec": 60.0, "fps": 10.0},
+            "segments": [
+                {
+                    "segment_id": "segment_0001",
+                    "time_range": {"start_sec": 0.0, "end_sec": 30.0},
+                    "shots": [
+                        {
+                            "shot_id": "shot_0001",
+                            "time_range": {"start_sec": 0.0, "end_sec": 20.0},
+                        },
+                        {
+                            "shot_id": "shot_0002",
+                            "time_range": {"start_sec": 20.0, "end_sec": 30.0},
+                        },
+                    ],
+                }
+            ],
+        },
+        output_fps=10,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert optimized[0]["timestamp"] == item["timestamp"]
+    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+
+
+def test_trajectory_clip_cannot_move_past_its_planning_segment_end(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    item = {
+        "slot_id": "slot_01",
+        "group_id": "group_001",
+        "trajectory_id": "trajectory_001",
+        "candidate_id": "candidate_01",
+        "planning_segment_end_ms": 20_000,
+        "source_segment_id": "segment_0001",
+        "source_shot_ids": ["shot_0001"],
+        "timestamp": "00:00:16,000-00:00:20,000",
+        "output_frame_range": [0, 40],
+    }
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((17.2, 18.4), 10.0, 60.0),
+    )
+
+    optimized = optimize_script_source_windows(
+        tmp_path / "source.mp4",
+        tmp_path / "segments",
+        [item],
+        beat_times=[1.0, 2.0, 3.0],
+        video_description={
+            "source": {"duration_sec": 60.0, "fps": 10.0},
+            "segments": [
+                {
+                    "segment_id": "segment_0001",
+                    "time_range": {"start_sec": 0.0, "end_sec": 30.0},
+                    "shots": [
+                        {
+                            "shot_id": "shot_0001",
+                            "time_range": {"start_sec": 0.0, "end_sec": 30.0},
+                        }
+                    ],
+                }
+            ],
+        },
+        output_fps=10,
+        detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )
+
+    assert optimized[0]["timestamp"] == item["timestamp"]
+    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
 
 
 def test_cutless_used_segment_preserves_source_window(

@@ -243,7 +243,7 @@
     "preparingBody": "The worker has started. The first agent milestone will appear shortly.",
     "legacyWorkingBody": "Agent-level milestones are not available for this active Run. Its overall status and heartbeat will continue to update.",
     "complete": "ASTER planning is complete",
-    "completeBody": "All five ASTER agents have finished and the initial Frozen Edit is ready.",
+    "completeBody": "A/S/T/E planning is complete and the initial Frozen Edit is ready; R · Renderer executes rendering separately.",
     "heartbeat": "Heartbeat · {{time}}",
     "agents": {
       "arrangementArchitect": {
@@ -265,13 +265,9 @@
         "name": "Edit Composer",
         "active": "Edit Composer is assembling the sequence",
         "description": "Composing a chronological, globally coherent sequence from whole group trajectories."
-      },
-      "revisionEditor": {
-        "name": "Revision Editor",
-        "active": "Revision Editor is reviewing the cut",
-        "description": "Reviewing the candidate sequence and replacing weak choices as whole group trajectories."
       }
-    }
+    },
+    "rendererHandoff": "R · Renderer renders the frozen edit; see render variants for execution status."
   },
   "brief": {
     "title": "Creative Brief",

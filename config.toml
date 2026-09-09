@@ -100,10 +100,10 @@ max_shots_per_request = 20
 # 能量、onset、beat、重音和音乐段落组成的可复用 Music Memory。
 
 # ASTER 完整流程最多运行 3 轮。后续轮会收到上一轮失败信息和预设改进建议。
-# Candidate 首轮为空时，每轮 ASTER 可额外局部重规划 2 次，不消耗 ASTER 轮次。
+# 整次 Planners 执行最多进行 2 次 Candidate 局部重规划；该预算不会在 ASTER 轮次间重置。
 [planners.aster_team]
 max_rounds = 3
-max_local_replans_per_round = 2
+max_local_replans = 2
 
 # Stage 2: music-aware edit-Slot arrangement
 # target_clip_duration_sec: 画面 Slot 的目标时长（秒）；平均时长须接近该值，
@@ -118,14 +118,15 @@ max_model_requests = 3
 # min_anchor_duration_sec: 每段原声的最短连续时长，过滤无意义的零碎短句。
 # max_model_requests: 一次 Anchor 规划最多发起的模型请求数。
 [planners.dialogue_anchors]
+# Set false for the no-anchor ablation; no anchor-selection API is called.
+enabled = true
 max_anchors = 5
 min_anchor_duration_sec = 3
 max_model_requests = 3
 
 # Stage 4a: structured candidate retrieval and visual validation
-# target_trajectories_per_group: 每个非锚点 Slot Group 希望保留的完整候选轨迹数；
-# 仅作为提前结束检索的目标；任一轮后为 0 会立即整组重规划，非零但不足才继续下一轮。
-# max_rounds: 最多四轮，依次为 1 轮初检、2 轮按失败信息修正、1 轮最终补充。
+# target_trajectories_per_group: 单次检索为每个非锚点 Slot Group 请求的完整候选轨迹数；
+# 默认一次请求 3 条并逐条验证；任一条通过即接受该 Group，整批 0 条通过则立即整组重规划。
 # visual_sample_frames: 每个候选片段送给 VLM 核验的均匀采样帧数。
 # protagonist_visibility_likert_threshold: 必须出镜主体的最低 Likert 分数（1–5）。
 # motion_sample_fps: 计算候选运动强度时的视频采样帧率。
@@ -133,7 +134,6 @@ max_model_requests = 3
 # static_kinetic_energy_threshold: 去除最大瞬时帧差后的平均运动强度不高于该值时丢弃候选。
 [planners.candidate_retrieval]
 target_trajectories_per_group = 3
-max_rounds = 4
 visual_sample_frames = 4
 protagonist_visibility_likert_threshold = 3
 motion_sample_fps = 2.0
@@ -143,17 +143,15 @@ static_kinetic_energy_threshold = 0.01
 # Stage 4b: chronological sequence selection
 # beam_width: Beam Search 每一层保留的最高分路径数量；越大搜索更充分但占用更多计算。
 [planners.beam_search]
+# first bypasses score-based selection and beam search for the ablation.
+selection_mode = "beam"
 beam_width = 8
-
-# Stage 5: candidate-constrained script review
-# review_rounds: 在既有候选池内让 LLM 复核并提出脚本替换的轮数。
-[planners.script_review]
-review_rounds = 1
 
 # Stage 6: source-window optimization against visual cuts and music beats
 # search_margin_sec: 围绕候选窗口搜索更合适视觉切点的时间范围（秒）。
 # min_boundary_distance_sec: 内部切点距离片段首尾的首选安全距离（秒）。
 # max_workers: 并行执行源窗口切点优化的最大 worker 数。
+# 普通候选仅向前优化且必须保留 VLM 已核验的采样帧；Story Anchor 的画面窗口不移动。
 [planners.source_window_optimization]
 search_margin_sec = 2.0
 min_boundary_distance_sec = 1.0

@@ -700,6 +700,42 @@ def select_paths(
     return best, diagnostics, pairwise_scores
 
 
+def select_first_trajectory_path(
+    slots: list[dict[str, Any]],
+    pool: dict[str, list[dict[str, Any]]],
+    planning_segments: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Select the first retained trajectory per group, with no scoring/search.
+
+    Pool order is retrieval/validation order, not score order. Keep fixed anchors
+    and whole trajectories. A conflicting first choice fails rather than silently
+    searching for a better alternative, which would change the ablation.
+    """
+    units = _trajectory_units(slots, pool, planning_segments)
+    path = [unit["trajectories"][0] for unit in units]
+    previous_end = -1.0
+    for trajectory in path:
+        start, end = _trajectory_source_range(trajectory)
+        if start < previous_end:
+            raise NoFeasiblePathError(str(trajectory["group_id"]), {
+                "reason": "first_trajectory_source_overlap",
+                "previous_end_sec": previous_end,
+                "source_start_sec": start,
+            })
+        previous_end = end
+    return path, {
+        "selection_mode": "first",
+        "selection_order": "retained_retrieval_order",
+        "selected_trajectory_ids": {
+            str(t["group_id"]): str(t["trajectory_id"]) for t in path
+        },
+        "beam_candidate_ids": [c["candidate_id"] for c in flatten_trajectory_path(path)],
+        "beam_width": 0,
+        "pairwise_scoring": "disabled",
+        "pairwise_score_count": 0,
+    }, {}
+
+
 def _score_candidate_path(
     slots: list[dict[str, Any]],
     path: list[dict[str, Any]],
@@ -767,6 +803,16 @@ def path_to_script(
         }
         if candidate.get("dialogue_anchor") is not None:
             item["dialogue_anchor"] = dict(candidate["dialogue_anchor"])
+        for field in (
+            "planning_segment_id",
+            "planning_segment_start_ms",
+            "planning_segment_end_ms",
+            "source_segment_id",
+        ):
+            if field in candidate:
+                item[field] = candidate[field]
+        if candidate.get("source_shot_ids") is not None:
+            item["source_shot_ids"] = list(candidate["source_shot_ids"])
         script.append(item)
     return script
 
@@ -996,6 +1042,13 @@ class EditComposerAgent:
         dict[str, Any],
         dict[str, dict[str, Any]],
     ]:
+        if self.config.planners.beam_search.selection_mode == "first":
+            path, diagnostics, scores = select_first_trajectory_path(
+                slots, candidate_space, self.context.get_artifact("planning_segments")
+            )
+            self.context.set_artifact("selected_trajectory_ids", diagnostics["selected_trajectory_ids"])
+            self.context.set_artifact("pairwise_scores", scores)
+            return path, diagnostics, scores
         return select_paths(
             self.media,
             slots,
@@ -1019,6 +1072,7 @@ class EditComposerAgent:
 
 
 __all__ = [
+    "select_first_trajectory_path",
     "EditComposerAgent",
     "NoFeasiblePathError",
     "flatten_trajectory_path",

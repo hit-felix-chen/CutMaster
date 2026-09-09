@@ -44,7 +44,6 @@ from cutmaster.workflow.planners import Planners
 from cutmaster.workflow.planners.tools.errors import (
     GroupNoCandidateError,
     NoFeasiblePathError,
-    RetryablePlanningStageError,
 )
 from cutmaster.workflow.planners.tools.music_analysis import project_music_profile
 from cutmaster.workflow.ports import WorkflowCancelledError
@@ -271,13 +270,16 @@ def _install_fake_workflow(
     calls: list[str],
     *,
     fail_first_composition: bool = False,
-    fail_first_global_composition: bool = False,
+    fail_composition_attempts: int = 0,
+    fail_arrangement_attempts: int = 0,
     fail_anchor_attempts: int = 0,
     fail_candidate_attempts: int = 0,
     fail_local_repair_attempts: int = 0,
+    fail_local_story_refresh_attempts: int = 0,
+    fail_local_repair_with_infrastructure_error: bool = False,
     candidate_failure_groups: tuple[tuple[str, ...], ...] = (),
     repair_diagnostics: list[dict[str, Any]] | None = None,
-    fail_first_reuse_with_retryable_error: bool = False,
+    fail_first_reuse_with_infrastructure_error: bool = False,
     revise_to_alternative: bool = False,
     checkpoint_validation_error: str | None = None,
 ) -> None:
@@ -299,6 +301,11 @@ def _install_fake_workflow(
 
         def arrange(self, *_args):
             calls.append("arrangement_architect")
+            if calls.count("arrangement_architect") <= fail_arrangement_attempts:
+                try:
+                    raise ValueError("Arrangement response is invalid")
+                except ValueError as exc:
+                    raise RuntimeError("Arrangement model requests exhausted") from exc
             slots = [
                 {
                     "slot_id": "slot_01",
@@ -443,11 +450,14 @@ def _install_fake_workflow(
 
         def compose(self, _slots, pool):
             calls.append("edit_composer")
-            if (
-                fail_first_global_composition
-                and calls.count("edit_composer") == 1
-            ):
-                raise ValueError("global composition contract failed")
+            if calls.count("edit_composer") <= fail_composition_attempts:
+                raise NoFeasiblePathError(
+                    "group_001",
+                    {
+                        "failed_group_id": "group_001",
+                        "valid_trajectory_counts": {"group_001": 1},
+                    },
+                )
             if fail_first_composition and calls.count("edit_composer") == 1:
                 raise NoFeasiblePathError(
                     "group_001",
@@ -506,11 +516,10 @@ def _install_fake_workflow(
             calls.append("repair_groups")
             if repair_diagnostics is not None:
                 repair_diagnostics.append(dict(diagnostics))
+            if fail_local_repair_with_infrastructure_error:
+                raise ConnectionError("Arrangement provider unavailable")
             if calls.count("repair_groups") <= fail_local_repair_attempts:
-                try:
-                    raise ValueError("failed_group_id=group_001")
-                except ValueError as exc:
-                    raise RuntimeError("Local group repair failed") from exc
+                raise ValueError("failed_group_id=group_001")
             self.context.set_artifact(
                 "arrangement_groups",
                 [
@@ -533,8 +542,13 @@ def _install_fake_workflow(
         ):
             calls.append("refresh_story_groups")
             assert previous_slots
+            if (
+                calls.count("refresh_story_groups")
+                <= fail_local_story_refresh_attempts
+            ):
+                raise ValueError("Repaired group invalidates its dialogue anchor")
             refreshed = self.anchor_story(slots)
-            return refreshed, replanned_slot_ids, {"group_001"}
+            return refreshed, {"group_001"}
 
         def scout_with_reuse(
             self,
@@ -549,17 +563,10 @@ def _install_fake_workflow(
             assert previous_slots
             assert "group_001" in previous_candidate_pool
             if (
-                fail_first_reuse_with_retryable_error
+                fail_first_reuse_with_infrastructure_error
                 and calls.count("scout_with_reuse") == 1
             ):
-                raise RetryablePlanningStageError(
-                    "retrieval",
-                    {
-                        "diagnosis": "retrieval response contract failed",
-                        "failed_group_ids": [],
-                        "failed_parent_group_ids": [],
-                    },
-                )
+                raise ConnectionError("Candidate provider unavailable")
             return self.scout(slots, cancellation_token)
 
         def record_failure(self, *, attempt, diagnostics, **_kwargs) -> None:
@@ -609,7 +616,6 @@ def _install_fake_workflow(
         PlannersCheckpointStage.STORY,
         PlannersCheckpointStage.TIMELINE,
         PlannersCheckpointStage.EDIT,
-        PlannersCheckpointStage.REVISION,
     ],
 )
 def test_resume_skips_every_completed_aster_agent_boundary(
@@ -637,7 +643,6 @@ def test_resume_skips_every_completed_aster_agent_boundary(
             "story_editor",
             "timeline_scout",
             "edit_composer",
-            "revision_editor",
         )
     }
     token.cancelled = False
@@ -661,7 +666,6 @@ def test_resume_skips_every_completed_aster_agent_boundary(
         "story_editor",
         "timeline_scout",
         "edit_composer",
-        "revision_editor",
     )
     assert calls.count("profile_music") == 1
     for index, agent in enumerate(agents, 1):
@@ -703,7 +707,7 @@ def test_resume_story_checkpoint_revalidates_planning_contract(
 
 @pytest.mark.parametrize(
     "stage",
-    [PlannersCheckpointStage.EDIT, PlannersCheckpointStage.REVISION],
+    [PlannersCheckpointStage.EDIT],
 )
 def test_late_checkpoint_resume_revalidates_candidate_contract(
     tmp_path: Path,
@@ -802,7 +806,23 @@ def test_timeline_resume_promotes_no_path_to_full_global_retry(
     assert calls.count("edit_composer") == 2
 
 
-def test_anchor_failure_returns_to_arrangement_before_retry(
+def test_arrangement_model_failure_does_not_start_an_aster_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls, fail_arrangement_attempts=1)
+
+    with pytest.raises(RuntimeError, match="Arrangement model requests exhausted"):
+        Planners(_config(tmp_path)).plan(request)
+
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("story_editor") == 0
+    assert calls.count("record_failure") == 0
+
+
+def test_anchor_model_failure_does_not_restart_arrangement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -810,17 +830,14 @@ def test_anchor_failure_returns_to_arrangement_before_retry(
     calls: list[str] = []
     _install_fake_workflow(monkeypatch, calls, fail_anchor_attempts=1)
 
-    result = Planners(_config(tmp_path)).plan(request)
+    with pytest.raises(RuntimeError, match="Anchor model requests exhausted"):
+        Planners(_config(tmp_path)).plan(request)
 
-    assert result.status == "success"
-    assert calls.count("arrangement_architect") == 2
+    assert calls.count("arrangement_architect") == 1
     assert calls.count("repair_groups") == 0
-    assert calls.count("story_editor") == 2
-    assert calls.count("timeline_scout") == 1
-    assert calls.index("arrangement_architect", 1) < calls.index(
-        "story_editor",
-        calls.index("story_editor") + 1,
-    )
+    assert calls.count("story_editor") == 1
+    assert calls.count("timeline_scout") == 0
+    assert calls.count("record_failure") == 0
 
 
 def test_candidate_empty_local_replan_keeps_current_aster_attempt(
@@ -832,7 +849,6 @@ def test_candidate_empty_local_replan_keeps_current_aster_attempt(
     _install_fake_workflow(
         monkeypatch,
         calls,
-        fail_anchor_attempts=1,
         fail_candidate_attempts=1,
     )
 
@@ -842,7 +858,7 @@ def test_candidate_empty_local_replan_keeps_current_aster_attempt(
     )
 
     assert result.status == "success"
-    assert diagnostics["aster_attempt"] == 2
+    assert diagnostics["aster_attempt"] == 1
     assert calls.count("timeline_scout") == 2
     assert calls.count("scout_with_reuse") == 1
 
@@ -895,7 +911,7 @@ def test_candidate_local_budget_exhaustion_starts_full_next_aster_attempt(
     assert calls.count("scout_with_reuse") == 2
 
 
-def test_candidate_local_budget_is_nested_inside_each_global_attempt(
+def test_candidate_local_budget_is_shared_across_global_attempts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -911,10 +927,10 @@ def test_candidate_local_budget_is_nested_inside_each_global_attempt(
         Planners(_config(tmp_path)).plan(request)
 
     assert calls.count("arrangement_architect") == 3
-    assert calls.count("repair_groups") == 6
-    assert calls.count("timeline_scout") == 9
-    assert calls.count("scout_with_reuse") == 6
-    assert calls.count("record_failure") == 9
+    assert calls.count("repair_groups") == 2
+    assert calls.count("timeline_scout") == 5
+    assert calls.count("scout_with_reuse") == 2
+    assert calls.count("record_failure") == 5
 
 
 def test_last_global_attempt_can_use_candidate_local_budget(
@@ -926,8 +942,8 @@ def test_last_global_attempt_can_use_candidate_local_budget(
     _install_fake_workflow(
         monkeypatch,
         calls,
-        fail_anchor_attempts=2,
-        fail_candidate_attempts=1,
+        fail_composition_attempts=2,
+        candidate_failure_groups=((), (), ("group_001",)),
     )
 
     result = Planners(_config(tmp_path)).plan(request)
@@ -939,10 +955,10 @@ def test_last_global_attempt_can_use_candidate_local_budget(
     assert diagnostics["aster_attempt"] == 3
     assert calls.count("arrangement_architect") == 3
     assert calls.count("repair_groups") == 1
-    assert calls.count("timeline_scout") == 2
+    assert calls.count("timeline_scout") == 4
 
 
-def test_candidate_local_repair_failure_uses_local_budget_before_global(
+def test_candidate_local_repair_value_error_promotes_global_without_repeating_local(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -961,13 +977,13 @@ def test_candidate_local_repair_failure_uses_local_budget_before_global(
     )
 
     assert result.status == "success"
-    assert diagnostics["aster_attempt"] == 1
-    assert calls.count("arrangement_architect") == 1
-    assert calls.count("repair_groups") == 2
+    assert diagnostics["aster_attempt"] == 2
+    assert calls.count("arrangement_architect") == 2
+    assert calls.count("repair_groups") == 1
     assert calls.count("timeline_scout") == 2
 
 
-def test_generic_retrieval_failure_after_local_repair_promotes_global(
+def test_candidate_local_story_value_error_promotes_global_without_repeating_local(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -977,7 +993,7 @@ def test_generic_retrieval_failure_after_local_repair_promotes_global(
         monkeypatch,
         calls,
         fail_candidate_attempts=1,
-        fail_first_reuse_with_retryable_error=True,
+        fail_local_story_refresh_attempts=1,
     )
 
     result = Planners(_config(tmp_path)).plan(request)
@@ -989,25 +1005,51 @@ def test_generic_retrieval_failure_after_local_repair_promotes_global(
     assert diagnostics["aster_attempt"] == 2
     assert calls.count("arrangement_architect") == 2
     assert calls.count("repair_groups") == 1
-    assert calls.count("scout_with_reuse") == 1
+    assert calls.count("refresh_story_groups") == 1
+    assert calls.count("timeline_scout") == 2
 
 
-def test_anchor_failure_stops_after_three_aster_attempts(
+def test_local_repair_infrastructure_failure_is_not_reclassified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(tmp_path)
     calls: list[str] = []
-    _install_fake_workflow(monkeypatch, calls, fail_anchor_attempts=3)
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+        fail_local_repair_with_infrastructure_error=True,
+    )
 
-    with pytest.raises(RetryablePlanningStageError):
+    with pytest.raises(ConnectionError, match="Arrangement provider unavailable"):
         Planners(_config(tmp_path)).plan(request)
 
-    assert calls.count("arrangement_architect") == 3
-    assert calls.count("repair_groups") == 0
-    assert calls.count("story_editor") == 3
-    assert calls.count("timeline_scout") == 0
-    assert calls.count("record_failure") == 3
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("repair_groups") == 1
+    assert calls.count("timeline_scout") == 1
+    assert calls.count("record_failure") == 1
+
+
+def test_retrieval_infrastructure_failure_after_local_repair_is_not_reclassified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=1,
+        fail_first_reuse_with_infrastructure_error=True,
+    )
+
+    with pytest.raises(ConnectionError, match="Candidate provider unavailable"):
+        Planners(_config(tmp_path)).plan(request)
+
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("repair_groups") == 1
+    assert calls.count("scout_with_reuse") == 1
 
 
 def test_resume_after_candidate_local_replan_reuses_group_and_sanitizes_feedback(
@@ -1062,6 +1104,97 @@ def test_resume_after_candidate_local_replan_reuses_group_and_sanitizes_feedback
     assert calls.count("edit_composer") == 1
 
 
+def test_resume_from_local_pending_does_not_restore_consumed_local_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=99,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.REPLAN_PENDING,
+        stop_attempt=1,
+        stop_replan_scope=PlannersReplanScope.CANDIDATE_LOCAL,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    assert store.latest.local_replan_attempt == 1
+    store.latest = PlannersCheckpoint.from_dict(store.latest.to_dict())
+    token.cancelled = False
+
+    with pytest.raises(GroupNoCandidateError):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+    assert calls.count("arrangement_architect") == 3
+    assert calls.count("repair_groups") == 2
+    assert calls.count("timeline_scout") == 5
+    assert calls.count("scout_with_reuse") == 2
+    assert calls.count("record_failure") == 5
+
+
+def test_resume_from_global_pending_does_not_restore_local_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(
+        monkeypatch,
+        calls,
+        fail_candidate_attempts=99,
+    )
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token,
+        PlannersCheckpointStage.REPLAN_PENDING,
+        stop_attempt=2,
+        stop_replan_scope=PlannersReplanScope.GLOBAL,
+    )
+
+    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+    assert store.latest is not None
+    assert store.latest.replan_scope is PlannersReplanScope.GLOBAL
+    assert store.latest.local_replan_attempt == 2
+    repairs_before_resume = calls.count("repair_groups")
+    store.latest = PlannersCheckpoint.from_dict(store.latest.to_dict())
+    token.cancelled = False
+
+    with pytest.raises(GroupNoCandidateError):
+        Planners(_config(tmp_path)).plan(
+            request,
+            cancellation_token=token,
+            checkpoint_store=store,
+        )
+
+    assert repairs_before_resume == 2
+    assert calls.count("arrangement_architect") == 3
+    assert calls.count("repair_groups") == repairs_before_resume
+    assert calls.count("timeline_scout") == 5
+    assert calls.count("scout_with_reuse") == 2
+    assert calls.count("record_failure") == 5
+
+
 def test_global_retry_checkpoint_discards_candidate_reuse_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1071,7 +1204,7 @@ def test_global_retry_checkpoint_discards_candidate_reuse_state(
     _install_fake_workflow(
         monkeypatch,
         calls,
-        fail_first_global_composition=True,
+        fail_first_composition=True,
     )
     token = _BoundaryToken()
     store = _MemoryCheckpointStore(
@@ -1152,53 +1285,42 @@ def test_candidate_local_story_checkpoint_keeps_reuse_seed(
     assert calls.count("scout_with_reuse") == 1
 
 
-def test_revision_checkpoint_and_final_diagnostics_store_revised_trajectory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_final_script_uses_composer_without_revision(tmp_path, monkeypatch):
     request = _request(tmp_path)
-    calls: list[str] = []
-    _install_fake_workflow(
-        monkeypatch,
-        calls,
-        revise_to_alternative=True,
-    )
+    calls = []
+    _install_fake_workflow(monkeypatch, calls, revise_to_alternative=True)
+    result = Planners(_config(tmp_path)).plan(request)
+    diagnostics = json.loads(result.selection_diagnostics_path.read_text())
+    assert diagnostics["selected_trajectory_ids"] == {"group_001": "group_001_trajectory_001"}
+    assert "revision_editor" not in calls
+
+
+def test_historical_revision_checkpoint_remains_readable(tmp_path, monkeypatch):
+    request = _request(tmp_path)
+    calls = []
+    _install_fake_workflow(monkeypatch, calls)
     token = _BoundaryToken()
-    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.REVISION)
-
-    with pytest.raises(WorkflowCancelledError, match="checkpoint boundary"):
+    store = _MemoryCheckpointStore(token, PlannersCheckpointStage.EDIT)
+    with pytest.raises(WorkflowCancelledError):
         Planners(_config(tmp_path)).plan(
-            request,
-            cancellation_token=token,
-            checkpoint_store=store,
+            request, cancellation_token=token, checkpoint_store=store
         )
-
-    assert store.latest is not None
-    assert store.latest.selected_trajectory_ids == {
-        "group_001": "group_001_trajectory_002"
-    }
-    assert store.latest.selection is not None
-    assert store.latest.selection["composer_selected_trajectory_ids"] == {
-        "group_001": "group_001_trajectory_001"
-    }
-    assert store.latest.selection["selected_trajectory_ids"] == {
-        "group_001": "group_001_trajectory_002"
-    }
     token.cancelled = False
-
-    result = Planners(_config(tmp_path)).plan(
-        request,
-        cancellation_token=token,
-        checkpoint_store=store,
+    result = Planners(_config(tmp_path)).plan(request, checkpoint_store=store)
+    raw_script = json.loads(result.raw_script_path.read_text())
+    document = store.latest.to_dict()
+    document["completed_stage"] = PlannersCheckpointStage.REVISION.value
+    document["raw_script"] = raw_script
+    store.latest = PlannersCheckpoint.from_dict(document)
+    calls.clear()
+    resumed = Planners(_config(tmp_path)).plan(
+        request, checkpoint_store=store, overwrite=True
     )
-    diagnostics = json.loads(
-        result.selection_diagnostics_path.read_text(encoding="utf-8")
-    )
-
-    assert diagnostics["selected_trajectory_ids"] == {
-        "group_001": "group_001_trajectory_002"
-    }
-    assert diagnostics["final_candidate_ids"] == ["candidate_02"]
+    assert resumed.status == "success"
+    assert "validate_revision_checkpoint" in calls
+    assert "edit_composer" not in calls
+    assert "revision_editor" not in calls
+    assert json.loads(resumed.raw_script_path.read_text()) == raw_script
 
 
 def _arrangement_checkpoint_document() -> dict[str, Any]:
@@ -1273,6 +1395,118 @@ def test_candidate_local_pending_checkpoint_round_trip() -> None:
     restored = PlannersCheckpoint.from_dict(value)
 
     assert restored.to_dict() == value
+
+
+def test_legacy_checkpoint_discards_semantic_binding_but_keeps_static_and_evidence() -> None:
+    value = _candidate_local_pending_checkpoint_document()
+    feedback = value["planners_feedback"]
+    feedback.update({
+        "forbidden_group_segment_bindings": [{
+            "parent_group_id": "group_001", "slot_ids": ["slot_01"],
+            "source_segment_id": "segment_0001",
+        }],
+        "unavailable_source_segment_ids": ["segment_0099"],
+        "candidate_failure_evidence": [{
+            "slot_ids": ["slot_01"], "source_segment_id": "segment_0001",
+            "reason_code": "required_subject_not_visually_confirmed",
+            "visible_description": "Only the teammate was visible.",
+        }],
+    })
+
+    restored = PlannersCheckpoint.from_dict(value)
+    actual = restored.to_dict()["planners_feedback"]
+
+    assert "forbidden_group_segment_bindings" not in actual
+    assert actual["unavailable_source_segment_ids"] == ["segment_0099"]
+    assert actual["candidate_failure_evidence"] == feedback["candidate_failure_evidence"]
+    assert actual["diagnostics"] == feedback["diagnostics"]
+    assert restored.local_replan_attempt == 1
+    assert "forbidden_group_segment_bindings" in feedback
+
+
+def test_candidate_failure_records_complete_slot_requirements(tmp_path, monkeypatch) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls, fail_candidate_attempts=1)
+    team_class = planners_module.ASTERTeam
+    original_anchor_story = team_class.anchor_story
+    original_record_failure = team_class.record_failure
+    observed = []
+
+    def anchor_story(self, slots):
+        return [{**slot, "required_visible_subjects": ["goalkeeper"],
+                 "planning_segment_id": "planning_segment_001"}
+                for slot in original_anchor_story(self, slots)]
+
+    def record_failure(self, *, failed_slots, **kwargs):
+        observed.extend(failed_slots)
+        return original_record_failure(self, failed_slots=failed_slots, **kwargs)
+
+    monkeypatch.setattr(team_class, "anchor_story", anchor_story)
+    monkeypatch.setattr(team_class, "record_failure", record_failure)
+
+    assert Planners(_config(tmp_path)).plan(request).status == "success"
+    assert observed[0]["required_visible_subjects"] == ["goalkeeper"]
+    assert observed[0]["planned_duration_ms"] == 1000
+    assert observed[0]["planning_segment_id"] == "planning_segment_001"
+
+
+@pytest.mark.parametrize("stage", [
+    PlannersCheckpointStage.REPLAN_PENDING,
+    PlannersCheckpointStage.STORY,
+])
+def test_resume_local_repair_ignores_legacy_semantic_bans(
+    tmp_path, monkeypatch, stage,
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_fake_workflow(monkeypatch, calls, fail_candidate_attempts=1)
+    token = _BoundaryToken()
+    store = _MemoryCheckpointStore(
+        token, stage, stop_replan_scope=PlannersReplanScope.CANDIDATE_LOCAL,
+    )
+    with pytest.raises(WorkflowCancelledError):
+        Planners(_config(tmp_path)).plan(
+            request, cancellation_token=token, checkpoint_store=store,
+        )
+    assert store.latest is not None
+    document = store.latest.to_dict()
+    evidence = [{
+        "slot_ids": ["slot_01"], "source_segment_id": "segment_0001",
+        "reason_code": "required_subject_not_visually_confirmed",
+        "visible_description": "Only a teammate was visible.",
+    }]
+    document["planners_feedback"].update({
+        "forbidden_group_segment_bindings": [{
+            "parent_group_id": "group_001", "slot_ids": ["slot_01"],
+            "source_segment_id": "segment_0001",
+        }],
+        "candidate_failure_evidence": evidence,
+        "unavailable_source_segment_ids": ["segment_0099"],
+    })
+    store.latest = PlannersCheckpoint.from_dict(document)
+    original_reuse = planners_module.ASTERTeam.scout_with_reuse
+    inspected = []
+
+    def scout_with_reuse(self, *args, **kwargs):
+        feedback = self.context.get_artifact("planners_feedback")
+        inspected.append(feedback)
+        assert "forbidden_group_segment_bindings" not in feedback
+        assert feedback["candidate_failure_evidence"] == evidence
+        assert feedback["unavailable_source_segment_ids"] == ["segment_0099"]
+        return original_reuse(self, *args, **kwargs)
+
+    monkeypatch.setattr(planners_module.ASTERTeam, "scout_with_reuse", scout_with_reuse)
+    token.cancelled = False
+    result = Planners(_config(tmp_path)).plan(
+        request, cancellation_token=token, checkpoint_store=store,
+    )
+
+    assert result.status == "success"
+    assert len(inspected) == 1
+    assert calls.count("arrangement_architect") == 1
+    assert calls.count("repair_groups") == 1
+    assert store.latest.local_replan_attempt == 1
 
 
 def test_candidate_local_pending_checkpoint_requires_failed_parent_groups() -> None:

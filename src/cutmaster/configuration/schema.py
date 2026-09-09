@@ -80,7 +80,7 @@ class AnalyserConfig:
 @dataclass(frozen=True)
 class AsterTeamConfig:
     max_rounds: int = 3
-    max_local_replans_per_round: int = 2
+    max_local_replans: int = 2
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,7 @@ class ArrangementArchitectConfig:
 
 @dataclass(frozen=True)
 class DialogueAnchorConfig:
+    enabled: bool = True
     max_anchors: int = 4
     min_anchor_duration_sec: float = 1.5
     max_model_requests: int = 3
@@ -99,7 +100,6 @@ class DialogueAnchorConfig:
 @dataclass(frozen=True)
 class CandidateRetrievalConfig:
     target_trajectories_per_group: int = 3
-    max_rounds: int = 4
     motion_sample_fps: float = 2.0
     motion_workers: int = 4
     static_kinetic_energy_threshold: float = 0.01
@@ -109,12 +109,8 @@ class CandidateRetrievalConfig:
 
 @dataclass(frozen=True)
 class BeamSearchConfig:
+    selection_mode: str = "beam"
     beam_width: int = 8
-
-
-@dataclass(frozen=True)
-class ScriptReviewConfig:
-    review_rounds: int = 1
 
 
 @dataclass(frozen=True)
@@ -137,7 +133,6 @@ class PlannersConfig:
         default_factory=CandidateRetrievalConfig
     )
     beam_search: BeamSearchConfig = field(default_factory=BeamSearchConfig)
-    script_review: ScriptReviewConfig = field(default_factory=ScriptReviewConfig)
     source_window_optimization: SourceWindowOptimizationConfig = field(
         default_factory=SourceWindowOptimizationConfig
     )
@@ -194,7 +189,6 @@ __all__ = [
     "PlannersConfig",
     "RendererConfig",
     "SceneSegmentationConfig",
-    "ScriptReviewConfig",
     "ShotAnnotationConfig",
     "ShotDetectionConfig",
     "ArrangementArchitectConfig",

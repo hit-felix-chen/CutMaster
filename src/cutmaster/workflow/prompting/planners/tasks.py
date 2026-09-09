@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from cutmaster.workflow.prompting.core import (
@@ -42,23 +42,16 @@ class DialogueAnchorSelectionDetails:
     dialogue_constraints_by_slot: dict[str, dict[str, Any]]
     max_anchors: int
     min_anchor_duration_sec: float
-    min_anchors: int = 1
-    preserved_anchors: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
 class CandidateRetrievalDetails:
     operation: str
-    round_index: int
-    round_phase: str
     trajectories_per_group: int
     group: dict[str, Any]
     slots: list[dict[str, Any]]
-    confirmed_trajectories: list[dict[str, Any]]
-    excluded_ranges_by_slot: dict[str, list[str]]
-    rejected_trajectory_signatures: list[str]
-    rejection_feedback: list[dict[str, Any]]
     planning_segment: dict[str, Any]
+    rejection_feedback: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -75,13 +68,10 @@ class PairwiseScoringDetails:
     pair_specs: list[dict[str, Any]]
 
 
-@dataclass(frozen=True)
-class ScriptReviewDetails:
-    slots: list[dict[str, Any]]
-    candidate_pool: dict[str, list[dict[str, Any]]]
-
-
 def _slot_arrangement(details: SlotArrangementDetails) -> PromptPackage:
+    existing_slots_by_id = {
+        str(slot["slot_id"]): slot for slot in details.existing_slots
+    }
     common_required = [
         "narrative_role",
         "content_description",
@@ -142,6 +132,14 @@ def _slot_arrangement(details: SlotArrangementDetails) -> PromptPackage:
                 "type": "integer",
                 "const": planned_duration_ms,
             }
+        existing_slot = existing_slots_by_id.get(slot_id or "", {})
+        if existing_slot.get("dialogue_anchor"):
+            for name in common_required:
+                if name in existing_slot:
+                    properties[name] = {
+                        **properties[name],
+                        "const": existing_slot[name],
+                    }
         return {
             "type": "object",
             "additionalProperties": False,
@@ -188,7 +186,7 @@ def _slot_arrangement(details: SlotArrangementDetails) -> PromptPackage:
         instructions = f"""Repair the specified Slot Groups inside one or more independent local
 windows of an existing plan. This is not a new timeline. target_slot_constraints contains every
 Slot in each failed group and includes its complete adjacent groups only when the failed group
-cannot move to another legal Segment by itself. Return exactly one replacement for every listed
+has no structurally feasible assignment by itself. Return exactly one replacement for every listed
 Slot in a single response. Do not return or modify any unlisted Slot.
 
 Preserve every target slot_id and its exact desired_duration_sec and planned_duration_ms. The
@@ -199,22 +197,55 @@ Use the maintained request, compact music profile, and original structured sourc
 from the first Arrangement Architect call. Treat existing_slot_plan as authoritative for all
 unaffected Slots. Redesign all members of an original_group_id together. Every member of that
 group must choose the same source_segment_id, and each replacement may use only its own
-allowed_segment_ids. Distinct original groups must use different Segments, with Segment identifiers
-strictly increasing in Slot order. Never merge groups, return to an earlier Segment, or reuse a
-Segment after the plan has moved forward.
+allowed_segment_ids. Adjacent original groups may choose the same Segment and will then become one
+canonical group. Segment identifiers must therefore be nondecreasing across the returned original
+groups and strictly increasing between the resulting canonical groups. Never return to an earlier
+Segment or reuse one after the plan has moved forward.
+
+For ordinary Slots, you may keep the original Segment whenever it is in allowed_segment_ids. A zero-candidate result
+does not by itself prohibit that Segment or the original Slot-to-Segment binding. All other
+editorial fields may be revised: narrative_role, content_description, target_emotion,
+target_emotional_intensity, target_kinetic_energy, continuity_from_previous, required_visible_subjects,
+and source_segment_id, subject to the structural and preserved-Anchor constraints above and below.
+Compare the original Slots, neighboring fixed Slots, and detailed failures before deciding what
+to change; do not assume that changing Segment is the only repair.
+
+Each constraint's allowed_source_segments contains compact Material Memory for its legal choices,
+including the original Segment when still legal. Use those Segment summaries, narrative functions,
+appearing characters, and source time ranges together with the maintained source_story_context.
+Legal availability is not proof of semantic suitability: choose visible events and subjects that
+the evidence supports and that contribute to the maintained request. Confirmed all-static Segments
+are excluded from the legal choices; a rejected candidate does not establish that its entire
+Segment is static or unsuitable.
 
 For every Segment selected in a repair window, add the planned_duration_ms of all returned Slots
-in its original group. That duration must not exceed the Segment's complete source duration. This
-capacity check is for the whole group, not for one Slot in isolation. Leave enough ordered,
+assigned to it, including consecutive original groups that merge. That duration must not exceed
+the Segment's complete source duration. This capacity check is for the resulting canonical group,
+not for one Slot or one original group in isolation. Leave enough ordered,
 non-overlapping source time for one complete trajectory containing every group Slot.
+For an included neighboring group with preserved_anchor_source_segment_id, keep that Segment
+fixed. Its existing dialogue_anchor.source_video_timestamp is a fixed picture window: all
+ordinary Slots before, between, and after preserved Anchors must fit into the corresponding
+source gaps in Slot order. When merging an adjacent group onto that Segment, include its whole
+duration in the appropriate gap; total Segment capacity alone does not establish feasibility.
+Preserve every existing Anchor Slot's editorial fields as well as its fixed picture and Segment.
+An Anchor's content_description, required_visible_subjects, role, emotion, intensity, energy, and
+continuity cannot be rewritten around an already-fixed picture. In a group containing an Anchor,
+repair the ordinary Slots while preserving that Anchor Slot exactly.
 
 The visual candidate diagnostics rejected the earlier candidates for identity, relevance, or
 static imagery, no complete group trajectory survived validation, or the assigned Segment lacked
 capacity for the whole group. Use rejection_feedback to correct the actual cause. Every feedback
 item has reason_code, diagnosis, and repair_requirement: reason_code is the stable machine-readable
 category, diagnosis explains the concrete failed constraint with measured values, and
-repair_requirement is mandatory. Redesign the group's visible events, required_visible_subjects,
-and shared source_segment_id together so that a complete ordered trajectory is visually
+repair_requirement gives repair guidance to interpret under this current contract. Historical
+advice to change Segment is not a permanent ban and does not override allowed_segment_ids.
+candidate_failure_evidence, when present, retains compact
+observed rejections for the identified Slots and source Segment; occurrences counts repeated
+rejections, not extra subject requirements. Use those local visual observations to correct the
+specific failed requirement. Revise the group's visible events, required_visible_subjects,
+and other editorial fields, retaining or changing its shared source_segment_id as appropriate,
+so that a complete ordered trajectory is visually
 realizable. Do not merely paraphrase the failed descriptions while retaining unsupported subjects
 or source evidence. Role, team, and object subjects do not require a named-person face match; use
 precise required subjects that the source descriptions can visibly establish.
@@ -224,9 +255,10 @@ chronological room between the fixed groups immediately before and after each re
 an adjacent group was included only to open a feasible assignment, change no more of its visible
 intent than necessary.
 
-Dialogue anchors are not part of this response. After applying all listed repair windows, the
-application discards the old Anchor split and runs Story Editor again. Do not preserve a poor
-Segment assignment merely because existing_slot_plan shows an Anchor there. Do not use title cards,
+Dialogue anchors are not part of this response. After applying the repair, the application
+deterministically preserves every still-legal existing Anchor and rebuilds its picture partitions
+without another Story Editor model call. If the new Segment assignment invalidates an Anchor, this
+local repair is rejected and escalated; do not optimize around or rewrite an Anchor here. Do not use title cards,
 opening or end credits, production logos, legal cards, or blank frames unless explicitly required
 by the maintained request.
 
@@ -281,11 +313,16 @@ character must be seen. Maintain a coherent progression. Every slot after the fi
 how it continues or contrasts with the previous slot. Do not use title cards, opening or end
 credits, production logos, legal cards, or blank frames unless the maintained request explicitly
 requires them.
+
+Use planners_feedback as diagnostic history, not as a permanent ban on ordinary Slot-to-Segment
+bindings. Historical advice to change Segment does not override the legal Segment choices in this
+response contract. A failed binding may use its original Segment again with revised editorial
+requirements; confirmed all-static Segments are excluded from the legal choices.
 {retry_note}"""
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.SLOT_ARRANGEMENT,
-        prompt_version="4.2" if targeted else "4.0",
+        prompt_version="4.4" if targeted else "4.1",
         operation=(
             "Arrangement Architect targeted repair"
             if targeted
@@ -352,81 +389,20 @@ def _dialogue_anchor_selection(
     for slot in details.slots:
         slot_id = str(slot["slot_id"])
         constraint = details.dialogue_constraints_by_slot.get(slot_id) or {}
-        output_audio_start_sec = constraint.get("output_audio_start_sec")
-        if not isinstance(output_audio_start_sec, (int, float)):
-            raise ValueError(
-                f"Dialogue constraint for {slot_id} must include its "
-                "output_audio_start_sec"
+        allowed_segment_ids = [
+            str(value)
+            for value in constraint.get("allowed_segment_ids") or []
+            if str(value) in dialogue_ids_by_segment
+        ]
+        allowed_dialogue_ids = list(
+            dict.fromkeys(
+                dialogue_id
+                for segment_id in allowed_segment_ids
+                for dialogue_id in dialogue_ids_by_segment[segment_id]
             )
-        allowed_by_segment = constraint.get(
-            "allowed_last_dialogue_ids_by_segment_and_first"
-        ) or {}
-        output_ends_by_segment = constraint.get(
-            "output_audio_end_sec_by_segment_and_first_and_last"
-        ) or {}
-        endpoint_groups: list[dict[str, Any]] = []
-        for raw_segment_id, allowed_by_first in allowed_by_segment.items():
-            segment_id = str(raw_segment_id)
-            segment_dialogue_ids = dialogue_ids_by_segment.get(segment_id) or []
-            output_ends_by_first = output_ends_by_segment.get(segment_id) or {}
-            for raw_first_id, raw_last_ids in allowed_by_first.items():
-                first_dialogue_id = str(raw_first_id)
-                if first_dialogue_id not in segment_dialogue_ids:
-                    continue
-                output_ends_by_last = (
-                    output_ends_by_first.get(first_dialogue_id) or {}
-                )
-                last_dialogue_ids: list[str] = []
-                for raw_last_id in raw_last_ids:
-                    last_dialogue_id = str(raw_last_id)
-                    if last_dialogue_id not in segment_dialogue_ids:
-                        continue
-                    output_audio_end_sec = output_ends_by_last.get(
-                        last_dialogue_id
-                    )
-                    if not isinstance(output_audio_end_sec, (int, float)):
-                        raise ValueError(
-                            f"Allowed dialogue endpoint {slot_id}/"
-                            f"{segment_id}/{first_dialogue_id}/"
-                            f"{last_dialogue_id} must include its "
-                            "output_audio_end_sec"
-                        )
-                    if float(output_audio_end_sec) <= float(
-                        output_audio_start_sec
-                    ):
-                        raise ValueError(
-                            f"Allowed dialogue endpoint {slot_id}/"
-                            f"{segment_id}/{first_dialogue_id}/"
-                            f"{last_dialogue_id} has an invalid output audio range"
-                        )
-                    last_dialogue_ids.append(last_dialogue_id)
-                if last_dialogue_ids:
-                    endpoint_groups.append(
-                        {
-                            "source_segment_id": segment_id,
-                            "first_dialogue_id": first_dialogue_id,
-                            "last_dialogue_ids": last_dialogue_ids,
-                        }
-                    )
-        if not endpoint_groups:
+        )
+        if not allowed_segment_ids or not allowed_dialogue_ids:
             continue
-        allowed_segment_ids = list(
-            dict.fromkeys(
-                item["source_segment_id"] for item in endpoint_groups
-            )
-        )
-        allowed_first_dialogue_ids = list(
-            dict.fromkeys(
-                item["first_dialogue_id"] for item in endpoint_groups
-            )
-        )
-        allowed_last_dialogue_ids = list(
-            dict.fromkeys(
-                last_dialogue_id
-                for item in endpoint_groups
-                for last_dialogue_id in item["last_dialogue_ids"]
-            )
-        )
         anchor_schemas.append(
             {
                 "type": "object",
@@ -453,11 +429,11 @@ def _dialogue_anchor_selection(
                     },
                     "first_dialogue_id": {
                         "type": "string",
-                        "enum": allowed_first_dialogue_ids,
+                        "enum": allowed_dialogue_ids,
                     },
                     "last_dialogue_id": {
                         "type": "string",
-                        "enum": allowed_last_dialogue_ids,
+                        "enum": allowed_dialogue_ids,
                     },
                     "narrative_significance": {
                         "type": "string",
@@ -483,7 +459,7 @@ def _dialogue_anchor_selection(
             }
         )
     contract = ResponseContract(
-        version="4.3",
+        version="4.4",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -491,7 +467,7 @@ def _dialogue_anchor_selection(
             "properties": {
                 "anchors": {
                     "type": "array",
-                    "minItems": details.min_anchors,
+                    "minItems": 0,
                     "maxItems": min(
                         details.max_anchors,
                         len(anchor_schemas),
@@ -506,14 +482,6 @@ def _dialogue_anchor_selection(
             },
         },
     )
-    minimum_instruction = (
-        "Return at least one strong Anchor."
-        if details.min_anchors
-        else (
-            "It is valid to return no new Anchor because unchanged groups already "
-            "retain a valid Anchor."
-        )
-    )
     prompt_constraints = {
         slot_id: {
             key: value
@@ -521,6 +489,7 @@ def _dialogue_anchor_selection(
             if key
             not in {
                 "allowed_last_dialogue_ids_by_segment_and_first",
+                "output_audio_end_sec_by_segment_and_first_and_last",
                 "allowed_passages",
             }
         }
@@ -541,13 +510,11 @@ inclusive endpoints to every intervening dialogue item and validates continuity,
 minimum and maximum duration, source-picture bounds, output-timeline fit, and overlap. Never skip
 an intervening dialogue item, cross a Segment boundary, or combine nonconsecutive passages.
 
-Use each Slot's output_audio_end_sec_by_segment_and_first_and_last map. Its nested Segment, first
-ID, and last ID keys are the complete legal endpoint pairs. Select all three keys from one path in
-that map. The Slot's output_audio_start_sec is the authoritative audio start, and the value at the
-selected nested path is the authoritative audio end. Do not recalculate or ignore that output
-range. Each endpoint pair already satisfies the Slot's individual Segment, duration,
-picture-bound, and output-timeline limits. The application validates the complete multi-Anchor
-combination, including source order, dialogue reuse, audio overlap, and picture-partition capacity.
+The listed dialogue IDs are selectable endpoints, not pre-approved endpoint pairs. Judge the
+inclusive passage itself. The application validates its Segment, continuity, duration,
+source-picture bounds, output-timeline fit, source order, dialogue reuse, audio overlap, and
+picture-partition capacity. If several returned Anchors conflict, the application deterministically
+keeps the largest legal subset, preferring more total meaningful speech.
 
 Each Slot's preferred_anchor_picture_range is soft guidance, not a hard constraint. It is computed
 from that Slot's position among the Slots sharing its source Segment. When passages have comparable
@@ -569,14 +536,13 @@ Slots. The corresponding portion of original picture and original sound must ret
 source-time mapping wherever they coexist. Never enlarge or merge visual Slots to contain speech.
 The complete audio range must stay inside the output timeline and must not overlap another anchor.
 Treat output ranges as half-open intervals: two selections conflict whenever one starts before the
-other ends. The preserved Anchors below are immutable; every new Anchor must avoid all of their
-output ranges as well as every other new Anchor's output range.
+other ends.
 
 Never skip an intervening dialogue item, cross a Segment boundary, join unrelated exchanges,
 reorder dialogue, or manufacture words. Prefer a small set of memorable anchors distributed
 across the requested narrative, never more than one per Slot, and preserve non-overlapping source
 chronology across selected anchors. It is valid to leave most Slots without original speech.
-{minimum_instruction}
+It is also valid to return no Anchor when none is strong, coherent, and directly relevant.
 If prior ASTER feedback reports an Anchor timing, overlap, or partition-capacity failure, correct
 that exact failure and choose a different passage or Slot.
 
@@ -602,15 +568,11 @@ title cards, and speech over unrelated imagery.
 
 <dialogue_constraints_by_slot>
 {json.dumps(prompt_constraints, ensure_ascii=False)}
-</dialogue_constraints_by_slot>
-
-<preserved_anchors>
-{json.dumps(list(details.preserved_anchors), ensure_ascii=False)}
-</preserved_anchors>"""
+</dialogue_constraints_by_slot>"""
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.DIALOGUE_ANCHOR_SELECTION,
-        prompt_version="4.7",
+        prompt_version="4.8",
         operation="Story Editor original-dialogue anchoring",
         system_prompt=(
             "You are CutMaster's Story Editor. Select a few meaningful, coherent original-speech "
@@ -626,9 +588,11 @@ title cards, and speech over unrelated imagery.
     )
 
 
-def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
+def candidate_trajectory_contract(slots: list[dict[str, Any]]) -> ResponseContract:
+    """One strict trajectory shape shared by prompting and peer validation."""
+
     item_schemas: list[dict[str, Any]] = []
-    for slot in details.slots:
+    for slot in slots:
         slot_id = str(slot["slot_id"])
         schema = _candidate_item_schema()
         schema["required"] = ["slot_id", *schema["required"]]
@@ -650,8 +614,13 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
             }
         },
     }
+    return ResponseContract(version="1.0", schema=trajectory_schema)
+
+
+def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
+    trajectory_contract = candidate_trajectory_contract(details.slots)
     contract = ResponseContract(
-        version="2.1",
+        version="2.3",
         schema={
             "type": "object",
             "additionalProperties": False,
@@ -659,17 +628,25 @@ def _candidate_retrieval(details: CandidateRetrievalDetails) -> PromptPackage:
             "properties": {
                 "trajectories": {
                     "type": "array",
-                    "minItems": details.trajectories_per_group,
+                    "minItems": 0,
                     "maxItems": details.trajectories_per_group,
-                    "uniqueItems": True,
-                    "items": trajectory_schema,
+                    "items": {
+                        # Business validation rejects malformed peers separately.
+                        # Keep the complete form first for prompt templates.
+                        "anyOf": [
+                            trajectory_contract.schema,
+                            {},
+                        ]
+                    },
                 }
             },
         },
     )
-    instructions = f"""This is Candidate retrieval round {details.round_index} in the
-{details.round_phase} phase. Retrieve exactly {details.trajectories_per_group} complete candidate
-trajectories for the supplied Slot Group. A trajectory is one indivisible choice: it must contain
+    instructions = f"""Aim to retrieve {details.trajectories_per_group} complete candidate
+trajectories for the supplied Slot Group in one batch, returning no more than that number.
+If fewer complete trajectories have supported source evidence, return only those trajectories;
+do not invent or duplicate alternatives to fill the batch. If no complete trajectory is supported,
+return an empty trajectories array. A trajectory is one indivisible choice: it must contain
 exactly one item for every supplied Slot, in the same Slot order. All item windows must lie inside
 the one supplied Planning Segment, follow source time, and never overlap. Equality between one
 item's end and the next item's start is allowed. Return only source_start_ms as an integer number
@@ -683,16 +660,22 @@ derived time windows. Describe only visible content supported by overlapping Sho
 Use the maintained video summary only for plot context. Never invent visuals, identity, action,
 dialogue, or source start times.
 
-Confirmed trajectories already passed all checks and are retained. Return new whole trajectories;
-do not duplicate a confirmed trajectory, any rejected trajectory signature, or an excluded Slot
-range exactly. Different trajectories may reuse or overlap source time, but every trajectory must
-be internally ordered and non-overlapping. Score each item from 0 to 1 for semantic relevance,
-emotional intensity, and salience.
+For local retrieval, each Slot's content_description and required_visible_subjects are the complete
+subject contract. The global user request is intentionally not supplied here; do not import extra
+subject requirements from broader story goals.
 
-rejection_feedback contains every earlier failed request or rejected trajectory for this group.
-Each item includes a diagnosis and a preset repair requirement. Correct all of them. During the
-final supplement phase, prefer one conservative complete path that passes every hard constraint
-over a more ambitious but uncertain visual choice.
+rejection_feedback records earlier Slot descriptions, subject requirements, source Segments,
+candidate windows, and concrete failure reasons when available. Historical diagnoses are soft
+evidence, not additional subject requirements and not a timestamp or Segment blacklist. The
+current supplied Slots remain the complete subject contract; do not restore an old requirement
+that Arrangement has changed. Use the history to understand why a passage failed under its prior
+requirements and assess whether it supports the current requirements. A previously rejected
+window may be reconsidered when the current Slot requirements and source evidence support it.
+
+For the same Slot, different trajectories must use different source Shots or clearly
+non-overlapping source windows; never return multiple nominal alternatives backed by the same
+overlapping source evidence. Every trajectory must also be internally ordered and non-overlapping.
+Score each item from 0 to 1 for semantic relevance, emotional intensity, and salience.
 
 <slot_group>
 {json.dumps(details.group, ensure_ascii=False)}
@@ -703,22 +686,13 @@ over a more ambitious but uncertain visual choice.
 <planning_segment>
 {json.dumps(details.planning_segment, ensure_ascii=False)}
 </planning_segment>
-<confirmed_trajectories>
-{json.dumps(details.confirmed_trajectories, ensure_ascii=False)}
-</confirmed_trajectories>
-<excluded_ranges_by_slot>
-{json.dumps(details.excluded_ranges_by_slot, ensure_ascii=False)}
-</excluded_ranges_by_slot>
-<rejected_trajectory_signatures>
-{json.dumps(details.rejected_trajectory_signatures, ensure_ascii=False)}
-</rejected_trajectory_signatures>
 <rejection_feedback>
 {json.dumps(details.rejection_feedback, ensure_ascii=False)}
 </rejection_feedback>"""
     return PromptPackage(
         stage=PromptStage.PLANNERS,
         task=PromptTask.CANDIDATE_RETRIEVAL,
-        prompt_version="3.2",
+        prompt_version="3.5",
         operation=details.operation,
         system_prompt=(
             "You are CutMaster's Timeline Scout. Scout real source-video passages from a "
@@ -729,7 +703,7 @@ over a more ambitious but uncertain visual choice.
         ),
         user_prompt=assemble_user_prompt(instructions, contract),
         response_contract=contract,
-        context_keys=("request", "video_summary"),
+        context_keys=("video_summary",),
         modality=PromptModality.TEXT,
     )
 
@@ -962,89 +936,6 @@ Scores:
     )
 
 
-def _script_review(details: ScriptReviewDetails) -> PromptPackage:
-    group_ids = [str(group_id) for group_id in details.candidate_pool]
-    patch_schemas: list[dict[str, Any]] = []
-    for group_id in group_ids:
-        trajectory_ids = [
-            str(trajectory["trajectory_id"])
-            for trajectory in details.candidate_pool[group_id]
-        ]
-        patch_schemas.append(
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "operation",
-                    "group_id",
-                    "trajectory_id",
-                    "reason",
-                ],
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["keep", "replace"],
-                    },
-                    "group_id": {"type": "string", "const": group_id},
-                    "trajectory_id": {
-                        "type": "string",
-                        "enum": trajectory_ids,
-                    },
-                    "reason": {"type": "string", "minLength": 1},
-                },
-            }
-        )
-    contract = ResponseContract(
-        version="1.0",
-        schema={
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["patches"],
-            "properties": {
-                "patches": {
-                    "type": "array",
-                    "maxItems": len(group_ids),
-                    "items": (
-                        {"oneOf": patch_schemas}
-                        if patch_schemas
-                        else {"type": "object"}
-                    ),
-                }
-            },
-        },
-    )
-    instructions = """Review the current script as a sequence, focusing on instruction coverage,
-music-energy fit, temporal progression, and adjacent-clip continuity.
-
-Return only minimal Slot Group replacements that clearly improve the full edit. A replacement
-must select one complete trajectory from that group's candidate pool. Never replace one Slot or
-combine items from different trajectories. Do not change a group merely for variety. All output
-uses direct hard cuts. Use only trajectory IDs supplied in the maintained candidate pool."""
-    return PromptPackage(
-        stage=PromptStage.PLANNERS,
-        task=PromptTask.SCRIPT_REVIEW,
-        prompt_version="2.0",
-        operation="Revision Editor script review",
-        system_prompt=(
-            "You are CutMaster's Revision Editor. Review the composed edit and return minimal "
-            "whole-trajectory patch operations. Use only trajectory IDs supplied in the maintained context. "
-            "Return strict JSON only."
-        ),
-        user_prompt=assemble_user_prompt(instructions, contract),
-        response_contract=contract,
-        context_keys=(
-            "request",
-            "music_profile",
-            "video_summary",
-            "edit_plan",
-            "candidate_pool",
-            "current_script",
-        ),
-        modality=PromptModality.TEXT,
-        output_artifact="latest_patches",
-    )
-
-
 prompt_registry.register(
     PromptStage.PLANNERS,
     PromptTask.SLOT_ARRANGEMENT,
@@ -1069,9 +960,4 @@ prompt_registry.register(
     PromptStage.PLANNERS,
     PromptTask.PAIRWISE_SCORING,
     _pairwise_scoring,
-)
-prompt_registry.register(
-    PromptStage.PLANNERS,
-    PromptTask.SCRIPT_REVIEW,
-    _script_review,
 )

@@ -519,6 +519,7 @@ export function ProjectOverview() {
                 <span
                   className={index === 0 ? 'master-role master-role--m' : 'master-role'}
                   key={role}
+                  title={role === 'R' ? 'Renderer' : undefined}
                 >
                   {role}
                 </span>
@@ -1390,8 +1391,8 @@ const asterAgentByTask: Record<string, { initial: string; name: string }> = {
   timeline_scout: { initial: 'T', name: 'Timeline Scout' },
   pairwise_scoring: { initial: 'E', name: 'Edit Composer' },
   edit_composer: { initial: 'E', name: 'Edit Composer' },
-  script_review: { initial: 'R', name: 'Revision Editor' },
-  revision_editor: { initial: 'R', name: 'Revision Editor' },
+  script_review: { initial: 'R', name: 'Revision Editor (legacy)' },
+  revision_editor: { initial: 'R', name: 'Revision Editor (legacy)' },
 }
 
 const asterTaskOrder: Record<string, number> = {

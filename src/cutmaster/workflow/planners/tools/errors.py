@@ -3,16 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 
-class RetryablePlanningStageError(ValueError):
-    """A validated ASTER stage failed and may be redesigned in the next round."""
-
-    def __init__(self, stage: str, diagnostics: dict[str, Any]) -> None:
-        diagnosis = str(diagnostics.get("diagnosis") or "planning failed")
-        super().__init__(f"{stage} failed: {diagnosis}")
-        self.stage = stage
-        self.diagnostics = diagnostics
-
-
 class NoFeasiblePathError(ValueError):
     """Raised when no chronological candidate path can satisfy the edit plan."""
 
@@ -36,5 +26,4 @@ class GroupNoCandidateError(ValueError):
 __all__ = [
     "GroupNoCandidateError",
     "NoFeasiblePathError",
-    "RetryablePlanningStageError",
 ]

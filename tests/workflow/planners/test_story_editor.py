@@ -12,8 +12,6 @@ from cutmaster.workflow.planners.story_editor import (
     _dialogues_by_segment,
     _eligible_source_segments,
     _fixed_candidate,
-    _filter_constraints_against_preserved,
-    _validate_anchor_sequence,
     _validate_selection,
     select_dialogue_anchors,
 )
@@ -175,7 +173,7 @@ def _constraints(
     )
 
 
-def test_anchor_rerun_rejects_arrangement_with_no_eligible_dialogue(
+def test_anchor_selection_accepts_arrangement_with_no_eligible_dialogue(
     tmp_path,
 ) -> None:
     video_description = _video_description()
@@ -202,13 +200,32 @@ def test_anchor_rerun_rejects_arrangement_with_no_eligible_dialogue(
         "fixed_candidate": {"candidate_id": "slot_01_dialogue_anchor"},
     }
 
-    with pytest.raises(ValueError, match="No eligible dialogue Segment"):
-        select_dialogue_anchors(
-            [stale_slot],
-            LLMConfig(model="test", base_url="", api_key="test"),
-            _config(),
-            context,
-        )
+    result = select_dialogue_anchors(
+        [stale_slot],
+        LLMConfig(model="test", base_url="", api_key="test"),
+        _config(),
+        context,
+    )
+    assert "dialogue_anchor" not in result[0]
+
+
+def test_disabled_anchor_skips_model_and_clears_anchor_partition(tmp_path, monkeypatch):
+    context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("video_description", _video_description())
+    def unexpected(**kwargs):
+        pytest.fail("No-anchor mode must not call the model")
+    monkeypatch.setattr(context, "call_prompt", unexpected)
+    slot = {**_slot(), "dialogue_anchor": {"stale": True},
+            "fixed_candidate": {"candidate_id": "stale"}}
+    result = select_dialogue_anchors(
+        [slot], LLMConfig(model="test", base_url="", api_key="test"),
+        DialogueAnchorConfig(enabled=False), context,
+    )
+    assert "dialogue_anchor" not in result[0]
+    assert "fixed_candidate" not in result[0]
+    assert context.get_artifact("dialogue_anchors") == []
+    assert context.get_artifact("planning_segments")
+    assert context.get_artifact("planning_groups")
 
 
 def test_short_dialogue_items_remain_available_for_contiguous_selection() -> None:
@@ -346,12 +363,8 @@ def test_dialogue_constraints_allow_consecutive_short_lines_as_one_passage() -> 
 
     assert constraint["allowed_segment_ids"] == ["segment_0001"]
     assert constraint["min_audio_duration_sec"] == 1.5
-    assert constraint["allowed_last_dialogue_ids_by_segment_and_first"] == {
-        "segment_0001": {"7": ["9"]}
-    }
-    assert constraint[
-        "output_audio_end_sec_by_segment_and_first_and_last"
-    ] == {"segment_0001": {"7": {"9": 6.0}}}
+    assert "allowed_last_dialogue_ids_by_segment_and_first" not in constraint
+    assert "output_audio_end_sec_by_segment_and_first_and_last" not in constraint
     assert constraint["output_audio_start_sec"] == 4.0
     assert "allowed_passages" not in constraint
 
@@ -392,7 +405,7 @@ def test_story_contract_excludes_dialogue_starts_whose_picture_exceeds_segment()
             anchor_schema = package.response_contract.schema["properties"][
                 "anchors"
             ]["items"]["oneOf"][0]
-            assert "10" not in anchor_schema["properties"][
+            assert "10" in anchor_schema["properties"][
                 "first_dialogue_id"
             ]["enum"]
             package.response_contract.validate_structure(
@@ -426,7 +439,7 @@ def test_story_contract_excludes_dialogue_starts_whose_picture_exceeds_segment()
     )
 
 
-def test_dialogue_constraints_reject_anchor_that_starves_same_group_edges() -> None:
+def test_dialogue_constraints_leave_group_partition_choice_to_backend() -> None:
     video_description = _video_description()
     dialogues = _dialogues_by_segment(video_description)
     slots = [_slot(), _next_slot()]
@@ -438,8 +451,8 @@ def test_dialogue_constraints_reject_anchor_that_starves_same_group_edges() -> N
     # Anchor without making the remaining group impossible.
     assert constraints["slot_01"]["required_after_picture_ms"] == 4000
     assert constraints["slot_02"]["required_before_picture_ms"] == 4000
-    assert constraints["slot_01"]["allowed_segment_ids"] == []
-    assert constraints["slot_02"]["allowed_segment_ids"] == []
+    assert constraints["slot_01"]["allowed_segment_ids"] == ["segment_0001"]
+    assert constraints["slot_02"]["allowed_segment_ids"] == ["segment_0001"]
 
 
 def test_selection_rejects_endpoints_below_minimum_duration() -> None:
@@ -480,55 +493,7 @@ def test_dialogue_constraints_fit_remaining_output_timeline() -> None:
     assert constraints["slot_02"]["allowed_segment_ids"] == []
 
 
-def _interval(
-    anchor_id: str,
-    start: float,
-    end: float,
-) -> dict:
-    return {
-        "anchor_id": anchor_id,
-        "slot_id": f"slot_{anchor_id}",
-        "dialogue_ids": [anchor_id],
-        "source_window": format_range(start, end),
-        "output_audio_start_sec": start,
-        "output_audio_end_sec": end,
-    }
-
-
-def test_anchor_sequence_rejects_overlapping_picture_windows() -> None:
-    first = _interval("first", 0.0, 5.0)
-    first["output_audio_end_sec"] = 4.0
-    second = _interval("second", 4.0, 8.0)
-    second["output_audio_start_sec"] = 5.0
-    second["output_audio_end_sec"] = 9.0
-    with pytest.raises(ValueError, match="strictly increasing"):
-        _validate_anchor_sequence(
-            [
-                first,
-                second,
-            ]
-        )
-
-
-def test_anchor_sequence_reports_both_overlapping_audio_ranges() -> None:
-    first = _interval("first", 10.0, 14.0)
-    first["output_audio_start_sec"] = 4.0
-    first["output_audio_end_sec"] = 9.5
-    second = _interval("second", 20.0, 24.0)
-    second["output_audio_start_sec"] = 8.0
-    second["output_audio_end_sec"] = 12.0
-
-    with pytest.raises(ValueError) as raised:
-        _validate_anchor_sequence([first, second])
-
-    message = str(raised.value)
-    assert "slot_first" in message
-    assert "[4.000, 9.500)" in message
-    assert "slot_second" in message
-    assert "[8.000, 12.000)" in message
-
-
-def test_selection_rejects_new_anchor_overlapping_preserved_anchor() -> None:
+def test_selection_keeps_required_anchor_when_returned_anchors_overlap() -> None:
     video_description = _partition_video_description(end_sec=40.0)
     video_description["segments"][0]["shots"][0]["time_range"]["end_sec"] = 40.0
     video_description["segments"][0]["shots"][0]["dialogue"] = [
@@ -562,80 +527,20 @@ def test_selection_rejects_new_anchor_overlapping_preserved_anchor() -> None:
         first_dialogue_id="21",
         last_dialogue_id="21",
     )
-    with pytest.raises(ValueError, match="L-cut audio ranges overlap"):
-        _validate_selection(
-            {"anchors": [first, second]},
-            slots,
-            video_description,
-            dialogues,
-            _constraints(slots, video_description, dialogues),
-            _config(),
-            required_anchor_slot_ids={"slot_01"},
-        )
-
-
-def test_preserved_anchor_filters_conflicting_prompt_passages_and_maps() -> None:
-    constraints = {
-        "slot_02": {
-            "allowed_segment_ids": ["segment_0001"],
-            "allowed_last_dialogue_ids_by_segment_and_first": {
-                "segment_0001": {
-                    "dialogue_10": ["dialogue_10", "dialogue_11"]
-                },
-            },
-            "output_audio_end_sec_by_segment_and_first_and_last": {
-                "segment_0001": {
-                    "dialogue_10": {
-                        "dialogue_10": 3.0,
-                        "dialogue_11": 7.0,
-                    }
-                }
-            },
-            "output_audio_start_sec": 0.0,
-        }
-    }
-    preserved = [
-        {
-            "slot_id": "slot_01",
-            "output_audio_start_sec": 4.0,
-            "output_audio_end_sec": 5.0,
-        }
-    ]
-
-    filtered, exclusions = _filter_constraints_against_preserved(
-        constraints,
-        preserved,
+    selected = _validate_selection(
+        {"anchors": [first, second]},
+        slots,
+        video_description,
+        dialogues,
+        _constraints(slots, video_description, dialogues),
+        _config(),
+        required_anchor_slot_ids={"slot_01"},
     )
 
-    assert filtered["slot_02"]["allowed_segment_ids"] == ["segment_0001"]
-    assert filtered["slot_02"][
-        "allowed_last_dialogue_ids_by_segment_and_first"
-    ] == {"segment_0001": {"dialogue_10": ["dialogue_10"]}}
-    assert filtered["slot_02"][
-        "output_audio_end_sec_by_segment_and_first_and_last"
-    ] == {"segment_0001": {"dialogue_10": {"dialogue_10": 3.0}}}
-    assert "allowed_passages" not in filtered["slot_02"]
-    assert exclusions == [
-        {
-            "reason_code": "preserved_anchor_audio_overlap",
-            "slot_id": "slot_02",
-            "source_segment_id": "segment_0001",
-            "first_dialogue_id": "dialogue_10",
-            "last_dialogue_id": "dialogue_11",
-            "output_audio_start_sec": 0.0,
-            "output_audio_end_sec": 7.0,
-            "conflicts_with_preserved_anchors": [
-                {
-                    "slot_id": "slot_01",
-                    "output_audio_start_sec": 4.0,
-                    "output_audio_end_sec": 5.0,
-                }
-            ],
-        }
-    ]
+    assert [item["slot_id"] for item in selected] == ["slot_01"]
 
 
-def test_story_selection_retries_whole_response_when_anchors_conflict(
+def test_story_selection_resolves_anchor_conflict_without_another_model_call(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -672,12 +577,7 @@ def test_story_selection_retries_whole_response_when_anchors_conflict(
         last_dialogue_id="21",
     )
 
-    responses = iter(
-        [
-            {"anchors": [first, second]},
-            {"anchors": [second]},
-        ]
-    )
+    responses = iter([{"anchors": [first, second]}])
     prompts: list[str] = []
 
     def generate(prompt, *_args, **_kwargs):
@@ -713,8 +613,7 @@ def test_story_selection_retries_whole_response_when_anchors_conflict(
         context,
     )
 
-    assert len(prompts) == 2
-    assert "L-cut audio ranges overlap" in prompts[1]
+    assert len(prompts) == 1
     assert [
         slot["slot_id"] for slot in result if slot.get("dialogue_anchor") is not None
     ] == ["slot_02"]
@@ -894,7 +793,7 @@ def _with_picture_anchor(slot: dict, start_sec: float) -> dict:
     return item
 
 
-def test_selection_rejects_conflicting_anchors_instead_of_balancing_a_subset() -> None:
+def test_selection_keeps_the_largest_legal_subset_of_conflicting_anchors() -> None:
     video_description = _partition_video_description()
     video_description["segments"][0]["shots"][0]["dialogue"] = [
         {
@@ -914,28 +813,30 @@ def test_selection_rejects_conflicting_anchors_instead_of_balancing_a_subset() -
     dialogues = _dialogues_by_segment(video_description)
     constraints = _constraints(slots, video_description, dialogues)
 
-    with pytest.raises(ValueError, match="L-cut audio ranges overlap"):
-        _validate_selection(
-            {
-                "anchors": [
-                    _anchor(
-                        slot_id="slot_02",
-                        first_dialogue_id="20",
-                        last_dialogue_id="20",
-                    ),
-                    _anchor(
-                        slot_id="slot_03",
-                        first_dialogue_id="21",
-                        last_dialogue_id="21",
-                    ),
-                ]
-            },
-            slots,
-            video_description,
-            dialogues,
-            constraints,
-            _config(),
-        )
+    selected = _validate_selection(
+        {
+            "anchors": [
+                _anchor(
+                    slot_id="slot_02",
+                    first_dialogue_id="20",
+                    last_dialogue_id="20",
+                ),
+                _anchor(
+                    slot_id="slot_03",
+                    first_dialogue_id="21",
+                    last_dialogue_id="21",
+                ),
+            ]
+        },
+        slots,
+        video_description,
+        dialogues,
+        constraints,
+        _config(),
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["slot_id"] in {"slot_02", "slot_03"}
 
 
 def test_single_anchor_splits_one_group_into_before_and_after_regions() -> None:
@@ -1065,7 +966,7 @@ def test_anchor_partition_capacity_failure_reports_group_and_milliseconds() -> N
         )
 
 
-def test_selection_rejects_anchor_pair_that_starves_middle_group() -> None:
+def test_selection_keeps_legal_subset_when_anchor_pair_starves_middle_group() -> None:
     video_description = _partition_video_description()
     video_description["segments"][0]["shots"][0]["dialogue"] = [
         {
@@ -1101,33 +1002,31 @@ def test_selection_rejects_anchor_pair_that_starves_middle_group() -> None:
         },
     ]
 
-    with pytest.raises(ValueError, match="infeasible child group") as raised:
-        _validate_selection(
-            {"anchors": anchors},
-            slots,
-            video_description,
-            dialogues,
-            constraints,
-            _config(),
-        )
-
-    assert "failed_group_id=group_001_02" in str(raised.value)
+    selected = _validate_selection(
+        {"anchors": anchors},
+        slots,
+        video_description,
+        dialogues,
+        constraints,
+        _config(),
+    )
+    assert len(selected) == 1
 
 
-def test_business_validation_rejects_two_anchors_for_one_slot() -> None:
+def test_business_validation_keeps_one_anchor_for_one_slot() -> None:
     video_description = _video_description()
     dialogues = _dialogues_by_segment(video_description)
     slots = [_slot()]
 
-    with pytest.raises(ValueError, match="at most once"):
-        _validate_selection(
-            {"anchors": [_anchor(), _anchor()]},
-            slots,
-            video_description,
-            dialogues,
-            _constraints(slots, video_description, dialogues),
-            _config(),
-        )
+    selected = _validate_selection(
+        {"anchors": [_anchor(), _anchor()]},
+        slots,
+        video_description,
+        dialogues,
+        _constraints(slots, video_description, dialogues),
+        _config(),
+    )
+    assert len(selected) == 1
 
 
 def test_story_selection_writes_anchor_and_planning_artifacts() -> None:
@@ -1263,7 +1162,7 @@ def test_anchor_outside_guidance_range_warns_without_retry(
     }
 
 
-def test_story_selection_rejects_empty_anchor_response() -> None:
+def test_story_selection_accepts_empty_anchor_response() -> None:
     class StubContext:
         def __init__(self) -> None:
             self.artifacts = {
@@ -1283,13 +1182,15 @@ def test_story_selection_rejects_empty_anchor_response() -> None:
     context = StubContext()
     slots = [_partition_slot(index) for index in range(1, 4)]
 
-    with pytest.raises(ValueError, match="At least one dialogue anchor"):
-        select_dialogue_anchors(
-            slots,
-            LLMConfig(model="test", base_url="", api_key="test"),
-            _config(),
-            context,  # type: ignore[arg-type]
-        )
+    result = select_dialogue_anchors(
+        slots,
+        LLMConfig(model="test", base_url="", api_key="test"),
+        _config(),
+        context,  # type: ignore[arg-type]
+    )
+
+    assert all("dialogue_anchor" not in slot for slot in result)
+    assert context.artifacts["dialogue_anchors"] == []
 
 
 def _two_group_story_fixture() -> tuple[dict, list[dict], list[dict]]:
@@ -1371,7 +1272,7 @@ def _two_group_story_fixture() -> tuple[dict, list[dict], list[dict]]:
     return video_description, slots, story_slots
 
 
-def test_incremental_story_only_prompts_changed_group_and_keeps_other_anchor() -> None:
+def test_incremental_story_preserves_all_still_legal_anchors_without_a_model_call() -> None:
     video_description, arrangement_slots, previous_slots = _two_group_story_fixture()
     repaired_slots = [dict(slot) for slot in arrangement_slots]
     repaired_slots[4]["content_description"] = "A newly planned visible beat."
@@ -1389,21 +1290,8 @@ def test_incremental_story_only_prompts_changed_group_and_keeps_other_anchor() -
         def set_artifact(self, key, value) -> None:
             self.artifacts[key] = value
 
-        def call_prompt(self, *, package, validate_business, **_kwargs):
-            schemas = package.response_contract.schema["properties"]["anchors"][
-                "items"
-            ]["oneOf"]
-            assert {
-                schema["properties"]["slot_id"]["const"] for schema in schemas
-            } <= {"slot_04", "slot_05", "slot_06"}
-            assert package.response_contract.schema["properties"]["anchors"][
-                "minItems"
-            ] == 0
-            assert "<preserved_anchors>" in package.user_prompt
-            assert '"slot_id": "slot_02"' in package.user_prompt
-            assert '"output_audio_start_sec": 2.0' in package.user_prompt
-            assert '"output_audio_end_sec": 3.6' in package.user_prompt
-            return validate_business({"anchors": []})
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("local Story refresh must not call a model")
 
     context = StubContext()
     config = SimpleNamespace(
@@ -1422,29 +1310,23 @@ def test_incremental_story_only_prompts_changed_group_and_keeps_other_anchor() -
         if slot["slot_id"] == "slot_02"
     )
     kept = next(slot for slot in result if slot["slot_id"] == "slot_02")
-    changed = next(slot for slot in result if slot["slot_id"] == "slot_05")
     assert kept["dialogue_anchor"] == previous_anchor
-    assert "dialogue_anchor" not in changed
     assert [item["slot_id"] for item in context.artifacts["dialogue_anchors"]] == [
-        "slot_02"
+        "slot_02",
+        "slot_05",
     ]
     assert {
         slot_id
         for group in context.artifacts["planning_groups"]
         for slot_id in group["slot_ids"]
-    } == {"slot_01", "slot_03", "slot_04", "slot_05", "slot_06"}
+    } == {"slot_01", "slot_03", "slot_04", "slot_06"}
 
 
-def test_incremental_story_retimes_preserved_anchor_after_earlier_group_shift() -> None:
+def test_incremental_story_rejects_an_anchor_invalidated_by_repair() -> None:
     video_description, arrangement_slots, previous_slots = _two_group_story_fixture()
     repaired_slots = [dict(slot) for slot in arrangement_slots]
-    repaired_slots[1]["content_description"] = "A newly planned earlier beat."
-    repaired_slots[2]["planned_duration_ms"] = 3000
-    repaired_slots[2]["planned_duration_sec"] = 3.0
-    repaired_slots[2]["output_end_sec"] = 7.0
-    for index, slot in enumerate(repaired_slots[3:], 3):
-        slot["output_start_sec"] = 7.0 + (index - 3) * 2.0
-        slot["output_end_sec"] = 9.0 + (index - 3) * 2.0
+    for slot in repaired_slots[3:]:
+        slot["source_segment_id"] = "segment_0001"
 
     class StubContext:
         def __init__(self) -> None:
@@ -1459,23 +1341,17 @@ def test_incremental_story_retimes_preserved_anchor_after_earlier_group_shift() 
         def set_artifact(self, key, value) -> None:
             self.artifacts[key] = value
 
-        def call_prompt(self, *, package, validate_business, **_kwargs):
-            assert '"slot_id": "slot_05"' in package.user_prompt
-            assert '"output_audio_start_sec": 9.0' in package.user_prompt
-            assert '"output_audio_end_sec": 10.6' in package.user_prompt
-            return validate_business({"anchors": []})
+        def call_prompt(self, **_kwargs):
+            raise AssertionError("local Story refresh must not call a model")
 
     context = StubContext()
     config = SimpleNamespace(
         llm=LLMConfig(model="test", base_url="", api_key="test"),
         planners=SimpleNamespace(dialogue_anchors=_config()),
     )
-    result = StoryEditorAgent(config, context).anchor_groups(
-        repaired_slots,
-        previous_slots=previous_slots,
-        replanned_slot_ids={"slot_01", "slot_02", "slot_03"},
-    )
-
-    kept = next(slot for slot in result if slot["slot_id"] == "slot_05")
-    assert kept["dialogue_anchor"]["output_audio_start_sec"] == 9.0
-    assert kept["dialogue_anchor"]["output_audio_end_sec"] == 10.6
+    with pytest.raises(ValueError, match="invalidated a preserved dialogue Anchor"):
+        StoryEditorAgent(config, context).anchor_groups(
+            repaired_slots,
+            previous_slots=previous_slots,
+            replanned_slot_ids={"slot_04", "slot_05", "slot_06"},
+        )

@@ -640,7 +640,7 @@ def test_run_snapshots_adapter_planning_options_separately_from_configuration(
     }
     assert submission.run.configuration["planners"]["aster_team"] == {
         "max_rounds": 3,
-        "max_local_replans_per_round": 2,
+        "max_local_replans": 2,
     }
     assert "managed_request" not in submission.run.configuration["planners"]
 

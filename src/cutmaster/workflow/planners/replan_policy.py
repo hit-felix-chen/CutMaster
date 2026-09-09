@@ -23,16 +23,22 @@ class ReplanDecision:
 
 @dataclass(slots=True)
 class ReplanState:
-    """Mutable retry state owned only by one Planners invocation."""
+    """Mutable retry state owned only by one Planners invocation.
+
+    ``local_attempt`` is the cumulative local-repair budget consumed by the
+    complete invocation.  A global Arrangement retry must not reset it and
+    multiply the local budget by the number of global attempts.
+    """
 
     scope: PlannersReplanScope | None = None
     local_attempt: int = 0
     reuse: dict[str, Any] | None = None
     pending: bool = False
 
-    def clear(self) -> None:
+    def clear_scope(self) -> None:
+        """Drop transient reuse state without restoring consumed budget."""
+
         self.scope = None
-        self.local_attempt = 0
         self.reuse = None
         self.pending = False
 
@@ -52,7 +58,7 @@ def decide_replan(
     candidate_failure: bool,
     has_failed_groups: bool,
 ) -> ReplanDecision:
-    """Keep Candidate repair local while its independent budget remains."""
+    """Keep Candidate repair local while the invocation-wide budget remains."""
 
     if (
         candidate_failure
@@ -66,7 +72,7 @@ def decide_replan(
         )
     return ReplanDecision(
         aster_attempt=aster_attempt + 1,
-        local_attempt=0,
+        local_attempt=local_attempt,
         scope=PlannersReplanScope.GLOBAL,
     )
 

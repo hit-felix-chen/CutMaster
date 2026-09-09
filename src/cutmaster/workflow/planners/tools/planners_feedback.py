@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -162,6 +163,169 @@ def build_stage_failure_diagnostics(
     return diagnostics
 
 
+def _merge_candidate_failure_evidence(
+    previous: dict[str, Any],
+    diagnostics: dict[str, Any],
+    failed_slots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain distinct failed windows and requirements as soft diagnostic evidence."""
+
+    by_slot_id = {
+        str(slot["slot_id"]): slot
+        for slot in failed_slots
+        if slot.get("slot_id")
+    }
+
+    def evidence_key(item: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                name: item.get(name)
+                for name in (
+                    "slot_ids",
+                    "source_segment_id",
+                    "reason_code",
+                    "timestamp",
+                    "planned_content_description",
+                    "required_visible_subjects",
+                    "planned_duration_ms",
+                )
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    evidence_by_key: dict[str, dict[str, Any]] = {}
+    for item in previous.get("candidate_failure_evidence") or []:
+        evidence_by_key[evidence_key(item)] = dict(item)
+    represented_groups: set[str] = set()
+
+    def visit(items: list[dict[str, Any]], inherited_group_id: str = "") -> None:
+        for item in items:
+            group_id = str(item.get("group_id") or inherited_group_id)
+            children = item.get("candidate_rejections")
+            if isinstance(children, list) and children:
+                visit(children, group_id)
+                continue
+            reason_code = str(item.get("reason_code") or "")
+            if not reason_code:
+                continue
+            slot_id = str(item.get("slot_id") or "")
+            if slot_id:
+                scoped_slots = (
+                    [by_slot_id[slot_id]] if slot_id in by_slot_id else []
+                )
+            else:
+                scoped_slots = [
+                    slot
+                    for slot in failed_slots
+                    if group_id and str(slot.get("group_id") or "") == group_id
+                ]
+            # candidate_rejections can also contain rejected alternatives from
+            # healthy groups. They must not contaminate a failed group's repair.
+            if not scoped_slots:
+                continue
+            represented_groups.update(
+                str(slot.get("group_id") or "") for slot in scoped_slots
+            )
+            slot_ids = tuple(sorted(str(slot["slot_id"]) for slot in scoped_slots))
+            source_segment_id = str(
+                item.get("source_segment_id")
+                or scoped_slots[0].get("source_segment_id")
+                or ""
+            )
+            compact: dict[str, Any] = {
+                "slot_ids": list(slot_ids),
+                "source_segment_id": source_segment_id,
+                "reason_code": reason_code,
+            }
+            if len(scoped_slots) == 1:
+                original_slot = scoped_slots[0]
+                if original_slot.get("content_description") is not None:
+                    compact["planned_content_description"] = str(
+                        original_slot["content_description"]
+                    )
+                if isinstance(original_slot.get("required_visible_subjects"), list):
+                    compact["required_visible_subjects"] = list(
+                        original_slot["required_visible_subjects"]
+                    )
+                if original_slot.get("planned_duration_ms") is not None:
+                    compact["planned_duration_ms"] = original_slot["planned_duration_ms"]
+            for name in (
+                "diagnosis",
+                "repair_requirement",
+                "timestamp",
+                "planned_content_description",
+                "candidate_description",
+                "visible_description",
+                "visual_evidence",
+                "planning_segment_id",
+                "diagnostic_source",
+            ):
+                if item.get(name) is not None:
+                    compact[name] = str(item[name])
+            for name in (
+                "kinetic_energy",
+                "static_threshold",
+                "protagonist_visibility_likert",
+                "protagonist_visibility_likert_threshold",
+                "planned_duration_ms",
+            ):
+                if name in item:
+                    compact[name] = item[name]
+            for name in (
+                "visible_subjects",
+                "required_visible_subjects",
+                "source_shot_ids",
+            ):
+                if isinstance(item.get(name), list):
+                    compact[name] = [str(value) for value in item[name]]
+            key = evidence_key(compact)
+            previous_item = evidence_by_key.pop(key, {})
+            compact["occurrences"] = int(previous_item.get("occurrences", 0)) + 1
+            evidence_by_key[key] = compact
+
+    rejections = diagnostics.get("candidate_rejections")
+    if isinstance(rejections, list) and rejections:
+        visit(rejections)
+    else:
+        for group_id, items in (diagnostics.get("group_failures") or {}).items():
+            visit(items, str(group_id))
+    empty_groups = {
+        str(group_id)
+        for group_id in diagnostics.get("semantic_zero_candidate_group_ids") or []
+    } - represented_groups
+    # A normally returned empty batch has no sampled visual evidence to invent.
+    # Preserve its original requirements so a changed contract can reconsider it.
+    for slot in failed_slots:
+        if str(slot.get("group_id") or "") not in empty_groups:
+            continue
+        visit(
+            [
+                {
+                    "group_id": str(slot.get("group_id") or ""),
+                    "slot_id": str(slot.get("slot_id") or ""),
+                    "reason_code": str(
+                        diagnostics.get("reason_code")
+                        or "candidate_trajectory_unavailable"
+                    ),
+                    "diagnosis": str(
+                        diagnostics.get("diagnosis")
+                        or "No complete trajectory was returned."
+                    ),
+                    "diagnostic_source": "empty_candidate_batch",
+                    **(
+                        {"repair_requirement": diagnostics["repair_requirement"]}
+                        if diagnostics.get("repair_requirement") is not None
+                        else {}
+                    ),
+                }
+            ]
+        )
+    # Keep repeated examples once across retries/checkpoints, without turning
+    # historical windows or requirements into permanent source exclusions.
+    return list(evidence_by_key.values())[-128:]
+
+
 def merge_planners_feedback(
     previous: dict[str, Any] | None,
     *,
@@ -169,9 +333,31 @@ def merge_planners_feedback(
     error: str,
     diagnostics: dict[str, Any],
     failed_slots: list[dict[str, Any]],
-    target_trajectories_per_group: int,
 ) -> dict[str, Any]:
     previous = previous or {}
+    compact_diagnostic_keys = {
+        "reason_code",
+        "diagnosis",
+        "repair_requirement",
+        "failure_stage",
+        "error_type",
+        "failed_group_ids",
+        "failed_parent_group_ids",
+        "failed_slot_ids",
+        "semantic_zero_candidate_group_ids",
+        "unavailable_source_segment_ids",
+        "valid_trajectory_counts",
+        "viable_trajectory_counts",
+        "shortages",
+        "aster_attempt",
+        "replan_scope",
+        "local_replan_attempt",
+    }
+    compact_diagnostics = {
+        key: value
+        for key, value in diagnostics.items()
+        if key in compact_diagnostic_keys
+    }
     accumulated: dict[str, dict[str, Any]] = {}
     unassigned: list[dict[str, Any]] = []
     for failed in [*(previous.get("failed_slots") or []), *failed_slots]:
@@ -181,26 +367,48 @@ def merge_planners_feedback(
         else:
             unassigned.append(failed)
 
-    failure_history = list(previous.get("failure_history") or [])
+    failure_history = list(previous.get("failure_history") or [])[-4:]
     failure_history.append(
         {
             "attempt": attempt,
             "error": error,
-            "diagnostics": diagnostics,
-            "failed_slots": failed_slots,
+            "failure_stage": diagnostics.get("failure_stage"),
+            "reason_code": diagnostics.get("reason_code"),
+            "failed_group_ids": list(
+                diagnostics.get("failed_group_ids") or []
+            ),
+            "failed_slot_ids": list(
+                diagnostics.get("failed_slot_ids") or []
+            ),
         }
+    )
+    unavailable_source_segment_ids = {
+        str(value)
+        for value in previous.get("unavailable_source_segment_ids") or []
+        if str(value)
+    }
+    unavailable_source_segment_ids.update(
+        str(value)
+        for value in diagnostics.get("unavailable_source_segment_ids") or []
+        if str(value)
     )
     return {
         "attempt": attempt,
         "error": error,
-        "diagnostics": diagnostics,
+        "diagnostics": compact_diagnostics,
         "reason_code": diagnostics.get("reason_code"),
         "diagnosis": diagnostics.get("diagnosis"),
         "repair_requirement": diagnostics.get("repair_requirement"),
         "failure_stage": diagnostics.get("failure_stage"),
-        "current_failed_slots": failed_slots,
         "failed_slots": [*accumulated.values(), *unassigned],
-        "target_trajectories_per_group": target_trajectories_per_group,
+        "candidate_failure_evidence": _merge_candidate_failure_evidence(
+            previous,
+            diagnostics,
+            failed_slots,
+        ),
+        "unavailable_source_segment_ids": sorted(
+            unavailable_source_segment_ids
+        ),
         "failure_history": failure_history,
         "instruction": str(
             diagnostics.get("repair_requirement")

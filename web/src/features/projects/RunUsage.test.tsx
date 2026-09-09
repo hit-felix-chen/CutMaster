@@ -153,7 +153,7 @@ describe('Run model usage projection', () => {
     expect(screen.getByLabelText('Story Editor')).toHaveTextContent('S')
     expect(screen.getAllByLabelText('Timeline Scout')).toHaveLength(1)
     expect(screen.getByLabelText('Edit Composer')).toHaveTextContent('E')
-    expect(screen.getByLabelText('Revision Editor')).toHaveTextContent('R')
+    expect(screen.getByLabelText('Revision Editor (legacy)')).toHaveTextContent('R')
     const taskSection = screen
       .getByRole('heading', { name: 'By ASTER task' })
       .closest('section')

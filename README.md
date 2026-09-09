@@ -29,13 +29,15 @@ CutMaster 将完整剪辑流程组织成一个 **MASTER** 团队：
 | **S** | **Story Editor**          | `workflow/planners/story_editor.py`          | 用关键原声锚定故事，并把同组普通 Slot 切分到锚点前后的子 Segment               |
 | **T** | **Timeline Scout**        | `workflow/planners/timeline_scout.py`        | 为每个 Slot Group 检索、验证不可拆分的完整候选轨迹                            |
 | **E** | **Edit Composer**         | `workflow/planners/edit_composer.py`         | 以完整轨迹为单位，用 Beam Search 组接满足时序的最终序列                        |
-| **R** | **Revision Editor**       | `workflow/planners/revision_editor.py`       | 在候选池内审片，并以整组轨迹为单位替换弱选择                                  |
+| **R** | **Renderer** | `workflow/renderer/renderer.py` | 按冻结的 RenderPlan 执行渲染，不再进行模型复核 |
 
 其中：
 
 ```text
 M       = Analyser
-ASTER   = Planners team
+A/S/T/E = Planners team
+R       = Renderer
+ASTER   = Planning + rendering
 M + ASTER = MASTER
 ```
 
@@ -43,7 +45,7 @@ CLI、FastAPI Web、Worker 与 Benchmark Adapter 是四个平级入口。CLI 和
 Benchmark 的同步完整流程调用 `CutMasterApplication.workflows`；Web 将 HTTP/SSE
 请求转换为 Application use case；Worker 执行 Application 已持久化的 durable Job。
 Application Layer 负责托管素材、项目、Run、Frozen Edit、Render Variant 与 Job
-生命周期，再由 `ASTERTeam` 统一编排五个剪辑智能体。智能体之间不直接互相调用，
+生命周期，再由 `ASTERTeam` 统一编排四个规划智能体；R · Renderer 由 Application 独立调度。智能体之间不直接互相调用，
 所有前向协作与反馈修复都由团队编排器管理。
 
 ## 架构
@@ -76,9 +78,8 @@ flowchart LR
     S --> T["T · Timeline Scout"]
     VM --> T
     T --> E["E · Edit Composer"]
-    E --> R["R · Revision Editor"]
-    R --> RP["RenderPlan"]
-    RP --> RD["Renderer"]
+    E --> RP["RenderPlan"]
+    RP --> RD["R · Renderer"]
     RD --> O["最终视频"]
 
     T -. "任一轮后整组 0 轨迹 / 定向修复" .-> A
@@ -151,8 +152,8 @@ Story Editor 从 Material Memory 中选择少量高价值原声台词，并将�
 如果锚点落在一个多 Slot 的组内，锚点 Slot 会退出普通检索；锚点固定画面前后
 连续的普通 Slot 分别形成子组，并绑定到锚点画面切出的子 Segment，例如
 `segment_0010_01`、`segment_0010_02`。每个子 Segment 也必须容纳其子组的总时长；
-放不下时会拒绝整次 Anchor 规划并重新选择，而不是删掉锚点继续。
-Story Editor 只会看到画面区间能够完整落在该 Slot 所属 Segment 内的台词组合。
+多个返回 Anchor 冲突或造成无解分区时，后端会保留数量最多的合法子集；没有强而合法的
+原声时允许不设 Anchor。Story Editor 选择连续台词端点，完整画面区间和分区容量由后端校验。
 
 普通片段的原片声音保持静音；仅选中的 Dialogue Anchor 会经过人声准备后与 BGM 混合，并在台词区间自动压低背景音乐。
 
@@ -163,14 +164,14 @@ Timeline Scout 以 Slot Group 为最小单位检索。一次候选轨迹必须�
 排列且互不重叠。任一片段没有通过时长、运动或 VLM 核验，整条轨迹都会被拒绝，
 不能把不同轨迹中的片段混在一起。
 
-每组最多检索 4 轮，依次为 1 轮初检、2 轮按失败信息修正、1 轮最终补充。
-`target_trajectories_per_group` 只是达到后提前停止的目标，不是成功门槛：任一轮结束后，
-如果某组仍为 0 条合法完整轨迹，会立即把该组诊断返回 Arrangement Architect 重新规划；
-已有至少 1 条但尚未达到目标数量的组才继续后续轮次。完成第 4 轮后，只要还有一条
-合法完整轨迹，就可以进入下一阶段。修复可以保留原 Segment
-并改正内容要求，也可以在顺序允许时更换 Segment。之后只对发生变化的完整组重新运行
-Story Editor 和 Timeline Scout；契约完全一致且仍合法的其他组会保留 Anchor 与候选，
-再进行一次全局校验。检索不会把单个 Slot 扩展到相邻 Segment。
+每组只发起一次批量检索，默认请求 3 条完整轨迹并逐条校验；允许少于 3 条或空数组，
+不会为凑数重试，任意一条通过即可进入下一阶段。模型、媒体或 VLM 执行异常直接上抛，
+缺帧不会被视为静态。正常返回空数组，或整批候选都被语义或视觉规则拒绝时，
+才把该组的具体拒绝证据立即交给 Arrangement Architect；
+该 Group 与 Segment 的失败绑定会被后端禁止重用。若整批所有候选的所有片段都为静态，
+该 Segment 会被标记为素材不可用。局部修复保留仍合法的旧 Anchor，确定性重建 Story
+分区，并只重新检索合同发生变化的完整组；其他组按精确合同复用候选。检索不会把单个
+Slot 扩展到相邻 Segment。
 
 ### 5. 高效的全局序列选择
 
@@ -186,12 +187,10 @@ Edit Composer 同时考虑：
 惰性计算，在保留全局组合空间的同时控制推理成本。默认评分由
 `0.60 × unary + 0.40 × pairwise` 组成。
 
-### 6. 候选约束下的最终修订
+### 6. 冻结方案与渲染
 
-Revision Editor 在已有候选池内审片，并以 Slot Group 的完整轨迹为单位替换弱选择。
-多 Slot 轨迹不能拆开，也不能绕过 Timeline Scout 临时生成未经验证的片段。Planners
-随后完成切点适配并生成精确到帧的 `RenderPlan`；Renderer 可以反复复用该计划
-生成纯 BGM 或带原声版本。
+Edit Composer 的选择直接编译为精确到帧的 `RenderPlan`，由 R · Renderer 渲染。
+不再执行自动 Revision Editor；前端的人工 Guided Revision 保持独立。
 
 ## Case Study：《教父》的权力交接
 
@@ -203,13 +202,13 @@ Revision Editor 在已有候选池内审片，并以 Slot Group 的完整轨迹�
   </a>
 </p>
 
-<p align="center"><em>从提示词和 Material Memory 出发，ASTER 团队将《教父》的权力交接叙事编排、锚定、检索、组接并修订为一条 60 秒时间线。点击图片可查看完整尺寸。</em></p>
+<p align="center"><em>从提示词和 Material Memory 出发，ASTER 团队将《教父》的权力交接叙事编排、锚定、检索、组接并渲染为一条 60 秒时间线。点击图片可查看完整尺寸。</em></p>
 
 - **Arrangement Architect** 将音乐结构映射为“权威建立—刺杀危机—迈克尔反击—失去与继承—权力巩固”五幕，把相邻 Slot 分组并为每组固定 Segment、主体和时长约束。
 - **Story Editor** 用具有叙事转折价值的原声台词固定关键情节，并用锚点画面把同组普通 Slot 切分到前后的子 Segment；长台词仍可通过 L-cut 跨越相邻画面 Slot。
 - **Timeline Scout** 为每个普通 Slot Group 验证多条完整轨迹；当任一片段的人物身份、视觉相关性或主体可见性不合格时，拒绝整条轨迹并重新检索。
 - **Edit Composer** 联合片段得分、轨迹内部和组间镜头兼容度，在候选图上搜索可延伸到结尾的全局最优时序路径。
-- **Revision Editor** 在已验证候选池内以整组轨迹为单位执行替换，最终交付保持原片时间顺序、叙事完整且与音乐节奏对齐的成片。
+- **Renderer** 按冻结方案执行视频和音频渲染，不改变候选选择。
 
 ## 快速开始
 
@@ -424,17 +423,15 @@ managed worker 共同使用的唯一非敏感配置文件；Settings 也会直�
 | `[planners.aster_team]`                     | ASTER Team                | 完整规划流程的最大轮数                                          |
 | `[planners.arrangement_architect]`          | Arrangement Architect     | 目标镜头长度与模型请求上限                                      |
 | `[planners.dialogue_anchors]`               | Story Editor              | 锚点数量、最短时长与模型请求上限                                |
-| `[planners.candidate_retrieval]`            | Timeline Scout            | `target_trajectories_per_group`、`max_rounds` 和视觉验证         |
+| `[planners.candidate_retrieval]`            | Timeline Scout            | 单批轨迹数量和视觉验证                                          |
 | `[planners.beam_search]`                    | Edit Composer             | Beam Search 宽度                                                |
-| `[planners.script_review]`                  | Revision Editor           | 候选约束下的复核轮数                                            |
 | `[planners.source_window_optimization]`     | Plan Compiler             | 源区间切点搜索                                                  |
 | `[renderer]`, `[renderer.dialogue_audio]` | Renderer                  | 画布、编码、人声分离和混音                                      |
 
 默认 LLM/VLM 请求超时为 `600` 秒，ASR 异步任务总等待时间为 `600` 秒。所有字段的用途和默认值均在 `config.toml` 中就地说明。
 
-默认每个 Slot Group 的完整轨迹早停目标
-`target_trajectories_per_group = 3`，最大检索轮数 `max_rounds = 4`。早停目标没有达到
-不会让任务失败；任一轮结束后仍为 0 条合法完整轨迹，会立即触发整组重规划。
+默认每个 Slot Group 单次请求最多 3 条完整轨迹。任意一条通过即接受该 Group；
+正常返回的整批候选全部被拒绝时，会立即触发整组重规划。
 
 模型单价统一使用“元/百万 token”。每次模型调用都会把当时的单价快照写入 usage artifact；因此修改配置只影响之后的新调用，不会用新价格重算历史费用。缓存命中输入、未缓存输入和输出分别计费，reasoning token 已包含在输出 token 中，不会重复计费。
 

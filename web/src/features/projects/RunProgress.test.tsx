@@ -238,7 +238,7 @@ describe('live ASTER execution progress', () => {
     expect(runRequests).toBe(2)
   })
 
-  it('renders planners as Running with the real A/S/T/E/R milestone and heartbeat', async () => {
+  it('renders planners as Running with the real A/S/T/E planning milestones and Renderer handoff and heartbeat', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -267,7 +267,8 @@ describe('live ASTER execution progress', () => {
     expect(screen.getByText('Story Editor')).toBeVisible()
     expect(screen.getByText('Timeline Scout')).toBeVisible()
     expect(screen.getByText('Edit Composer')).toBeVisible()
-    expect(screen.getByText('Revision Editor')).toBeVisible()
+    expect(screen.queryByText('Revision Editor')).not.toBeInTheDocument()
+    expect(screen.getByText(/R · Renderer renders/)).toBeVisible()
     expect(screen.getByText(/Heartbeat/)).toBeVisible()
   })
 
@@ -277,7 +278,7 @@ describe('live ASTER execution progress', () => {
     expect(screen.getByText('ASTER planning is complete')).toBeVisible()
     expect(
       screen.getByText(
-        'All five ASTER agents have finished and the initial Frozen Edit is ready.',
+        'A/S/T/E planning is complete and the initial Frozen Edit is ready; R · Renderer executes rendering separately.',
       ),
     ).toBeVisible()
     expect(

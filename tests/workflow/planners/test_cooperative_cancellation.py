@@ -117,7 +117,7 @@ def _request(tmp_path: Path) -> PlannersRequest:
 
 @pytest.mark.parametrize(
     "cancel_stage",
-    ["arrange", "anchor_story", "scout", "compose", "revise"],
+    ["arrange", "anchor_story", "scout", "compose", "build_script"],
 )
 def test_aster_checks_cancellation_after_each_agent_boundary(
     tmp_path: Path,
@@ -160,7 +160,7 @@ def test_aster_checks_cancellation_after_each_agent_boundary(
             return [], {}, {}
 
         def build_script(self, *_args):
-            calls.append("build_script")
+            self._stage("build_script")
             return []
 
         def revise(self, _slots, _pool, script, _scores):

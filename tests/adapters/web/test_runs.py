@@ -707,8 +707,8 @@ def test_aster_progress_milestones_survive_plain_heartbeats(
     assert claimed is not None
     reporter = ASTERJobProgressReporter(application, submission.job.job_id)
 
-    reporter.report(ProgressUpdate(0, 5, "arrangement_architect", "agent"))
-    reporter.report(ProgressUpdate(2, 5, "timeline_scout", "agent"))
+    reporter.report(ProgressUpdate(0, 4, "arrangement_architect", "agent"))
+    reporter.report(ProgressUpdate(2, 4, "timeline_scout", "agent"))
     before = application.jobs.get_job(submission.job.job_id)
 
     application.jobs.heartbeat(HeartbeatJobCommand(submission.job.job_id))
@@ -721,7 +721,6 @@ def test_aster_progress_milestones_survive_plain_heartbeats(
         "complete",
         "complete",
         "running",
-        "queued",
         "queued",
     ]
 

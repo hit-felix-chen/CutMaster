@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -32,6 +31,7 @@ from cutmaster.workflow.prompting.failure_catalog import (
 from cutmaster.workflow.prompting.planners import (
     CandidateRetrievalDetails,
     CandidateVisualScoringDetails,
+    candidate_trajectory_contract,
 )
 from cutmaster.workflow.shared.execution_context import WorkflowContext
 from cutmaster.workflow.shared.timecode import format_range, parse_range
@@ -42,10 +42,12 @@ def _seconds_to_ms(value: Any) -> int:
 
 
 def _bounded_score(value: Any, field: str) -> float:
+    # The shared trajectory schema already validates numeric types and bounds.
+    # Reject non-standard JSON NaN values that schema range comparisons miss.
     score = float(value)
     if not math.isfinite(score):
         raise ValueError(f"{field} must be finite")
-    return max(0.0, min(1.0, score))
+    return score
 
 
 def _range_ms(timestamp: str) -> tuple[int, int]:
@@ -112,15 +114,65 @@ def _normalize_candidate_ranges(
     return normalized
 
 
-def _trajectory_signature(items: list[dict[str, Any]]) -> str:
-    return json.dumps(
-        [
-            [str(item["slot_id"]), str(item["timestamp"])]
-            for item in items
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
+def _trajectory_batch_size(
+    slots: list[dict[str, Any]],
+    planning_segment: dict[str, Any],
+    target: int,
+) -> int:
+    durations = [int(slot["planned_duration_ms"]) for slot in slots]
+    segment_duration_ms = int(planning_segment["end_ms"]) - int(
+        planning_segment["start_ms"]
     )
+    slack_ms = max(0, segment_duration_ms - sum(durations))
+    distinct_window_stride_ms = max(durations)
+    conservative_layout_count = 1 + slack_ms // distinct_window_stride_ms
+    return max(1, min(target, conservative_layout_count))
+
+
+def _candidate_overlap_shot_ids(candidate: dict[str, Any]) -> set[str]:
+    raw_shot_ids = candidate.get("source_shot_ids")
+    if not isinstance(raw_shot_ids, list):
+        return set()
+    return {
+        str(shot_id).strip()
+        for shot_id in raw_shot_ids
+        if str(shot_id).strip()
+    }
+
+
+def _candidate_duplicates_source_evidence(
+    candidate: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    candidate_shot_ids = _candidate_overlap_shot_ids(candidate)
+    existing_shot_ids = _candidate_overlap_shot_ids(existing)
+    if (
+        candidate_shot_ids
+        and existing_shot_ids
+        and not candidate_shot_ids.intersection(existing_shot_ids)
+    ):
+        return False
+    return _ranges_overlap(
+        _range_ms(str(candidate["timestamp"])),
+        _range_ms(str(existing["timestamp"])),
+    )
+
+
+def _source_shot_ids_for_range(
+    source_segment: dict[str, Any],
+    candidate_range: tuple[int, int],
+) -> list[str]:
+    return [
+        str(shot["shot_id"])
+        for shot in source_segment["shots"]
+        if _ranges_overlap(
+            candidate_range,
+            (
+                _seconds_to_ms(shot["time_range"]["start_sec"]),
+                _seconds_to_ms(shot["time_range"]["end_sec"]),
+            ),
+        )
+    ]
 
 
 def _viable_trajectory_counts(
@@ -459,142 +511,169 @@ def _source_segment_context(
 
 
 def _validate_trajectory_response(
-    parsed: dict[str, Any],
+    parsed: Any,
     *,
     group: dict[str, Any],
     slots: list[dict[str, Any]],
     planning_segment: dict[str, Any],
     source_segment: dict[str, Any],
-    round_index: int,
     requested_count: int,
-    excluded_ranges_by_slot: dict[str, list[str]],
-    known_signatures: set[str],
-) -> list[dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(parsed, dict):
+        raise ValueError("Trajectory response must be an object")
     raw_trajectories = parsed.get("trajectories")
-    if not isinstance(raw_trajectories, list) or len(raw_trajectories) != requested_count:
-        raise ValueError(f"Expected exactly {requested_count} complete trajectories")
+    if (
+        not isinstance(raw_trajectories, list)
+        or len(raw_trajectories) > requested_count
+    ):
+        raise ValueError(f"Expected at most {requested_count} complete trajectories")
     group_id = str(group["group_id"])
     planning_segment_id = str(group["planning_segment_id"])
     source_segment_id = str(group["source_segment_id"])
     expected_slot_ids = [str(slot["slot_id"]) for slot in slots]
     planning_start_ms = int(planning_segment["start_ms"])
     planning_end_ms = int(planning_segment["end_ms"])
-    excluded = {
-        slot_id: {_range_ms(timestamp) for timestamp in values}
-        for slot_id, values in excluded_ranges_by_slot.items()
-    }
+    trajectory_contract = candidate_trajectory_contract(slots)
     result: list[dict[str, Any]] = []
-    response_signatures: set[str] = set()
+    rejections: list[dict[str, Any]] = []
     for trajectory_index, raw_trajectory in enumerate(raw_trajectories, 1):
-        if not isinstance(raw_trajectory, dict):
-            raise ValueError("Trajectory must be an object")
-        raw_items = raw_trajectory.get("items")
-        if not isinstance(raw_items, list):
-            raise ValueError("Trajectory must contain an items array")
-        raw_slot_ids = [
-            str(item.get("slot_id") or "")
-            for item in raw_items
-            if isinstance(item, dict)
-        ]
-        if len(raw_slot_ids) != len(raw_items) or raw_slot_ids != expected_slot_ids:
-            raise ValueError(
-                f"Trajectory for {group_id} must cover Slots in exact group order"
-            )
-        trajectory_id = (
-            f"{group_id}_round_{round_index:02d}_"
-            f"trajectory_{trajectory_index:02d}"
-        )
-        proposed_starts: list[int] = []
-        planned_durations: list[int] = []
-        for slot, raw in zip(slots, raw_items, strict=True):
-            slot_id = str(slot["slot_id"])
-            source_start_ms = raw.get("source_start_ms")
-            if isinstance(source_start_ms, bool) or not isinstance(
-                source_start_ms,
-                int,
+        trajectory_id = f"{group_id}_trajectory_{trajectory_index:02d}"
+        try:
+            if not isinstance(raw_trajectory, dict):
+                raise ValueError("Trajectory must be an object")
+            raw_items = raw_trajectory.get("items")
+            if not isinstance(raw_items, list):
+                raise ValueError("Trajectory must contain an items array")
+            raw_slot_ids = [
+                str(item.get("slot_id") or "")
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+            if (
+                len(raw_slot_ids) != len(raw_items)
+                or raw_slot_ids != expected_slot_ids
             ):
                 raise ValueError(
-                    f"Candidate for {slot_id} has invalid source_start_ms"
+                    f"Trajectory for {group_id} must cover Slots in exact group order"
                 )
-            planned_duration_ms = slot.get("planned_duration_ms")
-            if (
-                isinstance(planned_duration_ms, bool)
-                or not isinstance(planned_duration_ms, int)
-                or planned_duration_ms <= 0
-            ):
-                raise ValueError(f"Slot {slot_id} has invalid planned_duration_ms")
-            proposed_starts.append(source_start_ms)
-            planned_durations.append(planned_duration_ms)
-        normalized_ranges = _normalize_candidate_ranges(
-            proposed_starts,
-            planned_durations,
-            planning_start_ms=planning_start_ms,
-            planning_end_ms=planning_end_ms,
-        )
+            trajectory_contract.validate_structure(raw_trajectory)
+            proposed_starts: list[int] = []
+            planned_durations: list[int] = []
+            for slot, raw in zip(slots, raw_items, strict=True):
+                slot_id = str(slot["slot_id"])
+                source_start_ms = raw.get("source_start_ms")
+                if isinstance(source_start_ms, bool) or not isinstance(
+                    source_start_ms,
+                    int,
+                ):
+                    raise ValueError(
+                        f"Candidate for {slot_id} has invalid source_start_ms"
+                    )
+                planned_duration_ms = slot.get("planned_duration_ms")
+                if (
+                    isinstance(planned_duration_ms, bool)
+                    or not isinstance(planned_duration_ms, int)
+                    or planned_duration_ms <= 0
+                ):
+                    raise ValueError(
+                        f"Slot {slot_id} has invalid planned_duration_ms"
+                    )
+                proposed_starts.append(source_start_ms)
+                planned_durations.append(planned_duration_ms)
+            normalized_ranges = _normalize_candidate_ranges(
+                proposed_starts,
+                planned_durations,
+                planning_start_ms=planning_start_ms,
+                planning_end_ms=planning_end_ms,
+            )
 
-        items: list[dict[str, Any]] = []
-        for slot, raw, candidate_range in zip(
-            slots,
-            raw_items,
-            normalized_ranges,
-            strict=True,
-        ):
-            slot_id = str(slot["slot_id"])
-            start_ms, end_ms = candidate_range
-            if (start_ms, end_ms) in excluded.get(slot_id, set()):
-                raise ValueError(f"Candidate range for {slot_id} was already used")
-            source_shot_ids = [
-                str(shot["shot_id"])
-                for shot in source_segment["shots"]
-                if _ranges_overlap(
+            items: list[dict[str, Any]] = []
+            for slot, raw, candidate_range in zip(
+                slots,
+                raw_items,
+                normalized_ranges,
+                strict=True,
+            ):
+                slot_id = str(slot["slot_id"])
+                start_ms, end_ms = candidate_range
+                source_shot_ids = _source_shot_ids_for_range(
+                    source_segment,
                     candidate_range,
-                    (
-                        _seconds_to_ms(shot["time_range"]["start_sec"]),
-                        _seconds_to_ms(shot["time_range"]["end_sec"]),
-                    ),
                 )
-            ]
-            if not source_shot_ids:
-                raise ValueError(f"Candidate for {slot_id} does not overlap a Shot")
-            description = str(raw.get("description") or "").strip()
-            if not description:
-                raise ValueError(f"Candidate for {slot_id} has no visual description")
-            candidate_id = f"{trajectory_id}_{slot_id}"
-            items.append(
+                if not source_shot_ids:
+                    raise ValueError(
+                        f"Candidate for {slot_id} does not overlap a Shot"
+                    )
+                description = raw["description"].strip()
+                if not description:
+                    raise ValueError(
+                        f"Candidate for {slot_id} has no visual description"
+                    )
+                candidate_id = f"{trajectory_id}_{slot_id}"
+                items.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "trajectory_id": trajectory_id,
+                        "group_id": group_id,
+                        "planning_segment_id": planning_segment_id,
+                        "planning_segment_start_ms": planning_start_ms,
+                        "planning_segment_end_ms": planning_end_ms,
+                        "slot_id": slot_id,
+                        "timestamp": format_range(
+                            start_ms / 1000.0,
+                            end_ms / 1000.0,
+                        ),
+                        "source_segment_id": source_segment_id,
+                        "source_shot_ids": source_shot_ids,
+                        "structured_context": description,
+                        "description": description,
+                        "semantic_relevance": _bounded_score(
+                            raw["semantic_relevance"],
+                            "semantic_relevance",
+                        ),
+                        "emotional_intensity": _bounded_score(
+                            raw["emotional_intensity"],
+                            "emotional_intensity",
+                        ),
+                        "salience": _bounded_score(
+                            raw["salience"],
+                            "salience",
+                        ),
+                    }
+                )
+            result.append(
                 {
-                    "candidate_id": candidate_id,
                     "trajectory_id": trajectory_id,
                     "group_id": group_id,
                     "planning_segment_id": planning_segment_id,
-                    "slot_id": slot_id,
-                    "timestamp": format_range(start_ms / 1000.0, end_ms / 1000.0),
                     "source_segment_id": source_segment_id,
-                    "source_shot_ids": source_shot_ids,
-                    "structured_context": description,
-                    "description": description,
-                    "semantic_relevance": _bounded_score(
-                        raw["semantic_relevance"], "semantic_relevance"
-                    ),
-                    "emotional_intensity": _bounded_score(
-                        raw["emotional_intensity"], "emotional_intensity"
-                    ),
-                    "salience": _bounded_score(raw["salience"], "salience"),
+                    "items": items,
                 }
             )
-        signature = _trajectory_signature(items)
-        if signature in known_signatures or signature in response_signatures:
-            raise ValueError(f"Trajectory for {group_id} duplicates a known trajectory")
-        response_signatures.add(signature)
-        result.append(
-            {
-                "trajectory_id": trajectory_id,
-                "group_id": group_id,
-                "planning_segment_id": planning_segment_id,
-                "source_segment_id": source_segment_id,
-                "items": items,
-            }
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            failure = build_prompt_failure(
+                PromptFailureCode.RESPONSE_VALIDATION_FAILED,
+                error_message=error_summary(exc),
+            )
+            rejections.append(
+                {
+                    **failure,
+                    "group_id": group_id,
+                    "trajectory_id": trajectory_id,
+                    "trajectory_index": trajectory_index,
+                    "error_type": type(exc).__name__,
+                }
+            )
+    if raw_trajectories and not result:
+        diagnoses = "; ".join(
+            str(rejection.get("diagnosis") or "unknown validation error")
+            for rejection in rejections
         )
-    return result
+        raise ValueError(
+            "Every trajectory failed response validation"
+            + (f": {diagnoses}" if diagnoses else "")
+        )
+    return {"trajectories": result, "rejections": rejections}
 
 
 def _validate_visual_grounding(
@@ -865,6 +944,10 @@ def _candidate_motion(
     end: float,
     fps: float,
 ) -> float:
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise ValueError("Motion sampling requires a finite positive source range")
+    if not math.isfinite(fps) or fps <= 0.0:
+        raise ValueError("Motion sampling requires a finite positive sample rate")
     values: list[float] = []
     step = 1.0 / max(fps, 0.1)
     sample_times: list[float] = []
@@ -872,14 +955,26 @@ def _candidate_motion(
     while next_sample < end:
         sample_times.append(next_sample)
         next_sample += step
+    if len(sample_times) < 2:
+        midpoint = start + (end - start) / 2.0
+        if not start < midpoint < end:
+            raise RuntimeError("Source range cannot provide two distinct motion samples")
+        sample_times.append(midpoint)
+    frames = media.sample_frames(sample_times)
+    if frames is None or len(frames) != len(sample_times):
+        raise RuntimeError(
+            "Motion sampling did not decode every requested frame"
+        )
     previous = None
-    for frame in media.sample_frames(sample_times):
+    for frame in frames:
+        if frame is None or getattr(frame, "size", 0) == 0:
+            raise RuntimeError("Motion sampling returned an invalid frame")
         gray = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
         if previous is not None:
             values.append(float(cv2.absdiff(gray, previous).mean()) / 255.0)
         previous = gray
     if not values:
-        return 0.0
+        raise RuntimeError("Motion sampling requires at least two valid frames")
     trimmed = list(values)
     if len(trimmed) >= 3:
         trimmed.remove(max(trimmed))
@@ -932,66 +1027,56 @@ def _validate_complete_trajectory(
     vlm_config: VLMConfig,
     retrieval_config: CandidateRetrievalConfig,
     context: WorkflowContext,
-    *,
-    round_index: int,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Accept or reject one trajectory as an indivisible unit."""
 
     items = [dict(item) for item in trajectory["items"]]
     rejected: list[dict[str, Any]] = []
-    try:
-        add_kinetic_features(
-            media,
-            items,
-            retrieval_config.motion_sample_fps,
-            retrieval_config.motion_workers,
-        )
-    except Exception as exc:
-        rejected.append(
-            {
-                "reason_code": "trajectory_motion_validation_failed",
-                "diagnosis": error_summary(exc),
-                "repair_requirement": "Retrieve a different complete trajectory.",
-            }
-        )
-        return None, rejected
+    add_kinetic_features(
+        media,
+        items,
+        retrieval_config.motion_sample_fps,
+        retrieval_config.motion_workers,
+    )
     threshold = retrieval_config.static_kinetic_energy_threshold
-    for item in items:
+    for slot, item in zip(slots, items, strict=True):
         if float(item["kinetic_energy"]) > threshold:
             continue
         rejected.append(
-            build_prompt_failure(
-                PromptFailureCode.VISUALLY_STATIC,
-                candidate_id=item["candidate_id"],
-                timestamp=item["timestamp"],
-                kinetic_energy=item["kinetic_energy"],
-                static_threshold=threshold,
-            )
+            {
+                **build_prompt_failure(
+                    PromptFailureCode.VISUALLY_STATIC,
+                    candidate_id=item["candidate_id"],
+                    timestamp=item["timestamp"],
+                    kinetic_energy=item["kinetic_energy"],
+                    static_threshold=threshold,
+                ),
+                "slot_id": str(slot["slot_id"]),
+                "group_id": str(trajectory["group_id"]),
+                "diagnostic_source": "local_motion",
+                "planned_content_description": slot["content_description"],
+                "required_visible_subjects": list(
+                    slot.get("required_visible_subjects") or []
+                ),
+                "source_segment_id": item["source_segment_id"],
+                "planning_segment_id": item.get("planning_segment_id"),
+                "source_shot_ids": list(item.get("source_shot_ids") or []),
+                "candidate_description": item.get(
+                    "structured_context", item["description"]
+                ),
+            }
         )
     if rejected:
         return None, rejected
-    try:
-        add_visual_features(
-            media,
-            slots,
-            items,
-            vlm_config,
-            context,
-            sample_frames=retrieval_config.visual_sample_frames,
-            operation=(
-                f"Visual trajectory validation round {round_index} "
-                f"group {trajectory['group_id']}"
-            ),
-        )
-    except Exception as exc:
-        rejected.append(
-            {
-                "reason_code": "trajectory_visual_validation_failed",
-                "diagnosis": error_summary(exc),
-                "repair_requirement": "Retrieve a different complete trajectory.",
-            }
-        )
-        return None, rejected
+    add_visual_features(
+        media,
+        slots,
+        items,
+        vlm_config,
+        context,
+        sample_frames=retrieval_config.visual_sample_frames,
+        operation=f"Visual trajectory validation group {trajectory['group_id']}",
+    )
     for slot, item in zip(slots, items, strict=True):
         required_subjects = list(slot.get("required_visible_subjects") or [])
         visibility = int(item["protagonist_visibility_likert"])
@@ -1001,13 +1086,32 @@ def _validate_complete_trajectory(
             < retrieval_config.protagonist_visibility_likert_threshold
         ):
             rejected.append(
-                build_prompt_failure(
-                    PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
-                    candidate_id=item["candidate_id"],
-                    timestamp=item["timestamp"],
-                    required_visible_subjects=required_subjects,
-                    visual_evidence=item["visual_evidence"],
-                )
+                {
+                    **build_prompt_failure(
+                        PromptFailureCode.REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED,
+                        candidate_id=item["candidate_id"],
+                        timestamp=item["timestamp"],
+                        required_visible_subjects=required_subjects,
+                        visual_evidence=item["visual_evidence"],
+                    ),
+                    "slot_id": str(slot["slot_id"]),
+                    "group_id": str(trajectory["group_id"]),
+                    "diagnostic_source": "visual_grounding",
+                    "planned_content_description": slot["content_description"],
+                    "required_visible_subjects": required_subjects,
+                    "source_segment_id": item["source_segment_id"],
+                    "planning_segment_id": item.get("planning_segment_id"),
+                    "source_shot_ids": list(item.get("source_shot_ids") or []),
+                    "candidate_description": item.get(
+                        "structured_context", item["description"]
+                    ),
+                    "visible_description": item["description"],
+                    "visible_subjects": list(item.get("visible_subjects") or []),
+                    "protagonist_visibility_likert": visibility,
+                    "protagonist_visibility_likert_threshold": (
+                        retrieval_config.protagonist_visibility_likert_threshold
+                    ),
+                }
             )
     if rejected:
         return None, rejected
@@ -1022,14 +1126,6 @@ def _validate_complete_trajectory(
     return accepted, []
 
 
-def _retrieval_round_phase(round_index: int, max_rounds: int) -> str:
-    if round_index == 1:
-        return "initial"
-    if round_index == max_rounds:
-        return "supplement"
-    return "correction"
-
-
 def retrieve_candidates(
     slots: list[dict[str, Any]],
     media: SegmentMediaReader,
@@ -1042,7 +1138,7 @@ def retrieve_candidates(
     target_group_ids: set[str] | None = None,
     seed_candidate_pool: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Retrieve complete group trajectories; the target count is only early-stop."""
+    """Retrieve and validate exactly one trajectory batch per targeted group."""
 
     raise_if_cancelled(cancellation_token)
     units = _planning_units(slots, context)
@@ -1085,19 +1181,13 @@ def retrieve_candidates(
     failures_by_group: dict[str, list[dict[str, Any]]] = {
         group_id: [] for group_id in retrieval_group_ids
     }
-    excluded_ranges: dict[str, dict[str, list[str]]] = {
-        str(unit["group"]["group_id"]): {
-            str(slot["slot_id"]): [] for slot in unit["slots"]
-        }
-        for unit in units
-        if str(unit["group"]["group_id"]) in retrieval_group_ids
-    }
-    rejected_signatures: dict[str, set[str]] = {
-        group_id: set() for group_id in retrieval_group_ids
-    }
     video_description = context.get_artifact("video_description")
     if not isinstance(video_description, dict):
         raise RuntimeError("Video description is required for candidate retrieval")
+    previous_feedback = context.get_artifact("planners_feedback") or {}
+    candidate_failure_evidence = (
+        previous_feedback.get("candidate_failure_evidence") or []
+    )
 
     unit_inputs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for unit in units:
@@ -1108,41 +1198,280 @@ def retrieve_candidates(
         )
 
     target = retrieval_config.target_trajectories_per_group
-    max_rounds = retrieval_config.max_rounds
-    rounds_completed = 0
+    target_units = [
+        unit
+        for unit in units
+        if str(unit["group"]["group_id"]) in retrieval_group_ids
+    ]
 
-    def retrieval_summary() -> dict[str, Any]:
-        counts = {group_id: len(values) for group_id, values in pool.items()}
-        viable_counts = _viable_trajectory_counts(slots, pool)
-        return {
-            "valid_trajectory_counts": counts,
-            "viable_trajectory_counts": viable_counts,
-            "target_trajectories_per_group": target,
-            "max_rounds": max_rounds,
-            "rounds_completed": rounds_completed,
-            "round_plan": [
-                _retrieval_round_phase(index, max_rounds)
-                for index in range(1, max_rounds + 1)
-            ],
-            "underfilled_group_ids": sorted(
-                group_id
-                for group_id, count in viable_counts.items()
-                if 0 < count < target
-            ),
-        }
-
-    def fail_if_any_group_is_empty() -> None:
-        summary = retrieval_summary()
-        failed_group_ids = sorted(
-            group_id
-            for group_id in retrieval_group_ids
-            if summary["valid_trajectory_counts"].get(group_id, 0) == 0
+    def retrieve_one(
+        unit: dict[str, Any],
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        raise_if_cancelled(cancellation_token)
+        group = unit["group"]
+        group_id = str(group["group_id"])
+        slot_ids = {str(slot["slot_id"]) for slot in unit["slots"]}
+        compact_segment, source_segment = unit_inputs[group_id]
+        requested_count = _trajectory_batch_size(
+            unit["slots"],
+            unit["planning_segment"],
+            target,
         )
-        if not failed_group_ids:
-            return
-        context.set_artifact("candidate_rejections", rejected)
-        context.set_artifact("candidate_pool", pool)
-        context.set_artifact("retrieval_summary", summary)
+        package = prompt_registry.build(
+            PromptStage.PLANNERS,
+            PromptTask.CANDIDATE_RETRIEVAL,
+            CandidateRetrievalDetails(
+                operation=f"Candidate trajectory retrieval group {group_id}",
+                trajectories_per_group=requested_count,
+                group=group,
+                slots=unit["slots"],
+                planning_segment=compact_segment,
+                rejection_feedback=[
+                    dict(evidence)
+                    for evidence in candidate_failure_evidence
+                    if slot_ids.intersection(
+                        str(value) for value in evidence.get("slot_ids") or []
+                    )
+                ],
+            ),
+        )
+        response_result = context.call_prompt(
+            package=package,
+            config=config,
+            validate_business=lambda parsed: _validate_trajectory_response(
+                parsed,
+                group=group,
+                slots=unit["slots"],
+                planning_segment=unit["planning_segment"],
+                source_segment=source_segment,
+                requested_count=requested_count,
+            ),
+        )
+        raise_if_cancelled(cancellation_token)
+        return (
+            group_id,
+            response_result["trajectories"],
+            response_result["rejections"],
+        )
+
+    retrieved: list[
+        tuple[str, list[dict[str, Any]], list[dict[str, Any]]]
+    ] = []
+    if target_units:
+        workers = max(1, min(config.max_concurrency, len(target_units)))
+        log_event(
+            "INFO",
+            "aster.timeline",
+            "stage.progress",
+            "Group trajectory retrieval batch started",
+            groups=len(target_units),
+            workers=workers,
+            target_trajectories_per_group=target,
+        )
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="trajectory-llm",
+        ) as executor:
+            retrieved = list(executor.map(retrieve_one, target_units))
+        raise_if_cancelled(cancellation_token)
+
+    units_by_group_id = {
+        str(unit["group"]["group_id"]): unit for unit in target_units
+    }
+    for group_id, _trajectories, response_rejections in retrieved:
+        rejected.extend(response_rejections)
+        failures_by_group[group_id].extend(response_rejections)
+        for rejection in response_rejections:
+            log_event(
+                "WARNING",
+                "aster.timeline",
+                "validation.reject",
+                "One trajectory response item failed validation",
+                **rejection,
+            )
+
+    def duplicate_failures(
+        trajectory: dict[str, Any],
+        accepted_source_evidence: dict[str, list[dict[str, Any]]],
+        unit: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        slots_by_id = {
+            str(slot["slot_id"]): slot for slot in unit["slots"]
+        }
+        failures: list[dict[str, Any]] = []
+        for item in trajectory["items"]:
+            slot_id = str(item["slot_id"])
+            conflicting = next(
+                (
+                    previous
+                    for previous in accepted_source_evidence[slot_id]
+                    if _candidate_duplicates_source_evidence(item, previous)
+                ),
+                None,
+            )
+            if conflicting is None:
+                continue
+            failure = build_prompt_failure(
+                PromptFailureCode.DUPLICATE_CANDIDATE_RANGE,
+                candidate_id=item["candidate_id"],
+                timestamp=item["timestamp"],
+                slot_id=slot_id,
+            )
+            failure.update(
+                {
+                    "slot_id": slot_id,
+                    "group_id": str(trajectory["group_id"]),
+                    "diagnostic_source": "source_evidence_diversity",
+                    "planned_content_description": slots_by_id[slot_id][
+                        "content_description"
+                    ],
+                    "required_visible_subjects": list(
+                        slots_by_id[slot_id].get("required_visible_subjects") or []
+                    ),
+                    "source_segment_id": item["source_segment_id"],
+                    "planning_segment_id": item.get("planning_segment_id"),
+                    "source_shot_ids": list(item.get("source_shot_ids") or []),
+                    "candidate_description": item.get(
+                        "structured_context", item["description"]
+                    ),
+                    "conflicting_candidate_id": conflicting["candidate_id"],
+                    "conflicting_timestamp": conflicting["timestamp"],
+                }
+            )
+            failures.append(failure)
+        return failures
+
+    def validate_group(
+        retrieval: tuple[str, list[dict[str, Any]], list[dict[str, Any]]],
+    ) -> tuple[
+        str,
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        bool,
+    ]:
+        group_id, trajectories, response_rejections = retrieval
+        unit = units_by_group_id[group_id]
+        accepted_trajectories: list[dict[str, Any]] = []
+        trajectory_rejections: list[dict[str, Any]] = []
+        accepted_source_evidence = {
+            str(slot["slot_id"]): [] for slot in unit["slots"]
+        }
+        all_items_static = not response_rejections and bool(trajectories)
+        for trajectory in trajectories:
+            raise_if_cancelled(cancellation_token)
+            item_failures = duplicate_failures(
+                trajectory,
+                accepted_source_evidence,
+                unit,
+            )
+            accepted: dict[str, Any] | None = None
+            if not item_failures:
+                accepted, item_failures = _validate_complete_trajectory(
+                    trajectory,
+                    unit["slots"],
+                    media,
+                    vlm_config,
+                    retrieval_config,
+                    context,
+                )
+            raise_if_cancelled(cancellation_token)
+            if accepted is not None:
+                accepted_trajectories.append(accepted)
+                for item in accepted["items"]:
+                    accepted_source_evidence[str(item["slot_id"])].append(item)
+                all_items_static = False
+                continue
+
+            expected_candidate_ids = {
+                str(item["candidate_id"]) for item in trajectory["items"]
+            }
+            static_candidate_ids = {
+                str(failure.get("candidate_id") or "")
+                for failure in item_failures
+                if failure.get("reason_code") == PromptFailureCode.VISUALLY_STATIC
+            }
+            if (
+                len(item_failures) != len(expected_candidate_ids)
+                or static_candidate_ids != expected_candidate_ids
+            ):
+                all_items_static = False
+            rejection = {
+                **build_prompt_failure(
+                    PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
+                ),
+                "group_id": group_id,
+                "trajectory_id": trajectory["trajectory_id"],
+                "candidate_rejections": item_failures,
+            }
+            trajectory_rejections.append(rejection)
+        return (
+            group_id,
+            accepted_trajectories,
+            trajectory_rejections,
+            all_items_static,
+        )
+
+    validated_groups: list[
+        tuple[str, list[dict[str, Any]], list[dict[str, Any]], bool]
+    ] = []
+    if retrieved:
+        validation_workers = max(
+            1,
+            min(vlm_config.max_concurrency, len(retrieved)),
+        )
+        with ThreadPoolExecutor(
+            max_workers=validation_workers,
+            thread_name_prefix="trajectory-vlm",
+        ) as executor:
+            validated_groups = list(executor.map(validate_group, retrieved))
+        raise_if_cancelled(cancellation_token)
+
+    unavailable_source_segment_ids: set[str] = set()
+    for (
+        group_id,
+        accepted_trajectories,
+        trajectory_rejections,
+        all_items_static,
+    ) in validated_groups:
+        pool[group_id] = accepted_trajectories
+        rejected.extend(trajectory_rejections)
+        failures_by_group[group_id].extend(trajectory_rejections)
+        if not accepted_trajectories and all_items_static:
+            unavailable_source_segment_ids.add(
+                str(units_by_group_id[group_id]["group"]["source_segment_id"])
+            )
+        for rejection in trajectory_rejections:
+            log_event(
+                "WARNING",
+                "aster.timeline",
+                "validation.reject",
+                "Complete trajectory rejected because one or more items failed",
+                **rejection,
+            )
+
+    context.set_artifact("candidate_rejections", rejected)
+    context.set_artifact("candidate_pool", pool)
+    counts = {group_id: len(values) for group_id, values in pool.items()}
+    summary = {
+        "valid_trajectory_counts": counts,
+        "viable_trajectory_counts": _viable_trajectory_counts(slots, pool),
+        "target_trajectories_per_group": target,
+        # All targeted groups are fetched concurrently in one workflow batch.
+        # ``len(retrieved)`` is the number of groups, not a retry/batch count.
+        "retrieval_batches_completed": 1 if retrieved else 0,
+        "underfilled_group_ids": sorted(
+            group_id
+            for group_id, count in counts.items()
+            if 0 < count < target
+        ),
+    }
+    context.set_artifact("retrieval_summary", summary)
+    failed_group_ids = sorted(
+        group_id
+        for group_id in retrieval_group_ids
+        if counts.get(group_id, 0) == 0
+    )
+    if failed_group_ids:
         failure = build_prompt_failure(
             PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES,
             shortages={group_id: target for group_id in failed_group_ids},
@@ -1151,6 +1480,10 @@ def retrieve_candidates(
             **failure,
             **summary,
             "failed_group_ids": failed_group_ids,
+            "semantic_zero_candidate_group_ids": failed_group_ids,
+            "unavailable_source_segment_ids": sorted(
+                unavailable_source_segment_ids
+            ),
             "group_failures": {
                 group_id: failures_by_group[group_id]
                 for group_id in failed_group_ids
@@ -1160,239 +1493,13 @@ def retrieve_candidates(
         context.set_artifact("retrieval_failure", diagnostics)
         raise GroupNoCandidateError(diagnostics)
 
-    for round_index in range(1, max_rounds + 1):
-        round_phase = _retrieval_round_phase(round_index, max_rounds)
-        raise_if_cancelled(cancellation_token)
-        viable_counts = _viable_trajectory_counts(slots, pool)
-        pending = [
-            unit
-            for unit in units
-            if str(unit["group"]["group_id"]) in retrieval_group_ids
-            and viable_counts[str(unit["group"]["group_id"])] < target
-        ]
-        if not pending:
-            break
-
-        def retrieve_one(
-            unit: dict[str, Any],
-        ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
-            raise_if_cancelled(cancellation_token)
-            group = unit["group"]
-            group_id = str(group["group_id"])
-            compact_segment, source_segment = unit_inputs[group_id]
-            confirmed = [
-                {
-                    "trajectory_id": trajectory["trajectory_id"],
-                    "items": [
-                        {
-                            "slot_id": item["slot_id"],
-                            "candidate_id": item["candidate_id"],
-                            "source_start_ms": _range_ms(
-                                str(item["timestamp"])
-                            )[0],
-                            "visible_description": item["description"],
-                            "visual_evidence": item["visual_evidence"],
-                        }
-                        for item in trajectory["items"]
-                    ],
-                }
-                for trajectory in pool[group_id]
-            ]
-            package = prompt_registry.build(
-                PromptStage.PLANNERS,
-                PromptTask.CANDIDATE_RETRIEVAL,
-                CandidateRetrievalDetails(
-                    operation=(
-                        f"Candidate trajectory retrieval {round_phase} round {round_index} "
-                        f"group {group_id}"
-                    ),
-                    round_index=round_index,
-                    round_phase=round_phase,
-                    # One per round keeps a unique single-path Segment feasible.
-                    trajectories_per_group=1,
-                    group=group,
-                    slots=unit["slots"],
-                    confirmed_trajectories=confirmed,
-                    excluded_ranges_by_slot=excluded_ranges[group_id],
-                    rejected_trajectory_signatures=sorted(
-                        rejected_signatures[group_id]
-                    ),
-                    rejection_feedback=list(failures_by_group[group_id]),
-                    planning_segment=compact_segment,
-                ),
-            )
-            known_signatures = {
-                _trajectory_signature(trajectory["items"])
-                for trajectory in pool[group_id]
-            } | rejected_signatures[group_id]
-            try:
-                trajectories = context.call_prompt(
-                    package=package,
-                    config=config,
-                    validate_business=lambda parsed: _validate_trajectory_response(
-                        parsed,
-                        group=group,
-                        slots=unit["slots"],
-                        planning_segment=unit["planning_segment"],
-                        source_segment=source_segment,
-                        round_index=round_index,
-                        requested_count=1,
-                        excluded_ranges_by_slot=excluded_ranges[group_id],
-                        known_signatures=known_signatures,
-                    ),
-                )
-            except Exception as exc:
-                failure = build_prompt_failure(
-                    PromptFailureCode.CANDIDATE_RETRIEVAL_FAILED,
-                    slot_id=unit["slots"][0]["slot_id"],
-                    error_message=error_summary(exc),
-                )
-                failure.update(
-                    {
-                        "group_id": group_id,
-                        "round": round_index,
-                        "round_phase": round_phase,
-                        "error_type": type(exc).__name__,
-                    }
-                )
-                log_event(
-                    "WARNING",
-                    "aster.timeline",
-                    "validation.reject",
-                    "Group trajectory retrieval failed; trying the next round",
-                    **failure,
-                )
-                return group_id, None, failure
-            raise_if_cancelled(cancellation_token)
-            return group_id, trajectories[0], None
-
-        workers = max(1, min(config.max_concurrency, len(pending)))
-        log_event(
-            "INFO",
-            "aster.timeline",
-            "stage.progress",
-            "Group trajectory retrieval round started",
-            round=round_index,
-            round_phase=round_phase,
-            groups=len(pending),
-            workers=workers,
-            target_trajectories_per_group=target,
-        )
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="trajectory-llm",
-        ) as executor:
-            retrieved = list(executor.map(retrieve_one, pending))
-        raise_if_cancelled(cancellation_token)
-        pending_by_id = {
-            str(unit["group"]["group_id"]): unit for unit in pending
-        }
-        for group_id, _trajectory, failure in retrieved:
-            if failure is not None:
-                failures_by_group[group_id].append(failure)
-
-        validation_jobs = [
-            (group_id, trajectory)
-            for group_id, trajectory, _failure in retrieved
-            if trajectory is not None
-        ]
-
-        def validate_one(
-            job: tuple[str, dict[str, Any]],
-        ) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]], str]:
-            raise_if_cancelled(cancellation_token)
-            group_id, trajectory = job
-            accepted, item_failures = _validate_complete_trajectory(
-                trajectory,
-                pending_by_id[group_id]["slots"],
-                media,
-                vlm_config,
-                retrieval_config,
-                context,
-                round_index=round_index,
-            )
-            raise_if_cancelled(cancellation_token)
-            return (
-                group_id,
-                accepted,
-                item_failures,
-                _trajectory_signature(trajectory["items"]),
-            )
-
-        validation_workers = max(
-            1,
-            min(vlm_config.max_concurrency, len(validation_jobs) or 1),
-        )
-        with ThreadPoolExecutor(
-            max_workers=validation_workers,
-            thread_name_prefix="trajectory-vlm",
-        ) as executor:
-            validated = list(executor.map(validate_one, validation_jobs))
-        raise_if_cancelled(cancellation_token)
-        for group_id, accepted, item_failures, signature in validated:
-            raw_trajectory = next(
-                trajectory
-                for candidate_group_id, trajectory in validation_jobs
-                if candidate_group_id == group_id
-                and _trajectory_signature(trajectory["items"]) == signature
-            )
-            for item in raw_trajectory["items"]:
-                excluded_ranges[group_id][str(item["slot_id"])].append(
-                    str(item["timestamp"])
-                )
-            if accepted is not None:
-                pool[group_id].append(accepted)
-                continue
-            rejected_signatures[group_id].add(signature)
-            rejection_failure = build_prompt_failure(
-                PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS,
-            )
-            rejection = {
-                **rejection_failure,
-                "group_id": group_id,
-                "trajectory_id": raw_trajectory["trajectory_id"],
-                "round": round_index,
-                "round_phase": round_phase,
-                "candidate_rejections": item_failures,
-            }
-            rejected.append(rejection)
-            failures_by_group[group_id].append(rejection)
-            log_event(
-                "WARNING",
-                "aster.timeline",
-                "validation.reject",
-                "Complete trajectory rejected because one or more items failed",
-                **rejection,
-            )
-        context.set_artifact("candidate_pool", pool)
-        log_event(
-            "INFO",
-            "aster.timeline",
-            "stage.progress",
-            "Group trajectory retrieval round completed",
-            round=round_index,
-            round_phase=round_phase,
-            valid_trajectory_counts={
-                group_id: len(trajectories)
-                for group_id, trajectories in pool.items()
-            },
-            viable_trajectory_counts=_viable_trajectory_counts(slots, pool),
-        )
-        rounds_completed = round_index
-        fail_if_any_group_is_empty()
-
-    context.set_artifact("candidate_rejections", rejected)
-    context.set_artifact("candidate_pool", pool)
-    summary = retrieval_summary()
-    context.set_artifact("retrieval_summary", summary)
-    if summary["underfilled_group_ids"]:
-        log_event(
-            "WARNING",
-            "aster.timeline",
-            "stage.complete",
-            "Trajectory target was not reached; continuing with valid complete paths",
-            **summary,
-        )
+    log_event(
+        "INFO",
+        "aster.timeline",
+        "stage.complete",
+        "Group trajectory retrieval batch completed",
+        **summary,
+    )
     return pool
 
 

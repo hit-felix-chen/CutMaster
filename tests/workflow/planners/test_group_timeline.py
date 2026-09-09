@@ -11,6 +11,7 @@ from cutmaster.configuration.schema import (
 )
 from cutmaster.workflow.planners.timeline_scout import (
     _planning_units,
+    _validate_complete_trajectory,
     _validate_trajectory_response,
     add_visual_features,
     retrieve_candidates,
@@ -109,7 +110,10 @@ class _Context:
         self.packages.append(package)
         if self.fail_after is not None and self.calls > self.fail_after:
             raise RuntimeError("no more distinct trajectories")
-        offset_ms = (self.calls - 1) * 4000
+        requested_count = package.response_contract.schema["properties"][
+            "trajectories"
+        ]["maxItems"]
+        round_offset_ms = (self.calls - 1) * 4000 * requested_count
         return validate_business(
             {
                 "trajectories": [
@@ -119,6 +123,10 @@ class _Context:
                             _raw_item("slot_02", offset_ms + 2000),
                         ]
                     }
+                    for offset_ms in (
+                        round_offset_ms + index * 4000
+                        for index in range(requested_count)
+                    )
                 ]
             }
         )
@@ -392,14 +400,11 @@ def test_trajectory_response_is_complete_and_app_identified() -> None:
         slots=slots,
         planning_segment=_planning_segments()[0],
         source_segment=_video_description()["segments"][0],
-        round_index=2,
         requested_count=1,
-        excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
-        known_signatures=set(),
     )
 
-    trajectory = result[0]
-    assert trajectory["trajectory_id"] == "group_01_round_02_trajectory_01"
+    trajectory = result["trajectories"][0]
+    assert trajectory["trajectory_id"] == "group_01_trajectory_01"
     assert [item["slot_id"] for item in trajectory["items"]] == [
         "slot_01",
         "slot_02",
@@ -432,10 +437,7 @@ def test_trajectory_response_rejects_broken_group_path() -> None:
             slots=_slots(),
             planning_segment=_planning_segments()[0],
             source_segment=_video_description()["segments"][0],
-            round_index=1,
             requested_count=1,
-            excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
-            known_signatures=set(),
         )
 
 
@@ -455,13 +457,12 @@ def test_trajectory_response_deterministically_repairs_invalid_starts() -> None:
         slots=_slots(),
         planning_segment=_planning_segments()[0],
         source_segment=_video_description()["segments"][0],
-        round_index=1,
         requested_count=1,
-        excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
-        known_signatures=set(),
     )
 
-    assert [item["timestamp"] for item in result[0]["items"]] == [
+    assert [
+        item["timestamp"] for item in result["trajectories"][0]["items"]
+    ] == [
         "00:00:16,000-00:00:18,000",
         "00:00:18,000-00:00:20,000",
     ]
@@ -478,17 +479,101 @@ def test_trajectory_response_rejects_nonfinite_scores() -> None:
             slots=_slots(),
             planning_segment=_planning_segments()[0],
             source_segment=_video_description()["segments"][0],
-            round_index=1,
             requested_count=1,
-            excluded_ranges_by_slot={"slot_01": [], "slot_02": []},
-            known_signatures=set(),
         )
 
 
-def _retrieval_config(*, target: int = 3, rounds: int = 4) -> CandidateRetrievalConfig:
+def test_motion_execution_error_is_not_a_semantic_candidate_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectory = _validate_trajectory_response(
+        {
+            "trajectories": [
+                {
+                    "items": [
+                        _raw_item("slot_01", 1000),
+                        _raw_item("slot_02", 3000),
+                    ]
+                }
+            ]
+        },
+        group=_planning_groups()[0],
+        slots=_slots(),
+        planning_segment=_planning_segments()[0],
+        source_segment=_video_description()["segments"][0],
+        requested_count=1,
+    )["trajectories"][0]
+
+    def fail_motion(*_args, **_kwargs):
+        raise RuntimeError("motion decoder unavailable")
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout.add_kinetic_features",
+        fail_motion,
+    )
+
+    with pytest.raises(RuntimeError, match="motion decoder unavailable"):
+        _validate_complete_trajectory(
+            trajectory,
+            _slots(),
+            object(),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(),
+            _Context(),
+        )
+
+
+def test_visual_execution_error_is_not_a_semantic_candidate_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectory = _validate_trajectory_response(
+        {
+            "trajectories": [
+                {
+                    "items": [
+                        _raw_item("slot_01", 1000),
+                        _raw_item("slot_02", 3000),
+                    ]
+                }
+            ]
+        },
+        group=_planning_groups()[0],
+        slots=_slots(),
+        planning_segment=_planning_segments()[0],
+        source_segment=_video_description()["segments"][0],
+        requested_count=1,
+    )["trajectories"][0]
+
+    def mark_moving(_media, candidates, *_args, **_kwargs):
+        for candidate in candidates:
+            candidate["kinetic_energy"] = 1.0
+
+    def fail_visual(*_args, **_kwargs):
+        raise RuntimeError("visual provider unavailable")
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout.add_kinetic_features",
+        mark_moving,
+    )
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout.add_visual_features",
+        fail_visual,
+    )
+
+    with pytest.raises(RuntimeError, match="visual provider unavailable"):
+        _validate_complete_trajectory(
+            trajectory,
+            _slots(),
+            object(),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(),
+            _Context(),
+        )
+
+
+def _retrieval_config(*, target: int = 3) -> CandidateRetrievalConfig:
     return CandidateRetrievalConfig(
         target_trajectories_per_group=target,
-        max_rounds=rounds,
         static_kinetic_energy_threshold=0.0,
     )
 
@@ -507,14 +592,455 @@ def _accept_trajectory(trajectory, *_args, **_kwargs):
     return accepted, []
 
 
-def test_underfilled_nonempty_group_continues(
+def test_semantic_item_rejection_preserves_precise_slot_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = _Context()
-    context.fail_after = 1
+    trajectory = _validate_trajectory_response(
+        {
+            "trajectories": [
+                {
+                    "items": [
+                        _raw_item("slot_01", 1000),
+                        _raw_item("slot_02", 3000),
+                    ]
+                }
+            ]
+        },
+        group=_planning_groups()[0],
+        slots=_slots(),
+        planning_segment=_planning_segments()[0],
+        source_segment=_video_description()["segments"][0],
+        requested_count=1,
+    )["trajectories"][0]
+
+    def mark_one_static(_media, candidates, *_args, **_kwargs):
+        candidates[0]["kinetic_energy"] = 0.0
+        candidates[1]["kinetic_energy"] = 1.0
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout.add_kinetic_features",
+        mark_one_static,
+    )
+
+    accepted, failures = _validate_complete_trajectory(
+        trajectory,
+        _slots(),
+        object(),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        CandidateRetrievalConfig(static_kinetic_energy_threshold=0.1),
+        _Context(),
+    )
+
+    assert accepted is None
+    assert [failure["slot_id"] for failure in failures] == ["slot_01"]
+    assert failures[0]["planned_content_description"] == "First beat"
+    assert failures[0]["diagnostic_source"] == "local_motion"
+
+
+def test_one_retrieval_requests_target_batch_and_validates_each_trajectory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {
+                            "items": [
+                                _raw_item("slot_01", offset_ms),
+                                _raw_item("slot_02", offset_ms + 2000),
+                            ]
+                        }
+                        for offset_ms in (0, 4000, 8000)
+                    ]
+                }
+            )
+
+    validated_ids: list[str] = []
+
+    def validate(trajectory, *_args, **_kwargs):
+        validated_ids.append(trajectory["trajectory_id"])
+        if trajectory["trajectory_id"].endswith("trajectory_02"):
+            return None, [
+                {
+                    "candidate_id": trajectory["items"][0]["candidate_id"],
+                    "reason_code": "test_rejection",
+                }
+            ]
+        return _accept_trajectory(trajectory)
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        validate,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    assert context.calls == 1
+    trajectories_schema = context.packages[0].response_contract.schema[
+        "properties"
+    ]["trajectories"]
+    assert trajectories_schema["minItems"] == 0
+    assert trajectories_schema["maxItems"] == 3
+    assert sorted(validated_ids) == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_02",
+        "group_01_trajectory_03",
+    ]
+    assert [trajectory["trajectory_id"] for trajectory in pool["group_01"]] == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_03",
+    ]
+    rejections = context.artifacts["candidate_rejections"]
+    assert len(rejections) == 1
+    assert rejections[0]["trajectory_id"] == (
+        "group_01_trajectory_02"
+    )
+    assert rejections[0]["candidate_rejections"][0]["reason_code"] == (
+        "test_rejection"
+    )
+
+
+def test_overlapping_same_shot_trajectory_is_rejected_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {
+                            "items": [
+                                _raw_item("slot_01", offset_ms),
+                                _raw_item("slot_02", offset_ms + 2000),
+                            ]
+                        }
+                        for offset_ms in (0, 1000, 4000)
+                    ]
+                }
+            )
+
+    visually_validated_ids: list[str] = []
+
+    def validate(trajectory, *_args, **_kwargs):
+        visually_validated_ids.append(trajectory["trajectory_id"])
+        return _accept_trajectory(trajectory)
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        validate,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    assert visually_validated_ids == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_03",
+    ]
+    assert [trajectory["trajectory_id"] for trajectory in pool["group_01"]] == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_03",
+    ]
+    rejection = context.artifacts["candidate_rejections"][0]
+    assert rejection["trajectory_id"] == "group_01_trajectory_02"
+    assert {
+        failure["reason_code"]
+        for failure in rejection["candidate_rejections"]
+    } == {"duplicate_candidate_range"}
+
+
+def test_vlm_rejected_trajectory_does_not_claim_diversity_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {
+                            "items": [
+                                _raw_item("slot_01", offset_ms),
+                                _raw_item("slot_02", offset_ms + 2000),
+                            ]
+                        }
+                        for offset_ms in (0, 1000, 4000)
+                    ]
+                }
+            )
+
+    visually_validated_ids: list[str] = []
+
+    def reject_first(trajectory, *_args, **_kwargs):
+        visually_validated_ids.append(trajectory["trajectory_id"])
+        if trajectory["trajectory_id"].endswith("trajectory_01"):
+            return None, [{"reason_code": "test_vlm_rejection"}]
+        return _accept_trajectory(trajectory)
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        reject_first,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    assert visually_validated_ids == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_02",
+        "group_01_trajectory_03",
+    ]
+    assert [trajectory["trajectory_id"] for trajectory in pool["group_01"]] == [
+        "group_01_trajectory_02",
+        "group_01_trajectory_03",
+    ]
+    rejections = context.artifacts["candidate_rejections"]
+    assert len(rejections) == 1
+    assert rejections[0]["trajectory_id"].endswith("trajectory_01")
+
+
+def test_invalid_trajectory_does_not_discard_valid_batch_peers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {
+                            "items": [
+                                _raw_item("slot_01", 0),
+                                _raw_item("slot_02", 2000),
+                            ]
+                        },
+                        {"broken": "trajectory"},
+                        {
+                            "items": [
+                                _raw_item("slot_01", 4000),
+                                _raw_item("slot_02", 6000),
+                            ]
+                        },
+                    ]
+                }
+            )
+
+    visually_validated_ids: list[str] = []
+
+    def validate(trajectory, *_args, **_kwargs):
+        visually_validated_ids.append(trajectory["trajectory_id"])
+        return _accept_trajectory(trajectory)
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        validate,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    assert visually_validated_ids == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_03",
+    ]
+    assert [trajectory["trajectory_id"] for trajectory in pool["group_01"]] == [
+        "group_01_trajectory_01",
+        "group_01_trajectory_03",
+    ]
+    response_rejection = context.artifacts["candidate_rejections"][0]
+    assert response_rejection["trajectory_id"].endswith("trajectory_02")
+    assert response_rejection["reason_code"] == "response_validation_failed"
+    assert "Trajectory must contain an items array" in response_rejection[
+        "diagnosis"
+    ]
+
+
+def test_entire_malformed_batch_is_response_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {"broken": "trajectory"},
+                        {"broken": "trajectory"},
+                        {"broken": "trajectory"},
+                    ]
+                }
+            )
+
+    context = Context()
     monkeypatch.setattr(
         "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
         _accept_trajectory,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Every trajectory failed response validation",
+    ):
+        retrieve_candidates(
+            _slots(),
+            object(),
+            LLMConfig(model="test", base_url="", api_key="test"),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(target=3),
+            context,
+        )
+
+    assert context.calls == 1
+    assert "retrieval_failure" not in context.artifacts
+
+
+def test_exact_duplicate_batch_trajectories_skip_redundant_visual_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            trajectory = {
+                "items": [
+                    _raw_item("slot_01", 0),
+                    _raw_item("slot_02", 2000),
+                ]
+            }
+            return validate_business(
+                {"trajectories": [trajectory, trajectory, trajectory]}
+            )
+
+    visually_validated_ids: list[str] = []
+
+    def validate(trajectory, *_args, **_kwargs):
+        visually_validated_ids.append(trajectory["trajectory_id"])
+        return _accept_trajectory(trajectory)
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        validate,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    assert visually_validated_ids == [
+        "group_01_trajectory_01"
+    ]
+    assert len(pool["group_01"]) == 1
+    response_rejections = context.artifacts["candidate_rejections"]
+    assert [
+        rejection["trajectory_id"] for rejection in response_rejections
+    ] == [
+        "group_01_trajectory_02",
+        "group_01_trajectory_03",
+    ]
+    assert all(
+        rejection["reason_code"]
+        == "no_candidate_passed_visual_diagnostics"
+        for rejection in response_rejections
+    )
+    assert all(
+        {
+            failure["reason_code"]
+            for failure in rejection["candidate_rejections"]
+        }
+        == {"duplicate_candidate_range"}
+        for rejection in response_rejections
+    )
+
+
+def test_zero_slack_group_requests_its_single_distinct_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _Context()
+    context.artifacts["planning_segments"][0]["end_ms"] = 4000
+    context.artifacts["video_description"]["segments"][0]["time_range"][
+        "end_sec"
+    ] = 4.0
+    context.artifacts["video_description"]["segments"][0]["shots"][0][
+        "time_range"
+    ]["end_sec"] = 4.0
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        _accept_trajectory,
+    )
+
+    pool = retrieve_candidates(
+        _slots(),
+        object(),
+        LLMConfig(model="test", base_url="", api_key="test"),
+        VLMConfig(model="test", base_url="", api_key="test"),
+        _retrieval_config(target=3),
+        context,
+    )
+
+    trajectories_schema = context.packages[0].response_contract.schema[
+        "properties"
+    ]["trajectories"]
+    assert trajectories_schema["minItems"] == 0
+    assert trajectories_schema["maxItems"] == 1
+    assert len(pool["group_01"]) == 1
+
+
+def test_underfilled_nonempty_group_stops_after_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _Context()
+
+    def accept_only_first(trajectory, *_args, **_kwargs):
+        if trajectory["trajectory_id"].endswith("trajectory_01"):
+            return _accept_trajectory(trajectory)
+        return None, [{"reason_code": "test_rejection"}]
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        accept_only_first,
     )
 
     pool = retrieve_candidates(
@@ -527,24 +1053,179 @@ def test_underfilled_nonempty_group_continues(
     )
 
     assert len(pool["group_01"]) == 1
-    assert context.calls == 4
+    assert context.calls == 1
     assert context.artifacts["retrieval_summary"]["underfilled_group_ids"] == [
         "group_01"
     ]
-    assert context.artifacts["retrieval_summary"]["round_plan"] == [
-        "initial",
-        "correction",
-        "correction",
-        "supplement",
+    assert context.artifacts["retrieval_summary"][
+        "retrieval_batches_completed"
+    ] == 1
+
+
+def test_all_trajectories_semantically_rejected_fails_after_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _Context()
+    context.artifacts["planning_segments"][0]["end_ms"] = 40000
+    context.artifacts["video_description"]["segments"][0]["time_range"][
+        "end_sec"
+    ] = 40.0
+    context.artifacts["video_description"]["segments"][0]["shots"][0][
+        "time_range"
+    ]["end_sec"] = 40.0
+
+    def reject(trajectory, *_args, **_kwargs):
+        return None, [
+            {
+                "slot_id": trajectory["items"][0]["slot_id"],
+                "candidate_id": trajectory["items"][0]["candidate_id"],
+                "reason_code": "test_rejection",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        reject,
+    )
+
+    with pytest.raises(GroupNoCandidateError) as captured:
+        retrieve_candidates(
+            _slots(),
+            object(),
+            LLMConfig(model="test", base_url="", api_key="test"),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(target=3),
+            context,
+        )
+
+    assert context.calls == 1
+    assert captured.value.diagnostics[
+        "semantic_zero_candidate_group_ids"
+    ] == ["group_01"]
+    assert captured.value.diagnostics["retrieval_batches_completed"] == 1
+    assert len(context.artifacts["candidate_rejections"]) == 3
+
+
+def test_all_static_batch_marks_source_segment_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _Context()
+
+    def reject_every_item_as_static(trajectory, *_args, **_kwargs):
+        return None, [
+            {
+                "slot_id": item["slot_id"],
+                "candidate_id": item["candidate_id"],
+                "reason_code": "visually_static",
+            }
+            for item in trajectory["items"]
+        ]
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        reject_every_item_as_static,
+    )
+
+    with pytest.raises(GroupNoCandidateError) as captured:
+        retrieve_candidates(
+            _slots(),
+            object(),
+            LLMConfig(model="test", base_url="", api_key="test"),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(target=3),
+            context,
+        )
+
+    assert captured.value.diagnostics["unavailable_source_segment_ids"] == [
+        "segment_0001"
     ]
-    confirmed_context = context.packages[1].user_prompt.split(
-        "<confirmed_trajectories>", 1
-    )[1].split("</confirmed_trajectories>", 1)[0]
-    assert '"source_start_ms": 0' in confirmed_context
-    assert '"timestamp"' not in confirmed_context
 
 
-def test_early_stop_counts_only_globally_viable_trajectories(
+def test_partially_static_trajectory_does_not_mark_segment_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _Context()
+
+    def reject_only_one_item_as_static(trajectory, *_args, **_kwargs):
+        item = trajectory["items"][0]
+        return None, [
+            {
+                "slot_id": item["slot_id"],
+                "candidate_id": item["candidate_id"],
+                "reason_code": "visually_static",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        reject_only_one_item_as_static,
+    )
+
+    with pytest.raises(GroupNoCandidateError) as captured:
+        retrieve_candidates(
+            _slots(),
+            object(),
+            LLMConfig(model="test", base_url="", api_key="test"),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(target=3),
+            context,
+        )
+
+    assert captured.value.diagnostics["unavailable_source_segment_ids"] == []
+
+
+def test_malformed_peer_prevents_static_segment_blacklist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context(_Context):
+        def call_prompt(self, *, validate_business, package, **_kwargs):
+            self.calls += 1
+            self.packages.append(package)
+            return validate_business(
+                {
+                    "trajectories": [
+                        {
+                            "items": [
+                                _raw_item("slot_01", 0),
+                                _raw_item("slot_02", 2000),
+                            ]
+                        },
+                        {"broken": "trajectory"},
+                        {"broken": "trajectory"},
+                    ]
+                }
+            )
+
+    def reject_every_item_as_static(trajectory, *_args, **_kwargs):
+        return None, [
+            {
+                "slot_id": item["slot_id"],
+                "candidate_id": item["candidate_id"],
+                "reason_code": "visually_static",
+            }
+            for item in trajectory["items"]
+        ]
+
+    context = Context()
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
+        reject_every_item_as_static,
+    )
+
+    with pytest.raises(GroupNoCandidateError) as captured:
+        retrieve_candidates(
+            _slots(),
+            object(),
+            LLMConfig(model="test", base_url="", api_key="test"),
+            VLMConfig(model="test", base_url="", api_key="test"),
+            _retrieval_config(target=3),
+            context,
+        )
+
+    assert captured.value.diagnostics["unavailable_source_segment_ids"] == []
+
+
+def test_nonempty_group_does_not_retry_for_global_viability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _TwoGroupContext()
@@ -563,18 +1244,18 @@ def test_early_stop_counts_only_globally_viable_trajectories(
             max_concurrency=1,
         ),
         VLMConfig(model="test", base_url="", api_key="test"),
-        _retrieval_config(target=1, rounds=2),
+        _retrieval_config(target=1),
         context,
     )
 
-    assert context.calls == 4
-    assert all(len(trajectories) == 2 for trajectories in pool.values())
+    assert context.calls == 2
+    assert all(len(trajectories) == 1 for trajectories in pool.values())
     assert context.artifacts["retrieval_summary"][
-        "viable_trajectory_counts"
-    ] == {"group_01": 1, "group_02": 2}
+        "retrieval_batches_completed"
+    ] == 1
 
 
-def test_targeted_retrieval_uses_seed_pool_for_global_early_stop(
+def test_targeted_retrieval_stops_after_one_local_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Context(_TwoGroupContext):
@@ -622,27 +1303,21 @@ def test_targeted_retrieval_uses_seed_pool_for_global_early_stop(
             max_concurrency=1,
         ),
         VLMConfig(model="test", base_url="", api_key="test"),
-        _retrieval_config(target=1, rounds=2),
+        _retrieval_config(target=1),
         context,
         target_group_ids={"group_01"},
         seed_candidate_pool={"group_02": [seeded_trajectory]},
     )
 
-    assert context.calls == 2
-    assert len(pool["group_01"]) == 2
+    assert context.calls == 1
+    assert len(pool["group_01"]) == 1
     assert pool["group_01"][0]["items"][0]["timestamp"] == (
         "00:00:08,000-00:00:10,000"
     )
-    assert pool["group_01"][1]["items"][0]["timestamp"] == (
-        "00:00:00,000-00:00:02,000"
-    )
     assert pool["group_02"] == [seeded_trajectory]
-    assert context.artifacts["retrieval_summary"][
-        "viable_trajectory_counts"
-    ] == {"group_01": 1, "group_02": 1}
 
 
-def test_zero_trajectory_group_fails_after_first_round(
+def test_retrieval_provider_error_propagates_without_semantic_group_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _Context()
@@ -652,7 +1327,7 @@ def test_zero_trajectory_group_fails_after_first_round(
         _accept_trajectory,
     )
 
-    with pytest.raises(GroupNoCandidateError) as captured:
+    with pytest.raises(RuntimeError, match="no more distinct trajectories"):
         retrieve_candidates(
             _slots(),
             object(),
@@ -663,18 +1338,17 @@ def test_zero_trajectory_group_fails_after_first_round(
         )
 
     assert context.calls == 1
-    assert captured.value.diagnostics["failed_group_ids"] == ["group_01"]
-    assert captured.value.diagnostics["rounds_completed"] == 1
+    assert "retrieval_failure" not in context.artifacts
 
 
-def test_one_empty_group_stops_the_batch_after_first_round(
+def test_one_group_provider_error_propagates_without_discarding_peer_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Context(_TwoGroupContext):
         def call_prompt(self, *, validate_business, package, **_kwargs):
             self.calls += 1
             self.packages.append(package)
-            if self.calls == 2:
+            if self.calls >= 2:
                 raise RuntimeError("group_02 has no supported trajectory")
             return validate_business(
                 {"trajectories": [{"items": [_raw_item("slot_01", 0)]}]}
@@ -686,7 +1360,10 @@ def test_one_empty_group_stops_the_batch_after_first_round(
         _accept_trajectory,
     )
 
-    with pytest.raises(GroupNoCandidateError) as captured:
+    with pytest.raises(
+        RuntimeError,
+        match="group_02 has no supported trajectory",
+    ):
         retrieve_candidates(
             _two_group_slots(),
             object(),
@@ -697,40 +1374,12 @@ def test_one_empty_group_stops_the_batch_after_first_round(
                 max_concurrency=1,
             ),
             VLMConfig(model="test", base_url="", api_key="test"),
-            _retrieval_config(),
+            _retrieval_config(target=1),
             context,
         )
 
     assert context.calls == 2
-    assert captured.value.diagnostics["failed_group_ids"] == ["group_02"]
-    assert len(context.artifacts["candidate_pool"]["group_01"]) == 1
-
-
-def test_correction_round_receives_previous_failure_and_repair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _Context()
-    context.fail_after = 1
-    monkeypatch.setattr(
-        "cutmaster.workflow.planners.timeline_scout._validate_complete_trajectory",
-        _accept_trajectory,
-    )
-
-    pool = retrieve_candidates(
-        _slots(),
-        object(),
-        LLMConfig(model="test", base_url="", api_key="test"),
-        VLMConfig(model="test", base_url="", api_key="test"),
-        _retrieval_config(rounds=3),
-        context,
-    )
-
-    third_prompt = context.packages[2].user_prompt
-    assert len(pool["group_01"]) == 1
-    assert "supplement phase" in third_prompt
-    assert '"reason_code": "candidate_retrieval_failed"' in third_prompt
-    assert '"diagnosis":' in third_prompt
-    assert '"repair_requirement":' in third_prompt
+    assert "retrieval_failure" not in context.artifacts
 
 
 def test_timeline_cancellation_is_not_treated_as_retrieval_failure() -> None:
@@ -754,7 +1403,7 @@ def test_timeline_cancellation_is_not_treated_as_retrieval_failure() -> None:
     assert context.calls == 0
 
 
-def test_first_round_visual_rejection_triggers_group_replan(
+def test_visual_rejection_immediately_returns_semantic_group_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _Context()
@@ -779,7 +1428,15 @@ def test_first_round_visual_rejection_triggers_group_replan(
 
     assert context.calls == 1
     assert captured.value.diagnostics["failed_group_ids"] == ["group_01"]
-    assert context.artifacts["candidate_rejections"][0]["group_id"] == "group_01"
+    assert captured.value.diagnostics[
+        "semantic_zero_candidate_group_ids"
+    ] == ["group_01"]
+    assert captured.value.diagnostics["retrieval_batches_completed"] == 1
+    assert len(context.artifacts["candidate_rejections"]) == 1
+    assert all(
+        rejection["group_id"] == "group_01"
+        for rejection in context.artifacts["candidate_rejections"]
+    )
 
 
 def test_visual_validation_splits_provider_payload_limit(

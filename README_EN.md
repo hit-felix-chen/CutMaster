@@ -29,13 +29,15 @@ The complete CutMaster workflow is organized as a **MASTER** team:
 | **S** | **Story Editor** | `workflow/planners/story_editor.py` | Uses key source dialogue to anchor plot, character arcs, and prompt intent |
 | **T** | **Timeline Scout** | `workflow/planners/timeline_scout.py` | Retrieves and validates complete candidate trajectories for each Slot Group |
 | **E** | **Edit Composer** | `workflow/planners/edit_composer.py` | Selects whole trajectories with visual scoring and Beam Search |
-| **R** | **Revision Editor** | `workflow/planners/revision_editor.py` | Reviews the cut and replaces weak trajectories without splitting a group |
+| **R** | **Renderer** | `workflow/renderer/renderer.py` | Renders the frozen plan without another model review |
 
 In short:
 
 ```text
 M       = Analyser
-ASTER   = Planners team
+A/S/T/E = Planners team
+R       = Renderer
+ASTER   = Planning + rendering
 M + ASTER = MASTER
 ```
 
@@ -44,8 +46,8 @@ CLI and Benchmark invoke synchronous complete workflows through
 `CutMasterApplication.workflows`; Web maps HTTP/SSE to grouped Application use
 cases; Worker executes Application-owned durable Jobs. The Application Layer
 owns the managed Material, Project, Run, Frozen Edit, Render Variant, and Job
-lifecycles. `ASTERTeam` remains the sole coordinator for the five editorial
-agents: agents never call one another directly, and the team coordinator owns
+lifecycles. `ASTERTeam` remains the sole coordinator for the four planning
+agents; Application separately dispatches R (Renderer): agents never call one another directly, and the team coordinator owns
 all forward collaboration and repair feedback.
 
 ## Architecture
@@ -85,9 +87,8 @@ flowchart LR
     S --> T["T · Timeline Scout"]
     VM --> T
     T --> E["E · Edit Composer"]
-    E --> R["R · Revision Editor"]
-    R --> RP["RenderPlan"]
-    RP --> RD["Renderer"]
+    E --> RP["RenderPlan"]
+    RP --> RD["R · Renderer"]
     RD --> O["Final video"]
 
     T -. "zero valid group trajectory / targeted repair" .-> A
@@ -168,8 +169,9 @@ to Planning Segments cut by the fixed Anchor picture, such as
 `segment_0010_01` and `segment_0010_02`. Every child group must fit inside its
 Planning Segment; an impossible split rejects the Anchor response and retries
 Story planning.
-Story Editor is shown only dialogue endpoint combinations whose complete picture
-window fits inside the Slot's assigned Segment.
+Story Editor selects consecutive dialogue endpoints. The backend validates the
+complete picture window and partition capacity, keeps the largest legal subset
+when returned Anchors conflict, and permits no Anchor when none is strong and legal.
 
 Ordinary clips keep their source audio muted. Only selected Dialogue Anchors are prepared and mixed with the BGM, with automatic music ducking during speech.
 
@@ -181,18 +183,18 @@ member Slot, all inside the assigned Segment or Planning Segment. If any item
 fails duration, motion, or VLM validation, the complete trajectory is rejected;
 items from different trajectories are never mixed.
 
-Each group is searched for at most four rounds: one initial round, two
-feedback-guided correction rounds, and one final supplement round. The configured
-`target_trajectories_per_group` is only an early-stop target. If a completed
-round leaves any group with zero valid trajectories, that group immediately
-returns to whole-group Arrangement repair. Only nonempty groups below the target
-continue into correction or supplement rounds; after the final round, one
-trajectory that participates in a complete chronological path is enough to
-continue. A pool with no complete chronological path also triggers whole-group
-repair followed by fresh Story and Timeline stages. Retrieval never widens one
-Slot into an adjacent Segment. Targeted repair reruns Story and Timeline only for
-changed complete groups; other groups retain Anchors and candidates only when
-their complete contracts still match and pass global validation.
+Each group issues one batch request, normally for three complete trajectories,
+and validates every returned trajectory independently. Fewer trajectories or an
+empty array are valid responses; no retry fills the batch. One accepted trajectory
+is sufficient. Model, media, and VLM execution failures propagate as system
+errors; missing decoded frames are not evidence of static content. Only a normally
+returned empty batch, or one whose trajectories are all semantically or visually rejected,
+triggers whole-group Arrangement repair with concrete rejection evidence, and the failed Group/Segment binding is
+then forbidden by backend validation. If every item of every batch trajectory is
+static, the Segment itself becomes unavailable. Targeted repair preserves every
+still-legal Anchor, deterministically rebuilds Story partitions, and retrieves
+only changed complete group contracts. Retrieval never widens one Slot into an
+adjacent Segment.
 
 ### 5. Efficient global sequence composition
 
@@ -208,12 +210,11 @@ through all remaining groups. VLM transition scores are computed lazily for
 edges that can survive in promising beams. The default score is
 `0.60 × unary + 0.40 × pairwise`.
 
-### 6. Candidate-constrained revision
+### 6. Freeze and render
 
-The Revision Editor reviews the sequence and replaces only whole trajectories
-from the validated pool. Anchors remain fixed, and a group trajectory is never
-split. The Planners stage then compiles a frame-exact `RenderPlan`; Renderer can
-reuse that plan for BGM-only and dialogue variants.
+Edit Composer choices compile directly into a frame-exact `RenderPlan`.
+R (Renderer) renders that plan. Automatic Revision Editor is removed;
+human Guided Revision remains an independent operation on a Frozen Edit.
 
 ## Case Study: Power Transfer in *The Godfather*
 
@@ -231,7 +232,7 @@ This example follows the prompt “Create a montage of the key events in *The Go
 - **Story Editor** anchors decisive plot turns with source dialogue, splits surrounding ordinary Slots into child groups, and lets longer lines continue through L-cuts.
 - **Timeline Scout** validates complete candidate trajectories for those groups, rejecting the whole trajectory when any member fails identity, relevance, visibility, or motion checks.
 - **Edit Composer** combines unary shot scores with pairwise compatibility and selects a globally coherent chronological path of whole trajectories.
-- **Revision Editor** replaces only complete group trajectories, producing a final montage that preserves source chronology, narrative coverage, and musical pacing.
+- **Renderer** realizes the frozen plan without changing candidate selections.
 
 ## Quick start
 
@@ -471,10 +472,10 @@ The file follows the ownership boundaries of the architecture:
 
 The default LLM/VLM request timeout is `600` seconds; the total wait for an asynchronous ASR task is `600` seconds. Every field and default is documented inline in `config.toml`.
 
-By default, ASTER runs at most three complete planning attempts. Arrangement
-and Anchor each make at most three model requests per attempt. Candidate
-retrieval runs at most four rounds: one initial round, two correction rounds,
-and one final supplement round.
+By default, ASTER runs at most three complete planning attempts and shares at
+most two local Candidate repairs across the whole invocation. Arrangement and
+Anchor each make at most three model requests per transaction. Candidate
+retrieval makes one batch request per targeted group.
 
 All model prices use CNY per million tokens. Every call snapshots the active prices in its usage artifact, so later configuration changes never reprice historical calls. Uncached input, cache-hit input, and output are charged separately; reasoning tokens are already part of output tokens and are not charged twice.
 

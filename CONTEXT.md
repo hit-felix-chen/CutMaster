@@ -81,7 +81,10 @@ _Avoid_: ASTER Team when naming the stage, monolithic editor
 
 **Renderer**:
 The final, deterministic workflow stage that realizes a frozen edit as one video
-variant without making editorial decisions.
+variant without making editorial decisions. It never shifts a frozen source
+window to repair EOF overflow. Millisecond/frame-grid rounding at EOF may repeat
+at most one final source frame before output-rate conversion, preserving the
+exact frozen seek and output frame count; a real source overflow is rejected.
 _Avoid_: Production, Rendering Agent, editing agent
 
 **Application Layer** *(Implemented)*:
@@ -144,7 +147,8 @@ _Avoid_: CutMaster Workflow, Renderer, six-stage workflow
 
 **ASTER Team**:
 The Planners-stage team formed by the **Arrangement Architect**, **Story Editor**,
-**Timeline Scout**, **Edit Composer**, and **Revision Editor**.
+**Timeline Scout**, **Edit Composer**, and **Renderer**. The four planning agents
+are coordinated by `ASTERTeam`; Application dispatches Renderer separately.
 _Avoid_: Planners when referring to the team, monolithic editor
 
 **Editorial Agent**:
@@ -178,10 +182,10 @@ The E agent that selects whole group trajectories and assembles a globally
 coherent candidate sequence under temporal and visual constraints.
 _Avoid_: Sequence Selector, Beam Search stage
 
-**Revision Editor**:
-The R agent that reviews a composed edit and replaces weak choices with whole
-group trajectories without leaving the established candidate space.
-_Avoid_: Script Reviewer, Reviser
+**Renderer (MASTER R)**:
+Deterministically renders the frozen plan. No automatic final model review runs.
+Historical Revision Editor checkpoints remain readable; manual Guided Revision
+is an independent operation on a Frozen Edit.
 
 **Material Library**:
 The collection of immutable source video and music **Materials** available for
@@ -437,8 +441,9 @@ _Avoid_: Job Log, adapter stdout capture, Benchmark Submission Copy
 
 **ASTER Stage Checkpoint** *(Implemented)*:
 A secret- and path-free durable receipt written only after a complete
-Arrangement Architect, Story Editor, Timeline Scout, Edit Composer, or Revision
-Editor boundary. A replan-pending receipt additionally preserves sanitized
+Arrangement Architect, Story Editor, Timeline Scout, or Edit Composer boundary.
+Historical Revision Editor receipts remain readable; Renderer is a separate Job.
+A replan-pending receipt additionally preserves sanitized
 feedback and the exact prior group state needed for safe targeted reuse before
 the next Arrangement Architect pass. Resume validates and pins one receipt to
 the new Attempt; it never continues in the middle of an agent, model call, or
@@ -518,27 +523,39 @@ The source-picture duration available for chronologically placing unanchored
 **Slots** inside one **Planning Segment**. A Story Anchor arrangement is valid
 only when every resulting Planning Segment can contain the total planned Slot
 duration assigned to it. If a proposed Anchor split violates this capacity, the
-proposal is rejected and Story Editor replans with the failed group, available
-duration, and required duration in its feedback. Story Editor uses the normal
-configured model retry limit; exhausting it fails the Execution Attempt rather
-than silently removing the requested Anchors.
+backend excludes that proposal while selecting the largest legal subset of the
+returned Anchors. Story Editor may return no Anchor when no strong passage can
+form a legal partition. It uses the normal configured model retry limit for
+response and per-Anchor validation errors.
 _Avoid_: Candidate count, parent Segment duration, search allowance
 
 **Targeted Arrangement**:
-The redesign of a failed **Slot Group** when a completed Timeline Scout round
-leaves it without one valid Group Candidate Trajectory. The group may remain on
-its source Segment when corrected content and visible-subject requirements can
-produce a valid trajectory; a failed retrieval does not ban the Segment. Each
-failed group is repaired independently and never as a partial group. When the
-failed group alone has no feasible alternative Segment, Arrangement adds the
-complete groups immediately to its left and right, then expands both sides one
-level at a time until the failed group can move in one strictly increasing
-Segment assignment. Repair windows stay separate unless their expansions meet,
-at which point they are validated together. Timeline Scout never widens an
-individual Slot into another Segment. Redesign reruns Story Editor and Timeline
-Scout only for changed complete contracts. An exact unchanged contract may
-retain its Anchors and Group Candidate Trajectories even when it was included as
-repair context; the merged result is validated globally before composition.
+The redesign of a failed **Slot Group** after one normally returned Candidate
+batch leaves it without a valid Group Candidate Trajectory. Provider, media,
+and VLM execution failures do not enter this branch. A zero-candidate result
+does not prohibit the original Segment or Slot-to-Segment binding. Arrangement
+receives the original Slots, legal Segment IDs and their compact Memory,
+neighbor constraints, and detailed current and historical failure evidence;
+it may revise ordinary Slot content, required subjects, emotion, continuity,
+or Segment binding. Fixed Slot timing and valid Anchors remain unchanged.
+Concrete rejection evidence is deduplicated by original Slot requirements,
+source window, and reason and survives retries and checkpoints. Both targeted
+Arrangement and subsequent Timeline Scout receive history matched by stable
+Slot IDs, including evidence from earlier Segment bindings. Historical repair
+suggestions are context, not binding or source-window bans; obsolete semantic
+binding bans in older checkpoints are ignored.
+A Segment is globally unavailable only when every item of every returned batch
+trajectory is proven static. Each failed group is repaired as a complete parent
+group. Only when it has no structurally feasible source assignment alone does
+Arrangement expand the repair domain to adjacent groups; adjacent original
+groups may merge when their combined duration fits one Segment. Preserved
+neighbor Anchors constrain both the Segment and the available picture capacity
+before and after their fixed windows during feasibility checks and validation.
+Timeline Scout never widens an individual Slot into another Segment. Local repair preserves all
+still-legal Anchors without another Story model call, deterministically rebuilds
+Planning Segments, and retrieves only changed complete contracts. A failed
+parent group containing an Anchor is backend-unrepairable locally because moving
+it would invalidate that Anchor, so it advances directly to global Arrangement.
 _Avoid_: single-Slot patch, adjacent-Segment retrieval, Guided Revision
 
 **Music Memory**:
@@ -564,10 +581,10 @@ Group bound to the corresponding Planning Segment. Empty runs create no group.
 When an Anchor shares its source Segment with other Slots, equally strong Anchor
 choices prefer the picture placement that divides the Segment's free picture
 regions most evenly. Multiple Anchors in one Segment are judged as one combined
-partition. The complete returned Anchor set must satisfy source order, dialogue
-reuse, audio non-overlap, and partition capacity together; CutMaster never drops
-one conflicting proposal and silently accepts the remainder. Planning Segment
-Capacity remains a hard prerequisite.
+partition. The returned Anchor proposals are checked together for source order,
+dialogue reuse, audio non-overlap, and partition capacity. When proposals
+conflict, CutMaster deterministically keeps the largest legal subset and may
+keep none. Planning Segment Capacity remains a hard prerequisite.
 _Avoid_: Subtitle, voice-over
 
 **Candidate Space**:
@@ -585,19 +602,32 @@ whole trajectory and never combines clips from different trajectories. Timeline
 Scout asks the model only for each clip's integer source start; the application
 derives its end from the authoritative planned Slot duration and fits the whole
 trajectory inside the Planning Segment before visual validation. The
-configured `target_trajectories_per_group` count is an early-stop target, not a
-success requirement. If any completed round leaves a group with zero valid
-trajectories, Timeline Scout immediately triggers Targeted Arrangement for that
-whole group. Groups with at least one valid trajectory may continue up to
-`max_rounds` (four by default) to approach the target; after the final round one
-valid trajectory is sufficient.
+configured `target_trajectories_per_group` is the normal number requested in one
+model call, not a response minimum: fewer complete trajectories or an empty
+array are valid responses and do not trigger format retries. Each returned
+trajectory is locally and visually validated as an independent indivisible unit;
+one malformed trajectory is recorded and does not
+discard valid peers from the same response. Alternatives for the same Slot use
+different source Shots or non-overlapping source windows. A Planning Segment
+with fewer distinct feasible layouts reduces the requested batch, including a
+single trajectory for a zero-slack unique layout. Once one trajectory passes,
+Timeline Scout accepts that group even when the batch is underfilled. A normal
+batch with zero accepted trajectories immediately triggers Targeted Arrangement;
+an entirely malformed response remains a response error. Motion verification
+requires at least two valid decoded frames; missing frames are execution errors,
+not proof of static content. Execution failures propagate instead. Final
+source-window optimization may move an ordinary trajectory clip forward for beat
+alignment, but it keeps every frame previously sampled by
+visual validation inside the rendered window and cannot cross its next clip,
+Planning Segment, source Segment, or validated Shot boundary. A Story Anchor's
+source-synchronous picture window never moves.
 _Avoid_: independently replaceable clip, mix-and-match candidate set, final edit
 
 **Viable Candidate**:
 A Group Candidate Trajectory that belongs to at least one complete
-**Chronological Candidate Path**. Only Viable Candidates count toward the
-early-stop trajectory target; merely retrieved or locally validated trajectories
-do not.
+**Chronological Candidate Path**. Viability constrains Edit Composer's global
+selection; Timeline Scout does not send another retrieval request merely because
+a locally valid trajectory later proves globally non-viable.
 _Avoid_: Raw candidate, locally compatible candidate, selected candidate
 
 **Chronological Candidate Path**:
@@ -695,13 +725,12 @@ _Avoid_: Music Memory, source music analysis, reusable material
 
 **Editor**:
 In this domain, **Story Editor** owns narrative anchoring, **Edit Composer** owns
-sequence assembly, and **Revision Editor** owns final review. The unqualified
+sequence assembly. **Renderer** executes the frozen plan. The unqualified
 term “Editor” should not name an agent.
 
 **Revision**:
-The **Revision Editor** performs automatic revision during ASTER coordination.
-The accepted frontend design lets a person perform a **Guided Revision**
-after reviewing a frozen result. Use the qualified term to distinguish them.
+Automatic Revision Editor has been removed. A person can perform a **Guided Revision**
+after reviewing a frozen result; this does not invoke an automatic reviewing agent.
 
 **Task**:
 Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
@@ -741,10 +770,10 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 >
 > **Developer:** Does exhausted search immediately move a Story Anchor?
 >
-> **Domain expert:** No. Targeted Arrangement replans the complete failed Slot
-> Group and may keep its Segment when corrected requirements can yield a valid
-> trajectory. It reruns Story Editor and Timeline Scout for changed complete
-> groups, while unchanged valid groups may retain their Anchors and candidates.
+> **Domain expert:** No. A failed parent Group may keep its Segment and repair
+> ordinary Slots while preserving its valid Anchor and fixed picture capacity.
+> Only actual backend feasibility constraints or the existing retry budget
+> require escalation; the presence of an Anchor alone is not a blocker.
 >
 > **Developer:** May Edit Composer keep an overlapping path if its visual score
 > is high enough?
@@ -752,22 +781,22 @@ Too ambiguous for the product UI. Use **Material Analysis**, **ASTER Run**,
 > **Domain expert:** No. Reversal or overlap makes a Chronological Candidate
 > Path invalid; quality is optimized only among valid paths.
 >
-> **Developer:** Does every visually validated trajectory count toward a Slot
-> Group's candidate target?
+> **Developer:** Does Timeline Scout keep retrieving until every Slot Group has
+> the configured number of candidates?
 >
-> **Domain expert:** No. Only Viable Candidates that belong to at least one
-> complete Chronological Candidate Path count toward that target.
+> **Domain expert:** No. One call normally returns that many alternatives and
+> validates each independently. One accepted trajectory is enough; a normally
+> returned zero-result batch immediately enters Targeted Arrangement.
 >
 > **Developer:** Who chooses the final trajectory for each Slot Group?
 >
-> **Domain expert:** The Edit Composer assembles the sequence, then the Revision
-> Editor may replace a weak group choice only with another whole trajectory from
-> that Candidate Space.
+> **Domain expert:** Edit Composer selects the final sequence. It is compiled and
+> rendered directly; no automatic Revision Editor follows it.
 
 > **Developer:** Is the Renderer the last member of the MASTER Editing Team?
 >
-> **Domain expert:** No. MASTER makes the editorial decisions across the Analyser
-> and Planners stages; the Renderer deterministically realizes the frozen plan.
+> **Domain expert:** Yes. R means Renderer, which deterministically realizes the
+> frozen plan. It is a separate Application lifecycle, not a planning model call.
 
 > **Developer:** Can a person drag any source clip onto the output timeline?
 >

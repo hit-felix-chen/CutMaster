@@ -15,6 +15,7 @@ from cutmaster.workflow.prompting import PromptStage, PromptTask, prompt_registr
 from cutmaster.workflow.prompting.planners import SlotArrangementDetails
 from cutmaster.infrastructure.observability.logging import log_event
 from cutmaster.workflow.shared.execution_context import WorkflowContext
+from cutmaster.workflow.shared.timecode import parse_range
 
 MIN_SLOT_DURATION_SEC = 1.5
 MAX_DURATION_TOTAL_ERROR_SEC = 0.5
@@ -101,6 +102,69 @@ def _arrangement_groups(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return groups
 
 
+def _preserved_anchor_group_constraints(
+    slots: list[dict[str, Any]],
+    video_description: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Describe fixed-picture capacity using the same integer-ms Story layout.
+
+    For an anchored Group, earlier merged Groups must finish before its first
+    fixed picture, and later merged Groups start after its last fixed picture.
+    Internal ordinary runs must also fit between the preserved pictures.
+    """
+
+    segments = {
+        str(segment["segment_id"]): segment
+        for segment in video_description["segments"]
+    }
+    grouped_slots: dict[str, list[dict[str, Any]]] = {}
+    for slot in slots:
+        grouped_slots.setdefault(str(slot["group_id"]), []).append(slot)
+    result: dict[str, dict[str, Any]] = {}
+    for group_id, members in grouped_slots.items():
+        if not any(isinstance(slot.get("dialogue_anchor"), dict) for slot in members):
+            continue
+        segment_id = str(members[0]["source_segment_id"])
+        segment_range = segments[segment_id]["time_range"]
+        segment_start_ms = _milliseconds(segment_range["start_sec"])
+        segment_end_ms = _milliseconds(segment_range["end_sec"])
+        cursor_ms = segment_start_ms
+        prefix_capacity_ms: int | None = None
+        for slot in members:
+            duration_ms = int(slot["planned_duration_ms"])
+            anchor = slot.get("dialogue_anchor")
+            if not isinstance(anchor, dict):
+                cursor_ms += duration_ms
+                continue
+            if str(anchor["source_segment_id"]) != segment_id:
+                raise ValueError(
+                    f"Targeted redesign moved a preserved dialogue Anchor in {group_id}"
+                )
+            start_sec, end_sec = parse_range(str(anchor["source_video_timestamp"]))
+            start_ms, end_ms = _milliseconds(start_sec), _milliseconds(end_sec)
+            if (
+                start_ms < cursor_ms
+                or end_ms > segment_end_ms
+                or end_ms - start_ms != duration_ms
+            ):
+                raise ValueError(
+                    f"Preserved dialogue Anchor leaves infeasible picture capacity in {group_id}"
+                )
+            if prefix_capacity_ms is None:
+                prefix_capacity_ms = start_ms - cursor_ms
+            cursor_ms = end_ms
+        if cursor_ms > segment_end_ms:
+            raise ValueError(
+                f"Preserved dialogue Anchor leaves infeasible picture capacity in {group_id}"
+            )
+        result[group_id] = {
+            "source_segment_id": segment_id,
+            "prefix_capacity_ms": prefix_capacity_ms,
+            "end_offset_ms": cursor_ms - segment_start_ms,
+        }
+    return result
+
+
 def _validate_group_capacity(
     slots: list[dict[str, Any]],
     video_description: dict[str, Any],
@@ -147,6 +211,17 @@ def _request_metadata(request: PlannersRequest) -> dict[str, Any]:
     }
 
 
+def _segment_story_context(segment: dict[str, Any]) -> dict[str, Any]:
+    """Keep the same compact source evidence in full and targeted Arrangement."""
+
+    fields = (
+        "segment_id", "time_range", "has_dialogue", "speech_mode",
+        "content_type", "timeline_role", "segment_summary", "narrative_function",
+        "emotional_tone", "emotional_intensity", "appearing_characters",
+    )
+    return {key: segment[key] for key in fields if key in segment}
+
+
 def _source_story_context(
     video_description: dict[str, Any],
     video_summary: dict[str, Any],
@@ -155,19 +230,7 @@ def _source_story_context(
         "source": video_description["source"],
         "story_summary": video_summary,
         "segments": [
-            {
-                "segment_id": segment["segment_id"],
-                "time_range": segment["time_range"],
-                "has_dialogue": segment["has_dialogue"],
-                "speech_mode": segment["speech_mode"],
-                "content_type": segment["content_type"],
-                "timeline_role": segment["timeline_role"],
-                "segment_summary": segment["segment_summary"],
-                "narrative_function": segment["narrative_function"],
-                "emotional_tone": segment["emotional_tone"],
-                "emotional_intensity": segment["emotional_intensity"],
-                "appearing_characters": segment["appearing_characters"],
-            }
+            _segment_story_context(segment)
             for segment in video_description["segments"]
         ],
     }
@@ -199,6 +262,8 @@ def _validate_slots(
     target_duration_sec: float,
     target_clip_duration_sec: float,
     video_description: dict[str, Any],
+    *,
+    unavailable_source_segment_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     raw = parsed.get("slots")
     if not isinstance(raw, list) or not raw:
@@ -231,6 +296,10 @@ def _validate_slots(
         if not segment_id or segment_id not in segment_order:
             raise ValueError(
                 f"Slot {index} must reference one valid source_segment_id"
+            )
+        if segment_id in (unavailable_source_segment_ids or set()):
+            raise ValueError(
+                f"Slot {index} reused unavailable Source Segment {segment_id}"
             )
         # A failed retrieval does not prove that the whole source Segment is unusable.
         # A retry may keep the Segment while changing the requested evidence.
@@ -278,7 +347,8 @@ def _validate_slots(
             f"target_clip_duration_sec={target_clip_duration_sec:.3f}; "
             f"got {average_duration:.3f} seconds across {len(slots)} Slots"
         )
-    return _assign_source_groups(slots, video_description)
+    grouped = _assign_source_groups(slots, video_description)
+    return grouped
 
 
 def plan_edit_slots(
@@ -326,6 +396,40 @@ def prime_arrangement_context(
     return None
 
 
+def _planning_feedback_constraints(
+    context: WorkflowContext,
+) -> tuple[
+    dict[str, Any] | None,
+    set[str],
+]:
+    raw_feedback = context.get_artifact("planners_feedback")
+    planners_feedback = (
+        {
+            key: value
+            for key, value in raw_feedback.items()
+            if key != "forbidden_group_segment_bindings"
+        }
+        if isinstance(raw_feedback, dict)
+        else None
+    )
+    # Old checkpoints may contain semantic binding bans. They were based on a
+    # previous Slot contract, not proof that the Segment itself is unusable.
+    if planners_feedback is not None and planners_feedback != raw_feedback:
+        context.set_artifact("planners_feedback", planners_feedback)
+    unavailable_source_segment_ids = {
+        str(value)
+        for value in (
+            (planners_feedback or {}).get("unavailable_source_segment_ids")
+            or []
+        )
+        if str(value)
+    }
+    return (
+        planners_feedback,
+        unavailable_source_segment_ids,
+    )
+
+
 def _plan_edit_slots_from_context(
     request: PlannersRequest,
     music_profile: dict[str, Any],
@@ -341,14 +445,29 @@ def _plan_edit_slots_from_context(
     video_summary = context.get_artifact("video_summary")
     if video_summary is None:
         raise RuntimeError("Video summary must be available before Slot arrangement")
-    planners_feedback = context.get_artifact("planners_feedback")
+    (
+        planners_feedback,
+        unavailable_source_segment_ids,
+    ) = _planning_feedback_constraints(context)
+    allowed_segment_ids = [
+        str(segment["segment_id"])
+        for segment in video_description["segments"]
+        if str(segment["segment_id"])
+        not in unavailable_source_segment_ids
+    ]
+    if not allowed_segment_ids:
+        raise ValueError(
+            "No Source Segment remains after applying permanent static-segment exclusions"
+        )
     retry_note = ""
     if planners_feedback:
         retry_note = (
             "\nThis is a redesign after an infeasible candidate path. Correct the failure using "
-            "the maintained planners_feedback. A failed group may keep its source Segment "
-            "when revised content and visible-subject requirements can produce a valid "
-            "trajectory. Preserve group chronology.\n"
+            "the maintained planners_feedback and source evidence. Preserve group chronology. "
+            "A failed group may keep its source Segment and redesign its visible content, "
+            "required subjects, or other editorial choices. Historical candidate failures are "
+            "diagnostic evidence, not permanent Segment or binding bans. Never reuse an "
+            "unavailable Source Segment.\n"
         )
     package = prompt_registry.build(
         PromptStage.PLANNERS,
@@ -356,10 +475,7 @@ def _plan_edit_slots_from_context(
         SlotArrangementDetails(
             target_duration_sec=request.target_output_length_sec,
             target_clip_duration_sec=target_clip_duration_sec,
-            allowed_segment_ids=[
-                str(segment["segment_id"])
-                for segment in video_description["segments"]
-            ],
+            allowed_segment_ids=allowed_segment_ids,
             retry_note=retry_note,
             mode="full",
             existing_slots=[],
@@ -377,6 +493,7 @@ def _plan_edit_slots_from_context(
             video_description,
             music_profile,
             output_fps,
+            unavailable_source_segment_ids=unavailable_source_segment_ids,
         ),
     )
     context.set_artifact("arrangement_groups", _arrangement_groups(slots))
@@ -387,6 +504,8 @@ def _targeted_slot_constraints(
     slots: list[dict[str, Any]],
     target_slot_ids: set[str],
     video_description: dict[str, Any],
+    *,
+    unavailable_source_segment_ids: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     source_segments = video_description["segments"]
     segment_ids = [str(segment["segment_id"]) for segment in source_segments]
@@ -395,6 +514,13 @@ def _targeted_slot_constraints(
     }
 
     expanded_ids = _expand_target_group_slot_ids(slots, target_slot_ids)
+    story_by_segment_id = {
+        str(segment["segment_id"]): _segment_story_context(segment)
+        for segment in source_segments
+    }
+    anchor_constraints_by_group = _preserved_anchor_group_constraints(
+        slots, video_description
+    )
 
     constraints: dict[str, dict[str, Any]] = {}
     for index, slot in enumerate(slots):
@@ -431,12 +557,40 @@ def _targeted_slot_constraints(
             raise ValueError(
                 f"No chronological Segment interval remains for {slot_id}"
             )
+        original_group_id = str(slot["group_id"])
+        original_segment_id = str(slot["source_segment_id"])
+        preserved_anchor = anchor_constraints_by_group.get(original_group_id)
+        allowed_segment_ids = segment_ids[lower : upper + 1]
+        allowed_segment_ids = [
+            segment_id
+            for segment_id in allowed_segment_ids
+            if segment_id not in (unavailable_source_segment_ids or set())
+        ]
+        if preserved_anchor is not None:
+            allowed_segment_ids = [
+                segment_id
+                for segment_id in allowed_segment_ids
+                if segment_id == preserved_anchor["source_segment_id"]
+            ]
+        if not allowed_segment_ids:
+            raise ValueError(
+                f"No usable chronological Segment remains for {slot_id}"
+            )
         constraints[slot_id] = {
             "desired_duration_sec": float(slot["desired_duration_sec"]),
             "planned_duration_ms": int(slot["planned_duration_ms"]),
             "planned_duration_sec": float(slot["planned_duration_sec"]),
-            "allowed_segment_ids": segment_ids[lower : upper + 1],
-            "original_group_id": str(slot["group_id"]),
+            "allowed_segment_ids": allowed_segment_ids,
+            "allowed_source_segments": [
+                story_by_segment_id[segment_id] for segment_id in allowed_segment_ids
+            ],
+            "original_group_id": original_group_id,
+            "original_segment_id": original_segment_id,
+            "preserved_anchor_source_segment_id": (
+                preserved_anchor["source_segment_id"]
+                if preserved_anchor is not None
+                else None
+            ),
             "previous_fixed_slot": (
                 {
                     "slot_id": previous_slot["slot_id"],
@@ -484,6 +638,8 @@ def _repair_window_slot_ids(
     slots: list[dict[str, Any]],
     target_slot_ids: set[str],
     video_description: dict[str, Any],
+    *,
+    unavailable_source_segment_ids: set[str] | None = None,
 ) -> set[str]:
     """Select the smallest independent repair window for each failed group run."""
 
@@ -511,12 +667,11 @@ def _repair_window_slot_ids(
         )
         for group in groups
     }
+    anchor_constraints_by_group = _preserved_anchor_group_constraints(
+        slots, video_description
+    )
 
-    def allows_failed_groups_to_change(
-        left: int,
-        right: int,
-        target_indices: tuple[int, ...],
-    ) -> bool:
+    def allows_group_assignment(left: int, right: int) -> bool:
         lower = (
             segment_order[str(groups[left - 1]["source_segment_id"])] + 1
             if left > 0
@@ -529,44 +684,46 @@ def _repair_window_slot_ids(
         )
         if lower > upper:
             return False
-        target_bits = {
-            target_index: 1 << offset
-            for offset, target_index in enumerate(target_indices)
-        }
-        all_targets_changed = (1 << len(target_bits)) - 1
+        # The used capacity is the earliest picture end, including fixed Anchor
+        # boundaries. Staying on the original Segment is a legal assignment;
+        # the model decides which editorial fields need repair from the evidence.
         states: set[tuple[int, int]] = {(-1, 0)}
         for position in range(left, right + 1):
             group = groups[position]
             group_id = str(group["group_id"])
             required_ms = required_by_group[group_id]
+            preserved_anchor = anchor_constraints_by_group.get(group_id)
             next_states: set[tuple[int, int]] = set()
             for candidate_index in range(lower, upper + 1):
-                capacity_ms = segment_durations[segment_ids[candidate_index]]
-                if required_ms > capacity_ms:
+                candidate_segment_id = segment_ids[candidate_index]
+                if (
+                    preserved_anchor is not None
+                    and candidate_segment_id != preserved_anchor["source_segment_id"]
+                ):
                     continue
-                for previous_index, changed_targets in states:
-                    if candidate_index <= previous_index:
+                if candidate_segment_id in (
+                    unavailable_source_segment_ids or set()
+                ):
+                    continue
+                capacity_ms = segment_durations[candidate_segment_id]
+                for previous_index, previous_used_ms in states:
+                    if candidate_index < previous_index:
                         continue
-                    changed = changed_targets
-                    if (
-                        position in target_bits
-                        and candidate_index
-                        != segment_order[str(group["source_segment_id"])]
-                    ):
-                        changed |= target_bits[position]
-                    next_states.add(
-                        (
-                            candidate_index,
-                            changed,
-                        )
-                    )
+                    merged_with_previous = candidate_index == previous_index
+                    prefix_used_ms = previous_used_ms if merged_with_previous else 0
+                    if preserved_anchor is not None:
+                        if prefix_used_ms > int(preserved_anchor["prefix_capacity_ms"]):
+                            continue
+                        used_ms = int(preserved_anchor["end_offset_ms"])
+                    else:
+                        used_ms = prefix_used_ms + required_ms
+                    if used_ms > capacity_ms:
+                        continue
+                    next_states.add((candidate_index, used_ms))
             states = next_states
             if not states:
                 return False
-        return any(
-            changed_targets == all_targets_changed
-            for _, changed_targets in states
-        )
+        return bool(states)
 
     requested_runs: list[tuple[int, int]] = []
     for index in requested_indices:
@@ -575,7 +732,7 @@ def _repair_window_slot_ids(
         else:
             requested_runs.append((index, index))
 
-    repair_windows: list[tuple[int, int, tuple[int, ...]]] = []
+    repair_windows: list[tuple[int, int]] = []
     for run_number, (initial_left, initial_right) in enumerate(requested_runs):
         minimum_left = (
             requested_runs[run_number - 1][1] + 1
@@ -595,56 +752,41 @@ def _repair_window_slot_ids(
         for expansion in range(maximum_expansion + 1):
             left = max(minimum_left, initial_left - expansion)
             right = min(maximum_right, initial_right + expansion)
-            if allows_failed_groups_to_change(
-                left,
-                right,
-                tuple(range(initial_left, initial_right + 1)),
-            ):
+            if allows_group_assignment(left, right):
                 selected_window = (left, right)
                 break
         if selected_window is None:
             selected_window = (minimum_left, maximum_right)
-        repair_windows.append(
-            (
-                selected_window[0],
-                selected_window[1],
-                tuple(range(initial_left, initial_right + 1)),
-            )
-        )
+        repair_windows.append(selected_window)
 
     def merge_repair_windows(
-        windows: list[tuple[int, int, tuple[int, ...]]],
-    ) -> list[tuple[int, int, tuple[int, ...]]]:
-        merged: list[tuple[int, int, tuple[int, ...]]] = []
-        for left, right, targets in sorted(windows):
+        windows: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        merged: list[tuple[int, int]] = []
+        for left, right in sorted(windows):
             if not merged or left > merged[-1][1] + 1:
-                merged.append((left, right, targets))
+                merged.append((left, right))
                 continue
-            previous_left, previous_right, previous_targets = merged[-1]
-            merged[-1] = (
-                previous_left,
-                max(previous_right, right),
-                tuple(sorted(set(previous_targets) | set(targets))),
-            )
+            previous_left, previous_right = merged[-1]
+            merged[-1] = (previous_left, max(previous_right, right))
         return merged
 
     repair_windows = merge_repair_windows(repair_windows)
     while True:
         all_windows_feasible = True
-        expanded_windows: list[tuple[int, int, tuple[int, ...]]] = []
-        for left, right, targets in repair_windows:
-            if allows_failed_groups_to_change(left, right, targets):
-                expanded_windows.append((left, right, targets))
+        expanded_windows: list[tuple[int, int]] = []
+        for left, right in repair_windows:
+            if allows_group_assignment(left, right):
+                expanded_windows.append((left, right))
                 continue
             expanded_left = max(0, left - 1)
             expanded_right = min(len(groups) - 1, right + 1)
             if expanded_left == left and expanded_right == right:
                 raise ValueError(
-                    "No Arrangement group repair window permits all failed groups "
-                    "to change Segments in one assignment"
+                    "No Arrangement group repair window permits a legal source assignment"
                 )
             expanded_windows.append(
-                (expanded_left, expanded_right, targets)
+                (expanded_left, expanded_right)
             )
             all_windows_feasible = False
         repair_windows = merge_repair_windows(expanded_windows)
@@ -653,7 +795,7 @@ def _repair_window_slot_ids(
 
     selected_indices = {
         index
-        for left, right, _targets in repair_windows
+        for left, right in repair_windows
         for index in range(left, right + 1)
     }
 
@@ -672,6 +814,8 @@ def _validate_targeted_slots(
     slots: list[dict[str, Any]],
     constraints: dict[str, dict[str, Any]],
     video_description: dict[str, Any],
+    *,
+    unavailable_source_segment_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     raw_slots = parsed.get("slots")
     if not isinstance(raw_slots, list):
@@ -696,6 +840,16 @@ def _validate_targeted_slots(
         ):
             raise ValueError(f"Targeted redesign changed planned duration for {slot_id}")
         segment_id = str(item.get("source_segment_id") or "").strip()
+        preserved_anchor_segment_id = constraint.get("preserved_anchor_source_segment_id")
+        if preserved_anchor_segment_id and segment_id != preserved_anchor_segment_id:
+            raise ValueError(
+                f"Targeted redesign moved a preserved dialogue Anchor in "
+                f"{constraint['original_group_id']}"
+            )
+        if segment_id in (unavailable_source_segment_ids or set()):
+            raise ValueError(
+                f"Targeted redesign reused unavailable Source Segment {segment_id}"
+            )
         allowed = set(constraint["allowed_segment_ids"])
         if not segment_id or segment_id not in allowed:
             raise ValueError(
@@ -738,6 +892,13 @@ def _validate_targeted_slots(
         if slot_id not in replacements:
             merged.append(slot)
             continue
+        if isinstance(slot.get("dialogue_anchor"), dict) and any(
+            slot.get(key) != value
+            for key, value in replacements[slot_id].items()
+        ):
+            raise ValueError(
+                f"Targeted redesign changed a preserved dialogue Anchor Slot {slot_id}"
+            )
         updated = dict(slot)
         updated.update(replacements[slot_id])
         merged.append(updated)
@@ -756,9 +917,7 @@ def _validate_targeted_slots(
                 "across multiple Segments"
             )
 
-    segment_order, _ = _segment_metadata(video_description)
     merged_by_slot_id = {str(slot["slot_id"]): slot for slot in merged}
-    previous_segment_index = -1
     for original_group in _arrangement_groups(slots):
         group_segment_ids = {
             str(merged_by_slot_id[slot_id]["source_segment_id"])
@@ -769,17 +928,10 @@ def _validate_targeted_slots(
                 f"Targeted redesign split Source Group "
                 f"{original_group['group_id']} across multiple Segments"
             )
-        segment_id = next(iter(group_segment_ids))
-        segment_index = segment_order[segment_id]
-        if segment_index <= previous_segment_index:
-            raise ValueError(
-                "Arrangement group Segments must remain strictly increasing; "
-                "distinct groups cannot merge onto one Segment"
-            )
-        previous_segment_index = segment_index
 
     grouped = _assign_source_groups(merged, video_description)
     _validate_group_capacity(grouped, video_description)
+    _preserved_anchor_group_constraints(grouped, video_description)
     return grouped
 
 
@@ -797,6 +949,10 @@ def redesign_edit_slots(
     video_description = context.get_artifact("video_description")
     if video_description is None:
         raise RuntimeError("Video description must be available for targeted Slot redesign")
+    (
+        _planners_feedback,
+        unavailable_source_segment_ids,
+    ) = _planning_feedback_constraints(context)
     original_target_slot_ids = _expand_target_group_slot_ids(
         slots,
         target_slot_ids,
@@ -805,11 +961,13 @@ def redesign_edit_slots(
         slots,
         original_target_slot_ids,
         video_description,
+        unavailable_source_segment_ids=unavailable_source_segment_ids,
     )
     constraints = _targeted_slot_constraints(
         slots,
         expanded_slot_ids,
         video_description,
+        unavailable_source_segment_ids=unavailable_source_segment_ids,
     )
     if expanded_slot_ids != target_slot_ids:
         log_event(
@@ -855,6 +1013,7 @@ def redesign_edit_slots(
             slots,
             constraints,
             video_description,
+            unavailable_source_segment_ids=unavailable_source_segment_ids,
         ),
     )
     context.set_artifact("edit_plan", redesigned)
@@ -947,12 +1106,15 @@ def _validate_and_align_slots(
     video_description: dict[str, Any],
     music_profile: dict[str, Any],
     output_fps: int,
+    *,
+    unavailable_source_segment_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     slots = _validate_slots(
         parsed,
         target_duration_sec,
         target_clip_duration_sec,
         video_description,
+        unavailable_source_segment_ids=unavailable_source_segment_ids,
     )
     aligned = align_slots_to_music(
         slots,

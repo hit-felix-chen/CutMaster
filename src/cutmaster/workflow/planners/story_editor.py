@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import combinations
 from typing import Any
 
 from cutmaster.configuration.schema import AppConfig, DialogueAnchorConfig, LLMConfig
@@ -77,24 +78,6 @@ def _normalise_arrangement_slots(
         item["planned_duration_sec"] = round(planned_duration_ms / 1000.0, 6)
         result.append(item)
     return result
-
-
-def _same_arrangement_group(
-    previous: list[dict[str, Any]],
-    current: list[dict[str, Any]],
-) -> bool:
-    """Compare group planning fields while ignoring derived output placement."""
-
-    def without_output_placement(slot: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in slot.items()
-            if key not in {"output_start_sec", "output_end_sec"}
-        }
-
-    return [without_output_placement(slot) for slot in previous] == [
-        without_output_placement(slot) for slot in current
-    ]
 
 
 def _grouped_slots(
@@ -301,149 +284,6 @@ def _audio_ranges_overlap(
     return _overlaps(_output_audio_range(first), _output_audio_range(second))
 
 
-def _audio_overlap_error(
-    first: dict[str, Any],
-    second: dict[str, Any],
-) -> ValueError:
-    first_start, first_end = _output_audio_range(first)
-    second_start, second_end = _output_audio_range(second)
-    return ValueError(
-        "Dialogue-anchor L-cut audio ranges overlap: "
-        f"{first['slot_id']} [{first_start:.3f}, {first_end:.3f}) "
-        f"conflicts with {second['slot_id']} "
-        f"[{second_start:.3f}, {second_end:.3f})"
-    )
-
-
-def _filter_constraints_against_preserved(
-    dialogue_constraints_by_slot: dict[str, dict[str, Any]],
-    preserved_anchors: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Hide prompt choices that cannot coexist with immutable Anchors."""
-
-    filtered: dict[str, dict[str, Any]] = {}
-    exclusions: list[dict[str, Any]] = []
-    for slot_id, constraint in dialogue_constraints_by_slot.items():
-        endpoint_map: dict[str, dict[str, list[str]]] = {}
-        output_end_map: dict[str, dict[str, dict[str, float]]] = {}
-        allowed_segment_ids: list[str] = []
-        output_start_sec = float(constraint["output_audio_start_sec"])
-        allowed_by_segment = constraint.get(
-            "allowed_last_dialogue_ids_by_segment_and_first"
-        ) or {}
-        output_ends_by_segment = constraint.get(
-            "output_audio_end_sec_by_segment_and_first_and_last"
-        ) or {}
-        for raw_segment_id, allowed_by_first in allowed_by_segment.items():
-            segment_id = str(raw_segment_id)
-            output_ends_by_first = output_ends_by_segment.get(segment_id) or {}
-            for raw_first_id, raw_last_ids in allowed_by_first.items():
-                first_dialogue_id = str(raw_first_id)
-                output_ends_by_last = (
-                    output_ends_by_first.get(first_dialogue_id) or {}
-                )
-                for raw_last_id in raw_last_ids:
-                    last_dialogue_id = str(raw_last_id)
-                    raw_output_end_sec = output_ends_by_last.get(last_dialogue_id)
-                    if not isinstance(raw_output_end_sec, (int, float)):
-                        raise ValueError(
-                            f"Allowed dialogue endpoint {slot_id}/"
-                            f"{segment_id}/{first_dialogue_id}/{last_dialogue_id} "
-                            "has no output_audio_end_sec"
-                        )
-                    output_end_sec = float(raw_output_end_sec)
-                    endpoint = {
-                        "output_audio_start_sec": output_start_sec,
-                        "output_audio_end_sec": output_end_sec,
-                    }
-                    conflicts = [
-                        anchor
-                        for anchor in preserved_anchors
-                        if _audio_ranges_overlap(endpoint, anchor)
-                    ]
-                    if conflicts:
-                        exclusions.append(
-                            {
-                                "reason_code": "preserved_anchor_audio_overlap",
-                                "slot_id": str(slot_id),
-                                "source_segment_id": segment_id,
-                                "first_dialogue_id": first_dialogue_id,
-                                "last_dialogue_id": last_dialogue_id,
-                                "output_audio_start_sec": round(
-                                    output_start_sec,
-                                    6,
-                                ),
-                                "output_audio_end_sec": round(
-                                    output_end_sec,
-                                    6,
-                                ),
-                                "conflicts_with_preserved_anchors": [
-                                    {
-                                        "slot_id": str(anchor["slot_id"]),
-                                        "output_audio_start_sec": round(
-                                            float(anchor["output_audio_start_sec"]),
-                                            6,
-                                        ),
-                                        "output_audio_end_sec": round(
-                                            float(anchor["output_audio_end_sec"]),
-                                            6,
-                                        ),
-                                    }
-                                    for anchor in conflicts
-                                ],
-                            }
-                        )
-                        continue
-
-                    if segment_id not in allowed_segment_ids:
-                        allowed_segment_ids.append(segment_id)
-                    endpoint_map.setdefault(segment_id, {}).setdefault(
-                        first_dialogue_id,
-                        [],
-                    ).append(last_dialogue_id)
-                    output_end_map.setdefault(segment_id, {}).setdefault(
-                        first_dialogue_id,
-                        {},
-                    )[last_dialogue_id] = round(output_end_sec, 6)
-
-        filtered[str(slot_id)] = {
-            **{
-                key: value
-                for key, value in constraint.items()
-                if key != "allowed_passages"
-            },
-            "allowed_segment_ids": allowed_segment_ids,
-            "allowed_last_dialogue_ids_by_segment_and_first": endpoint_map,
-            "output_audio_end_sec_by_segment_and_first_and_last": (
-                output_end_map
-            ),
-        }
-    return filtered, exclusions
-
-
-def _validate_anchor_sequence(
-    anchors: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Require the model's complete Anchor selection to be one legal sequence."""
-
-    for previous, current in zip(anchors, anchors[1:]):
-        previous_source = parse_range(str(previous["source_window"]))
-        current_source = parse_range(str(current["source_window"]))
-        if set(previous["dialogue_ids"]) & set(current["dialogue_ids"]):
-            raise ValueError("Dialogue anchors must not reuse dialogue items")
-        if _audio_ranges_overlap(previous, current):
-            raise _audio_overlap_error(previous, current)
-        if (
-            current_source[0] <= previous_source[0] + _TOLERANCE_SEC
-            or current_source[0] < previous_source[1] - _TOLERANCE_SEC
-        ):
-            raise ValueError(
-                "Anchor picture windows must be strictly increasing and "
-                "non-overlapping in Slot order"
-            )
-    return anchors
-
-
 def _dialogues_by_segment(
     video_description: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -569,12 +409,11 @@ def _dialogue_constraints_by_slot(
         required_after_ms = sum(
             _slot_duration_ms(item) for item in group_slots[group_position + 1 :]
         )
-        allowed_last_ids_by_first: dict[str, list[str]] = {}
-        output_end_by_first_and_last: dict[str, dict[str, float]] = {}
         segment_id = _source_segment_id(slot)
         segment = segments[segment_id]
         segment_start_ms, segment_end_ms = _segment_bounds_ms(segment)
         sequence = dialogues.get(segment_id) or []
+        has_feasible_passage = False
         for start_index, first in enumerate(sequence):
             speech_start = float(first["start_sec"])
             picture_start_ms = _seconds_to_ms(speech_start)
@@ -582,8 +421,6 @@ def _dialogue_constraints_by_slot(
             if (
                 picture_start_ms < segment_start_ms
                 or picture_end_ms > segment_end_ms
-                or picture_start_ms - segment_start_ms < required_before_ms
-                or segment_end_ms - picture_end_ms < required_after_ms
             ):
                 continue
             for end_index in range(start_index, len(sequence)):
@@ -591,36 +428,15 @@ def _dialogue_constraints_by_slot(
                 speech_end = float(last["end_sec"])
                 speech_duration = speech_end - speech_start
                 if speech_duration > maximum_audio_duration + _TOLERANCE_SEC:
-                    continue
+                    break
                 if speech_duration >= min_anchor_duration_sec - _TOLERANCE_SEC:
-                    allowed_last_ids_by_first.setdefault(
-                        str(first["dialogue_id"]),
-                        [],
-                    ).append(
-                        str(last["dialogue_id"])
-                    )
-                    output_end_by_first_and_last.setdefault(
-                        str(first["dialogue_id"]),
-                        {},
-                    )[str(last["dialogue_id"])] = round(
-                        output_start + speech_duration,
-                        6,
-                    )
+                    has_feasible_passage = True
+                    break
+            if has_feasible_passage:
+                break
         has_same_segment_sibling_slots = len(group_slots) > 1
         result[slot_id] = {
-            "allowed_segment_ids": (
-                [segment_id] if allowed_last_ids_by_first else []
-            ),
-            "allowed_last_dialogue_ids_by_segment_and_first": (
-                {segment_id: allowed_last_ids_by_first}
-                if allowed_last_ids_by_first
-                else {}
-            ),
-            "output_audio_end_sec_by_segment_and_first_and_last": (
-                {segment_id: output_end_by_first_and_last}
-                if output_end_by_first_and_last
-                else {}
-            ),
+            "allowed_segment_ids": [segment_id] if has_feasible_passage else [],
             "group_id": group_id,
             "has_same_segment_sibling_slots": (
                 has_same_segment_sibling_slots
@@ -712,7 +528,6 @@ def _validate_selection(
     dialogue_constraints_by_slot: dict[str, dict[str, Any]],
     anchor_config: DialogueAnchorConfig,
     *,
-    require_anchor: bool = True,
     required_anchor_slot_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     slots_by_id = {
@@ -731,24 +546,14 @@ def _validate_selection(
     output_end = max(float(slot["output_end_sec"]) for slot in slots)
     selected: list[dict[str, Any]] = []
     raw_anchors = parsed.get("anchors") or []
-    if require_anchor and not raw_anchors:
-        raise ValueError(
-            "At least one dialogue anchor is required when Anchor planning is enabled"
-        )
     if len(raw_anchors) > anchor_config.max_anchors:
         raise ValueError(
             f"At most {anchor_config.max_anchors} dialogue anchors may be selected"
         )
-    selected_slot_ids: set[str] = set()
     for raw in raw_anchors:
         slot_id = str(raw.get("slot_id") or "")
         if slot_id not in slots_by_id:
             raise ValueError(f"Unknown dialogue-anchor Slot: {slot_id}")
-        if slot_id in selected_slot_ids:
-            raise ValueError(
-                f"Dialogue-anchor Slot {slot_id} may be selected at most once"
-            )
-        selected_slot_ids.add(slot_id)
         slot = slots_by_id[slot_id]
         constraint = dialogue_constraints_by_slot.get(slot_id) or {}
         segment_id = str(raw.get("source_segment_id") or "")
@@ -828,18 +633,6 @@ def _validate_selection(
             raise ValueError(
                 f"Dialogue placement for {slot_id} exceeds Segment bounds"
             )
-        allowed_ranges = constraint.get(
-            "allowed_last_dialogue_ids_by_segment_and_first"
-        ) or {}
-        allowed_last_ids = (
-            allowed_ranges.get(segment_id, {}).get(start_dialogue_id, [])
-            if isinstance(allowed_ranges, dict)
-            else []
-        )
-        if end_dialogue_id not in {str(value) for value in allowed_last_ids}:
-            raise ValueError(
-                f"Dialogue range for {slot_id} is not an allowed endpoint pair"
-            )
         source_range = (window_start, window_end)
         source_shot_ids = [
             str(shot["shot_id"])
@@ -909,22 +702,67 @@ def _validate_selection(
             }
         )
     selected.sort(key=lambda item: slot_order[item["slot_id"]])
-    missing_required = set(required_anchor_slot_ids or set()) - selected_slot_ids
-    if missing_required:
-        raise ValueError(
-            "Required preserved dialogue Anchors are missing: "
-            + ", ".join(sorted(missing_required))
+    required = set(required_anchor_slot_ids or set())
+
+    def legal_subset(values: tuple[dict[str, Any], ...]) -> bool:
+        slot_ids = [str(anchor["slot_id"]) for anchor in values]
+        if len(slot_ids) != len(set(slot_ids)) or not required.issubset(slot_ids):
+            return False
+        for previous, current in zip(values, values[1:]):
+            previous_source = parse_range(str(previous["source_window"]))
+            current_source = parse_range(str(current["source_window"]))
+            if set(previous["dialogue_ids"]) & set(current["dialogue_ids"]):
+                return False
+            if _audio_ranges_overlap(previous, current):
+                return False
+            if (
+                current_source[0] <= previous_source[0] + _TOLERANCE_SEC
+                or current_source[0] < previous_source[1] - _TOLERANCE_SEC
+            ):
+                return False
+        try:
+            _build_partition_layout(
+                slots,
+                {
+                    str(anchor["slot_id"]): _time_range_ms(
+                        anchor["source_window"]
+                    )
+                    for anchor in values
+                },
+                video_description,
+            )
+        except ValueError:
+            return False
+        return True
+
+    def subset_score(values: tuple[dict[str, Any], ...]) -> tuple[float, int, int]:
+        return (
+            round(
+                sum(
+                    float(anchor["output_audio_end_sec"])
+                    - float(anchor["output_audio_start_sec"])
+                    for anchor in values
+                ),
+                6,
+            ),
+            sum(int(anchor["importance_likert"]) for anchor in values),
+            sum(int(anchor["coherence_likert"]) for anchor in values),
         )
-    _validate_anchor_sequence(selected)
-    _build_partition_layout(
-        slots,
-        {
-            str(anchor["slot_id"]): _time_range_ms(anchor["source_window"])
-            for anchor in selected
-        },
-        video_description,
-    )
-    return selected
+
+    for subset_size in range(len(selected), -1, -1):
+        legal = [
+            subset
+            for subset in combinations(selected, subset_size)
+            if legal_subset(subset)
+        ]
+        if legal:
+            return list(max(legal, key=subset_score))
+    if required:
+        raise ValueError(
+            "Repair invalidated a preserved dialogue Anchor: "
+            + ", ".join(sorted(required))
+        )
+    return []
 
 
 def _fixed_candidate(
@@ -1091,180 +929,20 @@ def _raw_anchor_selection(slot: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def select_dialogue_anchors(
+def _apply_anchor_selections(
     slots: list[dict[str, Any]],
-    config: LLMConfig,
-    anchor_config: DialogueAnchorConfig,
+    selections: list[dict[str, Any]],
+    video_description: dict[str, Any],
     context: WorkflowContext,
-    *,
-    selectable_slot_ids: set[str] | None = None,
-    preserved_selections: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    slots = _normalise_arrangement_slots(slots)
-    video_description = context.get_artifact("video_description")
-    if video_description is None:
-        raise RuntimeError(
-            "Video description is required for dialogue anchor selection"
-        )
-    dialogues = _dialogues_by_segment(video_description)
-    dialogue_constraints_by_slot = _dialogue_constraints_by_slot(
-        slots,
-        video_description,
-        dialogues,
-        anchor_config.min_anchor_duration_sec,
-    )
-    slot_ids = {str(slot["slot_id"]) for slot in slots}
-    selected_slot_ids = (
-        set(slot_ids) if selectable_slot_ids is None else set(selectable_slot_ids)
-    )
-    unknown_slot_ids = selected_slot_ids - slot_ids
-    if unknown_slot_ids:
-        raise ValueError(
-            "Unknown selectable dialogue-anchor Slots: "
-            + ", ".join(sorted(unknown_slot_ids))
-        )
-    preserved = [dict(item) for item in preserved_selections or []]
-    preserved_slot_ids = {str(item.get("slot_id") or "") for item in preserved}
-    overlap = selected_slot_ids & preserved_slot_ids
-    if overlap:
-        raise ValueError(
-            "Preserved and selectable dialogue-anchor Slots overlap: "
-            + ", ".join(sorted(overlap))
-        )
-    normalized_preserved = (
-        _validate_selection(
-            {"anchors": preserved},
-            slots,
-            video_description,
-            dialogues,
-            dialogue_constraints_by_slot,
-            anchor_config,
-            require_anchor=False,
-            required_anchor_slot_ids=preserved_slot_ids,
-        )
-        if preserved
-        else []
-    )
-    remaining_anchor_count = anchor_config.max_anchors - len(preserved)
-    if remaining_anchor_count < 0:
-        raise ValueError(
-            f"At most {anchor_config.max_anchors} dialogue anchors may be selected"
-        )
-    selectable_slots = [
-        slot for slot in slots if str(slot["slot_id"]) in selected_slot_ids
-    ]
-    selectable_constraints = {
-        slot_id: dialogue_constraints_by_slot[slot_id]
-        for slot_id in selected_slot_ids
-    }
-    selectable_constraints, preserved_conflict_exclusions = (
-        _filter_constraints_against_preserved(
-            selectable_constraints,
-            normalized_preserved,
-        )
-    )
-    context.set_artifact(
-        "anchor_preserved_conflict_exclusions",
-        preserved_conflict_exclusions,
-    )
-    valid_segment_ids = {
-        str(segment_id)
-        for constraint in selectable_constraints.values()
-        for segment_id in constraint["allowed_segment_ids"]
-    }
-    source_segments = _eligible_source_segments(
-        selectable_slots,
-        video_description,
-        dialogues,
-    )
-    source_segments = [
-        segment
-        for segment in source_segments
-        if str(segment["segment_id"]) in valid_segment_ids
-    ]
-    should_request = bool(
-        remaining_anchor_count > 0
-        and source_segments
-        and any(
-            constraint["allowed_segment_ids"]
-            for constraint in selectable_constraints.values()
-        )
-    )
-    def validate_combined(parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        new_selections = list(parsed.get("anchors") or [])
-        return _validate_selection(
-            {"anchors": [*preserved, *new_selections]},
-            slots,
-            video_description,
-            dialogues,
-            dialogue_constraints_by_slot,
-            anchor_config,
-            required_anchor_slot_ids=preserved_slot_ids,
-        )
-
-    if should_request:
-        video_summary = context.get_artifact("video_summary")
-        if video_summary is None:
-            raise RuntimeError(
-                "Video summary is required for dialogue anchor selection"
-            )
-        package = prompt_registry.build(
-            PromptStage.PLANNERS,
-            PromptTask.DIALOGUE_ANCHOR_SELECTION,
-            DialogueAnchorSelectionDetails(
-                slots=selectable_slots,
-                video_summary=video_summary,
-                source_segments=source_segments,
-                dialogue_constraints_by_slot=selectable_constraints,
-                max_anchors=remaining_anchor_count,
-                min_anchor_duration_sec=anchor_config.min_anchor_duration_sec,
-                min_anchors=0 if preserved else 1,
-                preserved_anchors=tuple(
-                    {
-                        "slot_id": str(item["slot_id"]),
-                        "source_segment_id": str(item["source_segment_id"]),
-                        "first_dialogue_id": str(item["dialogue_ids"][0]),
-                        "last_dialogue_id": str(item["dialogue_ids"][-1]),
-                        "output_audio_start_sec": float(
-                            item["output_audio_start_sec"]
-                        ),
-                        "output_audio_end_sec": float(
-                            item["output_audio_end_sec"]
-                        ),
-                    }
-                    for item in normalized_preserved
-                ),
-            ),
-        )
-        selected = context.call_prompt(
-            package=package,
-            config=config,
-            validate_business=validate_combined,
-        )
-    else:
-        if not preserved:
-            if not source_segments:
-                raise ValueError(
-                    "No eligible dialogue Segment is assigned to the current Arrangement"
-                )
-            raise ValueError(
-                "No eligible dialogue passage can satisfy the current Arrangement capacity"
-            )
-        selected = validate_combined({"anchors": []})
-    _warn_for_anchors_outside_preferred_picture_ranges(
-        selected,
-        dialogue_constraints_by_slot,
-        ignored_slot_ids=preserved_slot_ids,
-    )
     selected_by_slot = {
-        item["slot_id"]: item
-        for item in selected
+        str(item["slot_id"]): item for item in selections
     }
     result: list[dict[str, Any]] = []
     anchors: list[dict[str, Any]] = []
     for slot in slots:
         item = dict(slot)
-        selection = selected_by_slot.get(slot["slot_id"])
+        selection = selected_by_slot.get(str(slot["slot_id"]))
         if selection is not None:
             anchor, candidate = _fixed_candidate(item, selection)
             item["dialogue_anchor"] = anchor
@@ -1279,6 +957,87 @@ def select_dialogue_anchors(
     context.set_artifact("planning_groups", planning_groups)
     context.set_artifact("dialogue_anchors", anchors)
     return result
+
+
+def select_dialogue_anchors(
+    slots: list[dict[str, Any]],
+    config: LLMConfig,
+    anchor_config: DialogueAnchorConfig,
+    context: WorkflowContext,
+) -> list[dict[str, Any]]:
+    slots = _normalise_arrangement_slots(slots)
+    video_description = context.get_artifact("video_description")
+    if video_description is None:
+        raise RuntimeError(
+            "Video description is required for dialogue anchor selection"
+        )
+    if not anchor_config.enabled:
+        return _apply_anchor_selections(slots, [], video_description, context)
+    dialogues = _dialogues_by_segment(video_description)
+    dialogue_constraints_by_slot = _dialogue_constraints_by_slot(
+        slots,
+        video_description,
+        dialogues,
+        anchor_config.min_anchor_duration_sec,
+    )
+    valid_segment_ids = {
+        str(segment_id)
+        for constraint in dialogue_constraints_by_slot.values()
+        for segment_id in constraint["allowed_segment_ids"]
+    }
+    source_segments = _eligible_source_segments(
+        slots,
+        video_description,
+        dialogues,
+    )
+    source_segments = [
+        segment
+        for segment in source_segments
+        if str(segment["segment_id"]) in valid_segment_ids
+    ]
+    if source_segments:
+        video_summary = context.get_artifact("video_summary")
+        if video_summary is None:
+            raise RuntimeError(
+                "Video summary is required for dialogue anchor selection"
+            )
+        package = prompt_registry.build(
+            PromptStage.PLANNERS,
+            PromptTask.DIALOGUE_ANCHOR_SELECTION,
+            DialogueAnchorSelectionDetails(
+                slots=slots,
+                video_summary=video_summary,
+                source_segments=source_segments,
+                dialogue_constraints_by_slot=dialogue_constraints_by_slot,
+                max_anchors=anchor_config.max_anchors,
+                min_anchor_duration_sec=anchor_config.min_anchor_duration_sec,
+            ),
+        )
+        selected = context.call_prompt(
+            package=package,
+            config=config,
+            validate_business=lambda parsed: _validate_selection(
+                parsed,
+                slots,
+                video_description,
+                dialogues,
+                dialogue_constraints_by_slot,
+                anchor_config,
+            ),
+        )
+    else:
+        selected = []
+    _warn_for_anchors_outside_preferred_picture_ranges(
+        selected,
+        dialogue_constraints_by_slot,
+        ignored_slot_ids=set(),
+    )
+    return _apply_anchor_selections(
+        slots,
+        selected,
+        video_description,
+        context,
+    )
 
 
 class StoryEditorAgent:
@@ -1312,10 +1071,9 @@ class StoryEditorAgent:
         previous_slots: list[dict[str, Any]],
         replanned_slot_ids: set[str],
     ) -> list[dict[str, Any]]:
-        """Re-run Story only for changed complete Arrangement groups."""
+        """Preserve legal Anchors and rebuild Story partitions without a model call."""
 
         current = _normalise_arrangement_slots(slots)
-        previous_arrangement = _normalise_arrangement_slots(previous_slots)
         current_slot_ids = {str(slot["slot_id"]) for slot in current}
         missing = set(replanned_slot_ids) - current_slot_ids
         if missing:
@@ -1323,47 +1081,45 @@ class StoryEditorAgent:
                 "Replanned Slots are missing from the repaired Arrangement: "
                 + ", ".join(sorted(missing))
             )
-        previous_groups = {
-            group_id: group_slots
-            for group_id, _segment_id, group_slots in _grouped_slots(
-                previous_arrangement
-            )
-        }
-        reusable_group_ids: set[str] = set()
-        selectable_slot_ids: set[str] = set()
-        for group_id, _segment_id, group_slots in _grouped_slots(current):
-            slot_ids = {str(slot["slot_id"]) for slot in group_slots}
-            if (
-                not (slot_ids & replanned_slot_ids)
-                and previous_groups.get(group_id) is not None
-                and _same_arrangement_group(
-                    previous_groups[group_id],
-                    group_slots,
-                )
-            ):
-                reusable_group_ids.add(group_id)
-            else:
-                selectable_slot_ids.update(slot_ids)
-
         preserved_selections = [
             raw
             for slot in previous_slots
-            if _base_group_id(slot) in reusable_group_ids
             if (raw := _raw_anchor_selection(slot)) is not None
         ]
-        model_config = replace(
-            self.config.llm,
-            max_retries=(
-                self.config.planners.dialogue_anchors.max_model_requests - 1
-            ),
-        )
-        return select_dialogue_anchors(
+        video_description = self.context.get_artifact("video_description")
+        if video_description is None:
+            raise RuntimeError(
+                "Video description is required for dialogue anchor preservation"
+            )
+        dialogues = _dialogues_by_segment(video_description)
+        constraints = _dialogue_constraints_by_slot(
             current,
-            model_config,
-            self.config.planners.dialogue_anchors,
+            video_description,
+            dialogues,
+            self.config.planners.dialogue_anchors.min_anchor_duration_sec,
+        )
+        required_slot_ids = {
+            str(item["slot_id"]) for item in preserved_selections
+        }
+        try:
+            selected = _validate_selection(
+                {"anchors": preserved_selections},
+                current,
+                video_description,
+                dialogues,
+                constraints,
+                self.config.planners.dialogue_anchors,
+                required_anchor_slot_ids=required_slot_ids,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Arrangement repair invalidated a preserved dialogue Anchor"
+            ) from exc
+        return _apply_anchor_selections(
+            current,
+            selected,
+            video_description,
             self.context,
-            selectable_slot_ids=selectable_slot_ids,
-            preserved_selections=preserved_selections,
         )
 
     def restore_arrangement_slots(

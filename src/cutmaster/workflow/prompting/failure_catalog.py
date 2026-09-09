@@ -13,10 +13,7 @@ class PromptFailureCode(StrEnum):
     MODEL_REQUEST_FAILED = "model_request_failed"
     MODEL_RETRY_EXHAUSTED = "model_retry_exhausted"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
-    PLANNERS_STAGE_ATTEMPT_INFEASIBLE = "planners_stage_attempt_infeasible"
     RESPONSE_VALIDATION_FAILED = "response_validation_failed"
-    CANDIDATE_RETRIEVAL_FAILED = "candidate_retrieval_failed"
-    SOURCE_SEGMENTS_TOO_SHORT = "source_segments_too_short"
     VISUALLY_STATIC = "visually_static"
     REQUIRED_SUBJECT_NOT_VISUALLY_CONFIRMED = (
         "required_subject_not_visually_confirmed"
@@ -29,12 +26,6 @@ class PromptFailureCode(StrEnum):
         "insufficient_visually_grounded_candidates"
     )
     SOURCE_CHRONOLOGY_OR_OVERLAP = "source_chronology_or_overlap"
-    PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH = (
-        "patch_degrades_or_requires_unscored_path"
-    )
-    PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET = (
-        "patch_excluded_by_maximal_feasible_subset"
-    )
     PROVIDER_IMAGE_INSPECTION_FAILED = "provider_image_inspection_failed"
     PROVIDER_DATA_INSPECTION_FAILED = "provider_data_inspection_failed"
     PROVIDER_REQUEST_LIMIT_EXCEEDED = "provider_request_limit_exceeded"
@@ -118,18 +109,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "payload so it fits the provider limit, then submit it again."
         ),
     ),
-    PromptFailureCode.PLANNERS_STAGE_ATTEMPT_INFEASIBLE: PromptFailureDefinition(
-        diagnosis=(
-            "ASTER attempt {attempt} became infeasible during {stage}: "
-            "{error_message}"
-        ),
-        repair_requirement=(
-            "Use the attached Slot Group diagnostics to change the failing group's "
-            "source assignment or complete trajectory choices, while preserving fixed "
-            "Anchors and all chronology, duration, visual-grounding, and capacity "
-            "constraints."
-        ),
-    ),
     PromptFailureCode.RESPONSE_VALIDATION_FAILED: PromptFailureDefinition(
         diagnosis=(
             "The previous model response failed executable validation: "
@@ -139,31 +118,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "Correct the exact validation failure and return a response that conforms "
             "to the supplied response contract. Do not repeat the rejected value."
         ),
-    ),
-    PromptFailureCode.CANDIDATE_RETRIEVAL_FAILED: PromptFailureDefinition(
-        diagnosis=(
-            "Trajectory retrieval for the failed Slot Group ended before one "
-            "complete trajectory could be accepted: {error_message}"
-        ),
-        repair_requirement=(
-            "Return a complete trajectory with exactly one fixed-duration item for "
-            "every group Slot, in Slot order and without internal overlap, wholly "
-            "inside the assigned Planning Segment."
-        ),
-    ),
-    PromptFailureCode.SOURCE_SEGMENTS_TOO_SHORT: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The source Segment assigned to the failed Slot Group has only "
-                "{longest_segment_duration_sec} seconds, below the group's required "
-                "planned duration of {planned_duration_sec} seconds."
-            ),
-            repair_requirement=(
-                "Reassign the whole Slot Group to one source Segment where all member "
-                "Slots can fit in order without overlap. Preserve every Slot's output "
-                "duration."
-            ),
-        )
     ),
     PromptFailureCode.VISUALLY_STATIC: PromptFailureDefinition(
         diagnosis=(
@@ -184,49 +138,54 @@ PROMPT_FAILURE_CATALOG: dict[
                 "was: {visual_evidence}"
             ),
             repair_requirement=(
-                "Choose a different Segment and visible event where every subject that "
-                "must appear in this one clip can be verified. If the source never "
-                "shows those subjects together, reduce required_visible_subjects or "
-                "split the narrative requirement across separate Slots."
+                "Use the local visual evidence to revise the failed Slot Group's visible "
+                "events, required_visible_subjects, or other editorial fields. You may "
+                "keep the original Segment when it remains among the legal choices, or "
+                "choose another legal Segment. Require only subjects that must appear "
+                "in this one clip and can be visibly verified; preserve the supplied "
+                "Slot structure and legal Anchors."
             ),
         )
     ),
     PromptFailureCode.DUPLICATE_CANDIDATE_RANGE: PromptFailureDefinition(
         diagnosis=(
-            "Candidate {candidate_id} exactly duplicates a previously accepted or "
-            "rejected timestamp {timestamp} for {slot_id}."
+            "Candidate {candidate_id} at {timestamp} reuses overlapping source "
+            "evidence from another trajectory for {slot_id}."
         ),
         repair_requirement=(
-            "Shift the candidate to a different timestamp while preserving the exact "
-            "planned clip duration. Partial overlap with another alternative is allowed."
+            "Use a different source Shot or a non-overlapping source window while "
+            "preserving the exact planned clip duration."
         ),
     ),
     PromptFailureCode.NO_CANDIDATE_PASSED_VISUAL_DIAGNOSTICS: (
         PromptFailureDefinition(
             diagnosis=(
                 "Every complete trajectory for the failed Slot Group was rejected "
-                "because at least one item failed deterministic motion checks or "
-                "visual grounding. Item diagnostics are included in "
+                "because at least one item failed deterministic motion checks, "
+                "source-evidence diversity, or visual grounding. Item diagnostics "
+                "are included in "
                 "candidate_rejections."
             ),
             repair_requirement=(
                 "Redesign the whole Slot Group's visible events, required subjects, and "
-                "source_segment_id. Move the group to different source evidence instead "
-                "of paraphrasing the same unsupported request."
+                "other editorial fields using the concrete candidate diagnostics. You "
+                "may keep the original Segment when it remains legal, or change the "
+                "shared source_segment_id. Correct the actual unsupported requirements "
+                "rather than treating a zero-candidate batch as a permanent Segment ban."
             ),
         )
     ),
     PromptFailureCode.INSUFFICIENT_VISUALLY_GROUNDED_CANDIDATES: (
         PromptFailureDefinition(
             diagnosis=(
-                "A completed trajectory-retrieval round left these Slot Groups with no "
-                "valid complete trajectory: {shortages}."
+                "The single trajectory-retrieval batch left these Slot Groups with "
+                "no valid complete trajectory: {shortages}."
             ),
             repair_requirement=(
-                "Reassign each failed Slot Group as a whole, rerun Story Editor for the "
-                "new Anchor split, then retrieve complete trajectories again. A group "
-                "with at least one valid trajectory may proceed even if it did not reach "
-                "the configured early-stop target."
+                "Repair each failed Slot Group as a whole and preserve legal Anchors. "
+                "You may keep the original Segment when it remains legal while revising "
+                "the group's editorial requirements, or choose another legal Segment; "
+                "then retrieve one new complete-trajectory batch for the repaired group."
             ),
         )
     ),
@@ -239,32 +198,6 @@ PROMPT_FAILURE_CATALOG: dict[
             "Keep the original source ranges strictly increasing and non-overlapping. "
             "Replace only patches that preserve this invariant."
         ),
-    ),
-    PromptFailureCode.PATCH_DEGRADES_OR_REQUIRES_UNSCORED_PATH: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The proposed trajectory replacement for {group_id} lowers the weighted "
-                "full-path score or requires a hard-cut pair that has not been visually "
-                "scored."
-            ),
-            repair_requirement=(
-                "Keep the current group trajectory or choose another whole trajectory "
-                "whose complete hard-cut path is scored and does not reduce the baseline."
-            ),
-        )
-    ),
-    PromptFailureCode.PATCH_EXCLUDED_BY_MAXIMAL_FEASIBLE_SUBSET: (
-        PromptFailureDefinition(
-            diagnosis=(
-                "The proposed trajectory replacement for {group_id} is plausible by "
-                "itself but cannot coexist with the higher-scoring maximal feasible "
-                "patch subset."
-            ),
-            repair_requirement=(
-                "Keep the accepted group replacements and omit this one unless another "
-                "whole trajectory is jointly feasible, non-overlapping, and non-degrading."
-            ),
-        )
     ),
     PromptFailureCode.PROVIDER_IMAGE_INSPECTION_FAILED: PromptFailureDefinition(
         diagnosis=(

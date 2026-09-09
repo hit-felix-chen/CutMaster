@@ -65,7 +65,6 @@ _ASTER_AGENTS = (
     "story_editor",
     "timeline_scout",
     "edit_composer",
-    "revision_editor",
 )
 
 
@@ -78,7 +77,7 @@ class ASTERJobProgressReporter(ProgressReporter):
 
     def report(self, update: ProgressUpdate) -> None:
         if update.total != len(_ASTER_AGENTS) or update.unit != "agent":
-            raise ValueError("ASTER progress must report the five agent milestones")
+            raise ValueError("ASTER progress must report the four planning agent milestones")
         try:
             active_index = _ASTER_AGENTS.index(update.description)
         except ValueError as error:
