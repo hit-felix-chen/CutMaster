@@ -15,12 +15,11 @@ const agents = [
   ['E', 'edit_composer'],
 ] as const satisfies ReadonlyArray<readonly [string, AsterAgent]>
 
-const agentKey: Record<AsterAgent, string> = {
+const agentKey: Record<Exclude<AsterAgent, 'revision_editor'>, string> = {
   arrangement_architect: 'arrangementArchitect',
   story_editor: 'storyEditor',
   timeline_scout: 'timelineScout',
   edit_composer: 'editComposer',
-  revision_editor: 'legacyRevisionEditor',
 }
 
 interface AsterProgressProps {
@@ -116,9 +115,6 @@ export function AsterProgress({
           )
         })}
       </ol>
-      {!compact ? (
-        <p className="aster-progress__renderer">{t('progress.rendererHandoff')}</p>
-      ) : null}
     </section>
   )
 }

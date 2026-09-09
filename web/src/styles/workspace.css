@@ -2144,7 +2144,7 @@
 }
 .master-lane {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.3rem;
   margin: 1.4rem 0;
 }

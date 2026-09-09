@@ -242,7 +242,7 @@
     "preparingBody": "执行进程已经启动，首个智能体里程碑即将出现。",
     "legacyWorkingBody": "当前运行没有提供智能体级里程碑，页面仍会持续更新整体状态与心跳。",
     "complete": "ASTER 规划已完成",
-    "completeBody": "A/S/T/E 规划阶段已完成，初始 Frozen Edit 已就绪；由 R · Renderer 独立执行渲染。",
+    "completeBody": "A/S/T/E 规划阶段已完成，初始 Frozen Edit 已就绪。",
     "heartbeat": "最近心跳 · {{time}}",
     "agents": {
       "arrangementArchitect": {
@@ -265,8 +265,7 @@
         "active": "Edit Composer 正在组接序列",
         "description": "以整组轨迹为单位，组接满足时序的全局连贯镜头序列。"
       }
-    },
-    "rendererHandoff": "R · Renderer：按冻结的剪辑方案渲染视频，执行状态见渲染版本。"
+    }
   },
   "brief": {
     "title": "创意简报",

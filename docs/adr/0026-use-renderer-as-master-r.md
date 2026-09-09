@@ -15,8 +15,9 @@ the existing deterministic compilation and source-window optimization.
 
 ## Compatibility
 
-Historical Revision Editor checkpoints and usage records remain readable and
-are labelled as legacy, never reclassified as Renderer costs. New planning runs
+Historical Revision Editor checkpoints and usage records remain readable, but
+the Web UI hides retired review task usage rows and standalone R role labels.
+Historical billing totals remain unchanged, never reclassified as Renderer costs. New planning runs
 write no Revision Editor checkpoints. The independent, user-initiated Guided
 Revision feature from ADR 0009 remains available.
 
