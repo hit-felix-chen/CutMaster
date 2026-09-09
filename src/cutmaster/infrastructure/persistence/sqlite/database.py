@@ -618,7 +618,10 @@ class SQLiteApplicationStore:
         project_id: ProjectId,
         editing_intent: str,
         target_duration_sec: float,
+        anchor_enabled: bool = True,
     ) -> IdempotentResult:
+        if not isinstance(anchor_enabled, bool):
+            raise TypeError("anchor_enabled must be a boolean")
         intent = _normalise_name(editing_intent, "Editing Intent")
         if isinstance(target_duration_sec, bool) or not isinstance(
             target_duration_sec,
@@ -632,16 +635,17 @@ class SQLiteApplicationStore:
             "project_id": str(project_id),
             "editing_intent": intent,
             "target_duration_sec": duration,
+            "anchor_enabled": anchor_enabled,
         }
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
             cursor = connection.execute(
                 """
                 UPDATE projects
-                SET brief_intent = ?, brief_target_duration = ?, updated_at = ?
+                SET brief_intent = ?, brief_target_duration = ?, anchor_enabled = ?, updated_at = ?
                 WHERE project_id = ?
                 """,
-                (intent, duration, now, str(project_id)),
+                (intent, duration, int(anchor_enabled), now, str(project_id)),
             )
             if cursor.rowcount != 1:
                 raise ManagedStateNotFound("project", str(project_id))
@@ -670,8 +674,12 @@ class SQLiteApplicationStore:
         music: Sequence[MaterialId],
         editing_intent: str,
         target_duration_sec: float,
+        anchor_enabled: bool = True,
     ) -> IdempotentResult:
         """Atomically persist the complete mutable Project setup."""
+
+        if not isinstance(anchor_enabled, bool):
+            raise TypeError("anchor_enabled must be a boolean")
 
         video_values = [str(item) for item in videos]
         music_values = [str(item) for item in music]
@@ -694,6 +702,7 @@ class SQLiteApplicationStore:
             "music": music_values,
             "editing_intent": intent,
             "target_duration_sec": duration,
+            "anchor_enabled": anchor_enabled,
         }
 
         def action(connection: sqlite3.Connection, now: str) -> JsonObject:
@@ -720,10 +729,10 @@ class SQLiteApplicationStore:
             connection.execute(
                 """
                 UPDATE projects
-                SET brief_intent = ?, brief_target_duration = ?, updated_at = ?
+                SET brief_intent = ?, brief_target_duration = ?, anchor_enabled = ?, updated_at = ?
                 WHERE project_id = ?
                 """,
-                (intent, duration, now, str(project_id)),
+                (intent, duration, int(anchor_enabled), now, str(project_id)),
             )
             self._event(
                 connection,
@@ -868,6 +877,7 @@ class SQLiteApplicationStore:
                 else {
                     "editing_intent": row["brief_intent"],
                     "target_duration_sec": row["brief_target_duration"],
+                    "anchor_enabled": bool(row["anchor_enabled"]),
                 }
             ),
             "created_at": row["created_at"],
@@ -963,8 +973,8 @@ class SQLiteApplicationStore:
                 INSERT INTO runs (
                     run_id, project_id, sequence, status, editing_intent,
                     target_duration_sec, configuration_json, failure_message,
-                    created_at, updated_at, planning_options_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                    created_at, updated_at, planning_options_json, anchor_enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -977,6 +987,7 @@ class SQLiteApplicationStore:
                     now,
                     now,
                     planning_options_json,
+                    int(brief.get("anchor_enabled", True)),
                 ),
             )
             for material_type, identifiers in (
@@ -1086,8 +1097,8 @@ class SQLiteApplicationStore:
                 INSERT INTO runs (
                     run_id, project_id, sequence, status, editing_intent,
                     target_duration_sec, configuration_json, failure_message,
-                    created_at, updated_at, planning_options_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                    created_at, updated_at, planning_options_json, anchor_enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -1100,6 +1111,7 @@ class SQLiteApplicationStore:
                     now,
                     now,
                     source["planning_options_json"],
+                    source["anchor_enabled"],
                 ),
             )
             connection.executemany(
@@ -1675,6 +1687,7 @@ class SQLiteApplicationStore:
             "status": row["status"],
             "editing_intent": row["editing_intent"],
             "target_duration_sec": row["target_duration_sec"],
+            "anchor_enabled": bool(row["anchor_enabled"]),
             "configuration": _parse_json(row["configuration_json"]),
             "planning_options": _parse_json(row["planning_options_json"]),
             "video_material_ids": [

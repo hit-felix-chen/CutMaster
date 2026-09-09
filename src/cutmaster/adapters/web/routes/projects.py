@@ -324,6 +324,7 @@ def save_creative_brief(
                 ProjectId.parse(project_id),
                 body.editing_intent,
                 body.target_duration_sec,
+                body.anchor_enabled,
             )
         )
     )
@@ -345,6 +346,7 @@ def save_project_setup(
                 tuple(MaterialId.parse(item) for item in body.music_material_ids),
                 body.editing_intent,
                 body.target_duration_sec,
+                body.anchor_enabled,
             )
         )
     )

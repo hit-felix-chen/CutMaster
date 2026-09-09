@@ -64,6 +64,7 @@ describe('consolidated Project setup', () => {
         }
         if (url.endsWith('/setup') && method === 'PUT') {
           const body = JSON.parse(String(init?.body))
+          expect(body.anchor_enabled).toBe(false)
           workspace = {
             ...workspace,
             project: { ...project, creative_brief: body },
@@ -116,6 +117,12 @@ describe('consolidated Project setup', () => {
     )
 
     expect(await screen.findByRole('heading', { name: 'Project Setup' })).toBeVisible()
+    const anchorSwitch = screen.getByRole('checkbox', {
+      name: /Enable dialogue anchors/,
+    })
+    expect(anchorSwitch).toBeChecked()
+    fireEvent.click(anchorSwitch)
+    expect(anchorSwitch).not.toBeChecked()
     expect(screen.getByRole('link', { name: 'Project Setup' })).toBeVisible()
     expect(screen.queryByRole('link', { name: 'Materials' })).not.toBeInTheDocument()
     expect(

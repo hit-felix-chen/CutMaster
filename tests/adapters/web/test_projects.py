@@ -71,6 +71,7 @@ def test_project_crud_brief_search_sort_and_workspace_are_application_backed(
     )
     assert brief.status_code == 200
     assert brief.json()["creative_brief"] == {
+        "anchor_enabled": True,
         "editing_intent": "A tense reunion",
         "target_duration_sec": 60.0,
     }
@@ -95,6 +96,24 @@ def test_project_crud_brief_search_sort_and_workspace_are_application_backed(
     not_found = client.get(f"/api/projects/{project_id}")
     assert not_found.status_code == 404
     assert not_found.json()["code"] == "resource_not_found"
+
+
+def test_project_anchor_switch_persists_and_rejects_non_booleans(client):
+    project = client.post("/api/projects", headers=key(), json={"name": "Anchors"}).json()
+    url = f"/api/projects/{project['project_id']}/creative-brief"
+    for enabled in (False, True):
+        result = client.put(url, headers=key(), json={
+            "editing_intent": "A tense reunion", "target_duration_sec": 60,
+            "anchor_enabled": enabled,
+        })
+        assert result.status_code == 200
+        assert result.json()["creative_brief"]["anchor_enabled"] is enabled
+        assert client.get(f"/api/projects/{project['project_id']}").json()["creative_brief"]["anchor_enabled"] is enabled
+    for invalid in ("false", 0, None):
+        assert client.put(url, headers=key(), json={
+            "editing_intent": "A tense reunion", "target_duration_sec": 60,
+            "anchor_enabled": invalid,
+        }).status_code == 422
 
 
 def test_project_commands_are_durably_idempotent(client: TestClient) -> None:
@@ -199,6 +218,7 @@ def test_project_setup_atomically_saves_materials_and_brief(
     assert response.json()["video_material_ids"] == [str(video.material_id)]
     assert response.json()["music_material_ids"] == [str(music.material_id)]
     assert response.json()["creative_brief"] == {
+        "anchor_enabled": True,
         "editing_intent": "Build an uplifting finale",
         "target_duration_sec": 45.0,
     }

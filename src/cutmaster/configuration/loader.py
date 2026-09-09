@@ -80,7 +80,7 @@ PLANNERS_SCHEMA: dict[str, set[str]] = {
         "max_model_requests",
     },
     "dialogue_anchors": {
-        "enabled",
+        "enabled",  # Accepted only for legacy snapshots; project briefs own this switch.
         "max_anchors",
         "min_anchor_duration_sec",
         "max_model_requests",
@@ -579,7 +579,6 @@ def _build_config(
                 max_model_requests=int(arrangement.get("max_model_requests", 3)),
             ),
             dialogue_anchors=DialogueAnchorConfig(
-                enabled=_boolean(anchors, "planners.dialogue_anchors", "enabled", True),
                 max_anchors=int(anchors.get("max_anchors", 4)),
                 min_anchor_duration_sec=float(
                     anchors.get("min_anchor_duration_sec", 1.5)

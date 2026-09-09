@@ -971,7 +971,7 @@ def select_dialogue_anchors(
         raise RuntimeError(
             "Video description is required for dialogue anchor selection"
         )
-    if not anchor_config.enabled:
+    if not context.get_artifact("anchor_enabled", True):
         return _apply_anchor_selections(slots, [], video_description, context)
     dialogues = _dialogues_by_segment(video_description)
     dialogue_constraints_by_slot = _dialogue_constraints_by_slot(

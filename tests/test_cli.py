@@ -3,6 +3,15 @@ import pytest
 from cutmaster.adapters.cli.main import _command_component, build_parser
 
 
+@pytest.mark.parametrize("command", ["plan", "run"])
+@pytest.mark.parametrize("flag, expected", [(None, True), ("--anchor", True), ("--no-anchor", False)])
+def test_anchor_cli_option(command, flag, expected):
+    argv = [command, "--video-material", "video", "--music-material", "music", "--prompt", "Cut"]
+    if flag:
+        argv.append(flag)
+    assert build_parser().parse_args(argv).anchor is expected
+
+
 def test_cli_commands_map_to_stable_log_components() -> None:
     assert _command_component("analyse") == "analyser"
     assert _command_component("analyse-music") == "analyser"

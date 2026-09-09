@@ -40,6 +40,7 @@ class SaveCreativeBriefCommand:
     project_id: ProjectId
     editing_intent: str
     target_duration_sec: float
+    anchor_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class SaveProjectSetupCommand:
     music_material_ids: tuple[MaterialId, ...]
     editing_intent: str
     target_duration_sec: float
+    anchor_enabled: bool = True
 
 
 @dataclass(frozen=True)

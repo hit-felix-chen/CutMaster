@@ -156,6 +156,9 @@ class RunCheckpointIdentity:
             "video_title_sha256": _canonical_hash(video.material.name),
             "max_clip_duration_sec": max_clip_duration_sec,
         }
+        if not run.creative_brief.anchor_enabled:
+            # Keep legacy enabled identities stable, but never resume across modes.
+            brief["anchor_enabled"] = False
         return cls(
             run_id=str(run.run_id),
             project_id=str(run.project_id),

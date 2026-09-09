@@ -144,7 +144,7 @@ def _run(
         project_id=ProjectId.new(),
         sequence=1,
         status=RunStatus.PLANNERS,
-        creative_brief=CreativeBrief("Build the immutable story", 42.5),
+        creative_brief=CreativeBrief("Build the immutable story", 42.5, anchor_enabled=False),
         video_material_ids=(video_id,) if video_ids is None else video_ids,
         music_material_ids=(music_id,),
         configuration=MappingProxyType(values),
@@ -276,6 +276,7 @@ def test_executor_uses_run_snapshot_ids_options_and_runtime_capabilities(
     assert request.music.material.material_id == music.material.material_id
     assert request.brief.editing_intent == "Build the immutable story"
     assert request.brief.target_duration_sec == 42.5
+    assert request.brief.anchor_enabled is False
     assert request.options.target_shot_length_sec == 3.25
     assert request.options.prompt_type == "character"
     assert request.options.video_title == "Snapshot Title"

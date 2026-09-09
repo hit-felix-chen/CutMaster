@@ -164,6 +164,7 @@ def creative_brief_view(value: CreativeBrief | None) -> dict[str, Any] | None:
     return {
         "editing_intent": value.editing_intent,
         "target_duration_sec": value.target_duration_sec,
+        "anchor_enabled": value.anchor_enabled,
     }
 
 

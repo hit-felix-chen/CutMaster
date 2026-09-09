@@ -361,6 +361,7 @@ export function ProjectOverview() {
   const [videoId, setVideoId] = useState(project.video_material_ids[0] ?? '')
   const [musicId, setMusicId] = useState(project.music_material_ids[0] ?? '')
   const [intent, setIntent] = useState(saved?.editing_intent ?? '')
+  const [anchorEnabled, setAnchorEnabled] = useState(saved?.anchor_enabled ?? true)
   const [startGuardOpen, setStartGuardOpen] = useState(false)
   const videos = useQuery({
     queryKey: ['materials', 'video', '', 'name_asc'],
@@ -386,6 +387,7 @@ export function ProjectOverview() {
     videoId !== (project.video_material_ids[0] ?? '') ||
     musicId !== (project.music_material_ids[0] ?? '') ||
     intent !== (saved?.editing_intent ?? '') ||
+    anchorEnabled !== (saved?.anchor_enabled ?? true) ||
     (saved ? Math.abs(seconds - saved.target_duration_sec) >= 0.001 : seconds > 0)
   const blocker = useBlocker(dirty)
   useEffect(() => {
@@ -400,6 +402,7 @@ export function ProjectOverview() {
       api.projects.saveSetup(project.project_id, [videoId], [musicId], {
         editing_intent: intent.trim(),
         target_duration_sec: seconds,
+        anchor_enabled: anchorEnabled,
       }),
     onSuccess: async () => {
       await refetch()
@@ -505,6 +508,17 @@ export function ProjectOverview() {
               <small>{t('brief.intentHelp')}</small>
             </label>
             <TargetDurationField idPrefix="setup-target-duration" editor={duration} />
+            <label className="field field--anchor">
+              <span className="field__checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={anchorEnabled}
+                  onChange={(event) => setAnchorEnabled(event.target.checked)}
+                />{' '}
+                {t('brief.anchorEnabled')}
+              </span>
+              <small>{t('brief.anchorHelp')}</small>
+            </label>
           </section>
           <aside className="setup-card setup-card--master">
             <header>
@@ -777,11 +791,13 @@ export function CreativeBrief() {
   const project = workspace.project
   const saved = project.creative_brief
   const [intent, setIntent] = useState(saved?.editing_intent ?? '')
+  const [anchorEnabled, setAnchorEnabled] = useState(saved?.anchor_enabled ?? true)
   const musicDuration = workspace.materials?.music[0]?.duration_sec
   const duration = useTargetDurationEditor(saved?.target_duration_sec, musicDuration)
   const seconds = duration.totalSeconds
   const dirty =
     intent !== (saved?.editing_intent ?? '') ||
+    anchorEnabled !== (saved?.anchor_enabled ?? true) ||
     (saved ? Math.abs(seconds - saved.target_duration_sec) >= 0.001 : seconds > 0)
   const valid = intent.trim().length > 0 && duration.valid
   const blocker = useBlocker(dirty)
@@ -797,6 +813,7 @@ export function CreativeBrief() {
       api.projects.saveBrief(project.project_id, {
         editing_intent: intent.trim(),
         target_duration_sec: seconds,
+        anchor_enabled: anchorEnabled,
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({
@@ -832,6 +849,17 @@ export function CreativeBrief() {
           <small>{t('brief.intentHelp')}</small>
         </label>
         <TargetDurationField idPrefix="target-duration" editor={duration} />
+        <label className="field field--anchor">
+          <span className="field__checkbox-row">
+            <input
+              type="checkbox"
+              checked={anchorEnabled}
+              onChange={(event) => setAnchorEnabled(event.target.checked)}
+            />{' '}
+            {t('brief.anchorEnabled')}
+          </span>
+          <small>{t('brief.anchorHelp')}</small>
+        </label>
         {save.isError ? <OperationProblem error={save.error} /> : null}
         <div className="form-actions">
           <button

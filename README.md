@@ -149,6 +149,13 @@ Slot Arrangement 决定“成片需要什么、每组使用哪个 Segment”，�
 
 ### 3. 原声台词作为故事锚点
 
+Anchor 是项目级选项，默认开启，旧项目缺少该字段也视为开启。Web 的项目设置中可切换
+“启用原声锚点”；CLI 的 `plan` / `run` 和 Benchmark 的 `scripts/run_cutmaster.py`
+均支持 `--anchor` / `--no-anchor`。API 在 Creative Brief / Setup 中使用
+`anchor_enabled: true | false`。启动时将该值快照到 Run，重试、续跑与 Run again
+沿用原值；修改项目只影响从项目设置启动的新 Run。旧全局
+`planners.dialogue_anchors.enabled` 不再生效。关闭规划锚点与渲染音频模式互相独立。
+
 Story Editor 从 Material Memory 中选择少量高价值原声台词，并将其固定到对应的源画面。锚点保证关键情节、人物关系和提示词意图不会被纯视觉蒙太奇稀释。
 
 如果锚点落在一个多 Slot 的组内，锚点 Slot 会退出普通检索；锚点固定画面前后

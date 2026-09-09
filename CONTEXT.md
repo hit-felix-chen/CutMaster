@@ -471,8 +471,11 @@ _Avoid_: Interrupted Attempt, invalid user input, ASTER Run
 
 **Creative Brief**:
 The mutable request for one **Edit Project**, consisting of an **Editing
-Intent** and **Target Duration**. An **ASTER Run** snapshots the last explicitly
-saved Creative Brief when it starts.
+Intent**, **Target Duration**, and the project-level **Anchor Enabled** boolean.
+Anchor Enabled defaults to true, including legacy Projects and Runs with no field.
+An **ASTER Run** snapshots the last explicitly saved Creative Brief when it starts;
+Retry, Resume, and Run again retain that snapshot. The switch is independent of
+render audio mode and is not owned by global Planner configuration.
 _Avoid_: Prompt Type, model configuration, ASTER Run
 
 **Editing Intent**:

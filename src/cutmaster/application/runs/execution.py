@@ -221,6 +221,7 @@ class RunPlanningExecutor:
                 brief=PlannersBrief(
                     run.creative_brief.editing_intent,
                     run.creative_brief.target_duration_sec,
+                    run.creative_brief.anchor_enabled,
                 ),
                 options=PlannersOptions(
                     target_shot_length_sec=options["target_shot_length_sec"],

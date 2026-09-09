@@ -211,6 +211,7 @@ def test_anchor_selection_accepts_arrangement_with_no_eligible_dialogue(
 
 def test_disabled_anchor_skips_model_and_clears_anchor_partition(tmp_path, monkeypatch):
     context = WorkflowContext(tmp_path / "history.json")
+    context.set_artifact("anchor_enabled", False)
     context.set_artifact("video_description", _video_description())
     def unexpected(**kwargs):
         pytest.fail("No-anchor mode must not call the model")
@@ -219,7 +220,7 @@ def test_disabled_anchor_skips_model_and_clears_anchor_partition(tmp_path, monke
             "fixed_candidate": {"candidate_id": "stale"}}
     result = select_dialogue_anchors(
         [slot], LLMConfig(model="test", base_url="", api_key="test"),
-        DialogueAnchorConfig(enabled=False), context,
+        DialogueAnchorConfig(), context,
     )
     assert "dialogue_anchor" not in result[0]
     assert "fixed_candidate" not in result[0]

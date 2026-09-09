@@ -31,8 +31,11 @@ def _finite_positive(value: object, field_name: str) -> float:
 class PlannersBrief:
     editing_intent: str
     target_duration_sec: float
+    anchor_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.anchor_enabled, bool):
+            raise TypeError("anchor_enabled must be a boolean")
         if not isinstance(self.editing_intent, str):
             raise TypeError("Editing Intent must be a string")
         if not self.editing_intent.strip():

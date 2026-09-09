@@ -405,15 +405,15 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
     assert projects.list() == (first,)
     with pytest.raises(IdempotencyConflict):
         projects.create(CreateProjectCommand(create_id, "Different"))
-    assert store.schema_version == 6
+    assert store.schema_version == 7
     assert store.integrity_check() == "ok"
     with sqlite3.connect(store.database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         connection.execute("PRAGMA foreign_keys = ON")
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "run_00000000-0000-4000-8000-000000000001",
                     "project_00000000-0000-4000-8000-000000000099",
@@ -426,8 +426,29 @@ def test_sqlite_schema_foreign_keys_and_idempotent_project_crud(
                     "2026-01-01T00:00:00+00:00",
                     "2026-01-01T00:00:00+00:00",
                     '{"target_shot_length_sec":4.0,"prompt_type":"event"}',
+                    1,
                 ),
             )
+
+
+def test_v6_projects_and_runs_migrate_with_anchors_enabled(tmp_path):
+    from cutmaster.infrastructure.persistence.sqlite.migrations import MIGRATIONS
+    root = tmp_path / "legacy"
+    root.mkdir()
+    with sqlite3.connect(root / "cutmaster.db") as db:
+        for migration in MIGRATIONS[:6]:
+            for statement in migration.statements:
+                db.execute(statement)
+        db.execute("INSERT INTO projects VALUES ('old-project', 'Legacy', 'intent', 30, 'now', 'now')")
+        db.execute("""INSERT INTO runs (run_id, project_id, sequence, status, editing_intent,
+                   target_duration_sec, configuration_json, created_at, updated_at)
+                   VALUES ('old-run', 'old-project', 1, 'complete', 'intent', 30, '{}', 'now', 'now')""")
+        db.execute("PRAGMA user_version = 6")
+    store = SQLiteApplicationStore(root)
+    assert store.schema_version == 7
+    with sqlite3.connect(store.database_path) as db:
+        assert db.execute("SELECT anchor_enabled FROM projects").fetchone() == (1,)
+        assert db.execute("SELECT anchor_enabled FROM runs").fetchone() == (1,)
 
 
 def test_project_names_are_unique_after_normalisation_and_case_sensitive(
@@ -537,7 +558,7 @@ def test_sqlite_migrates_v1_attempts_to_usage_and_checkpoint_schema(
 
     store = SQLiteApplicationStore(data_root)
 
-    assert store.schema_version == 6
+    assert store.schema_version == 7
     with sqlite3.connect(database_path) as connection:
         columns = {
             row[1]: row for row in connection.execute("PRAGMA table_info(attempts)")

@@ -193,12 +193,14 @@ class ProjectsService:
         brief = CreativeBrief(
             editing_intent=command.editing_intent,
             target_duration_sec=command.target_duration_sec,
+            anchor_enabled=command.anchor_enabled,
         )
         result = self._store.save_creative_brief(
             command.command_id,
             command.project_id,
             brief.editing_intent,
             brief.target_duration_sec,
+            brief.anchor_enabled,
         )
         return _project_view(result.value)
 
@@ -214,6 +216,7 @@ class ProjectsService:
         brief = CreativeBrief(
             editing_intent=command.editing_intent,
             target_duration_sec=command.target_duration_sec,
+            anchor_enabled=command.anchor_enabled,
         )
         with ExitStack() as leases:
             for material_id in sorted(expected_types, key=str):
@@ -239,6 +242,7 @@ class ProjectsService:
                 command.music_material_ids,
                 brief.editing_intent,
                 brief.target_duration_sec,
+                brief.anchor_enabled,
             )
         return _project_view(result.value)
 
@@ -316,6 +320,7 @@ def _project_view(value: dict[str, object]) -> ProjectView:
         brief = CreativeBrief(
             editing_intent=str(brief_value["editing_intent"]),
             target_duration_sec=float(brief_value["target_duration_sec"]),
+            anchor_enabled=brief_value.get("anchor_enabled", True),
         )
     return ProjectView(
         project_id=ProjectId.parse(str(value["project_id"])),

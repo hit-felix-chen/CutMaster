@@ -325,6 +325,16 @@ MIGRATIONS = (
 )
 
 
+MIGRATIONS += (
+    Migration(
+        version=7,
+        statements=(
+            "ALTER TABLE projects ADD COLUMN anchor_enabled INTEGER NOT NULL DEFAULT 1 CHECK (anchor_enabled IN (0, 1))",
+            "ALTER TABLE runs ADD COLUMN anchor_enabled INTEGER NOT NULL DEFAULT 1 CHECK (anchor_enabled IN (0, 1))",
+        ),
+    ),
+)
+
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 
 

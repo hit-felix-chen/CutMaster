@@ -103,6 +103,7 @@ class ManagedWorkflowCoordinator:
         prompt: str,
         project_name: str,
         target_output_length_sec: float,
+        anchor_enabled: bool = True,
         target_shot_length_sec: float = 4.0,
         prompt_type: str = "event",
         video_title: str = "",
@@ -124,6 +125,7 @@ class ManagedWorkflowCoordinator:
             prompt=prompt,
             project_name=project_name,
             target_output_length_sec=target_output_length_sec,
+            anchor_enabled=anchor_enabled,
             target_shot_length_sec=target_shot_length_sec,
             prompt_type=prompt_type,
             video_title=video_title,
@@ -228,6 +230,7 @@ class ManagedWorkflowCoordinator:
             project_name=command.project_name,
             target_output_length_sec=command.target_output_length_sec,
             target_shot_length_sec=command.target_shot_length_sec,
+            anchor_enabled=command.anchor_enabled,
             prompt_type=command.prompt_type,
             video_title=command.video_title,
             max_clip_duration_sec=command.max_clip_duration_sec,
@@ -371,6 +374,7 @@ class ManagedWorkflowCoordinator:
         prompt_type: str,
         video_title: str,
         max_clip_duration_sec: float | None,
+        anchor_enabled: bool = True,
     ):
         project = self._application.projects.ensure_by_name(
             EnsureProjectByNameCommand(str(uuid4()), project_name)
@@ -383,6 +387,7 @@ class ManagedWorkflowCoordinator:
                 (music.material_id,),
                 prompt,
                 target_output_length_sec,
+                anchor_enabled,
             )
         )
         submission = self._application.runs.create(

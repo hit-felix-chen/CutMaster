@@ -117,6 +117,7 @@ def run_view(value: Mapping[str, Any]) -> RunView:
         creative_brief=CreativeBrief(
             editing_intent=str(value["editing_intent"]),
             target_duration_sec=float(value["target_duration_sec"]),
+            anchor_enabled=value.get("anchor_enabled", True),
         ),
         video_material_ids=tuple(
             MaterialId.parse(str(item)) for item in value["video_material_ids"]

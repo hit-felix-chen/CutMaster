@@ -269,6 +269,8 @@
     }
   },
   "brief": {
+    "anchorEnabled": "Enable dialogue anchors",
+    "anchorHelp": "Select source-dialogue story anchors for this project. When disabled, all clips use ordinary candidate planning. Applies to new runs only.",
     "title": "Creative Brief",
     "subtitle": "Define what the edit should communicate and its target duration.",
     "intentHelp": "Describe the story, emotion, and moments to emphasize.",

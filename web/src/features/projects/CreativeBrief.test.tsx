@@ -137,6 +137,7 @@ describe('Creative Brief duration validation', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     expect(JSON.parse(String(requests[0]?.body))).toMatchObject({
       target_duration_sec: 60.5,
+      anchor_enabled: true,
     })
   })
 })

@@ -1703,6 +1703,21 @@
 .field small {
   color: var(--text-tertiary);
 }
+.field--anchor .field__checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  cursor: pointer;
+}
+.field--anchor input[type='checkbox'] {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent-narrative-strong);
+  cursor: pointer;
+}
 .field-error {
   color: var(--status-danger) !important;
 }

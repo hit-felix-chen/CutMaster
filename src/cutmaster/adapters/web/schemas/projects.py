@@ -25,6 +25,7 @@ class SetProjectMaterialsBody(WebRequest):
 class SaveCreativeBriefBody(WebRequest):
     editing_intent: str
     target_duration_sec: float = Field(gt=0)
+    anchor_enabled: bool = True
 
 
 class SaveProjectSetupBody(WebRequest):
@@ -32,6 +33,7 @@ class SaveProjectSetupBody(WebRequest):
     music_material_ids: list[str] = Field(default_factory=list, max_length=1)
     editing_intent: str
     target_duration_sec: float = Field(gt=0)
+    anchor_enabled: bool = True
 
 
 __all__ = [

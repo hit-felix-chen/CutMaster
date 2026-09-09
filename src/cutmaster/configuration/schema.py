@@ -91,7 +91,6 @@ class ArrangementArchitectConfig:
 
 @dataclass(frozen=True)
 class DialogueAnchorConfig:
-    enabled: bool = True
     max_anchors: int = 4
     min_anchor_duration_sec: float = 1.5
     max_model_requests: int = 3

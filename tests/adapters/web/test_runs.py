@@ -274,6 +274,26 @@ def write_usage_artifact(
     )
 
 
+def test_anchor_setting_is_snapshotted_per_run(application, tmp_path):
+    project = prepared_project(application, tmp_path)
+    assert project.creative_brief.anchor_enabled is True
+    application.projects.save_creative_brief(SaveCreativeBriefCommand(
+        command_id(), project.project_id, "Build a tense reunion", 45.0,
+        anchor_enabled=False,
+    ))
+    submission = application.runs.create(CreateRunCommand(command_id(), project.project_id))
+    assert submission.run.creative_brief.anchor_enabled is False
+    application.projects.save_creative_brief(SaveCreativeBriefCommand(
+        command_id(), project.project_id, "Build a tense reunion", 45.0,
+        anchor_enabled=True,
+    ))
+    with TestClient(create_app(application=application)) as client:
+        old = client.get(f"/api/runs/{submission.run.run_id}")
+        assert old.json()["run"]["creative_brief"]["anchor_enabled"] is False
+        current = client.get(f"/api/projects/{project.project_id}")
+        assert current.json()["creative_brief"]["anchor_enabled"] is True
+
+
 def test_start_run_dispatches_real_job_and_worker_creates_frozen_edit(
     application: CutMasterApplication,
     tmp_path: Path,
@@ -292,6 +312,7 @@ def test_start_run_dispatches_real_job_and_worker_creates_frozen_edit(
         payload = response.json()
         assert payload["run"]["status"] == "queued"
         assert payload["run"]["creative_brief"] == {
+            "anchor_enabled": True,
             "editing_intent": "Build a tense reunion",
             "target_duration_sec": 45.0,
         }
@@ -978,6 +999,7 @@ def test_run_again_copies_historical_snapshot_not_current_project_setup(
             project.project_id,
             "A different current setup",
             5.0,
+            anchor_enabled=False,
         )
     )
     dispatcher = CapturingDispatcher()
@@ -1002,6 +1024,7 @@ def test_run_again_copies_historical_snapshot_not_current_project_setup(
     )
     assert copied.run_id != historical.run_id
     assert copied.creative_brief == historical.creative_brief
+    assert copied.creative_brief.anchor_enabled is True
     assert copied.video_material_ids == historical.video_material_ids
     assert copied.music_material_ids == historical.music_material_ids
     assert copied.configuration == historical.configuration

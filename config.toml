@@ -118,8 +118,7 @@ max_model_requests = 3
 # min_anchor_duration_sec: 每段原声的最短连续时长，过滤无意义的零碎短句。
 # max_model_requests: 一次 Anchor 规划最多发起的模型请求数。
 [planners.dialogue_anchors]
-# Set false for the no-anchor ablation; no anchor-selection API is called.
-enabled = true
+# Anchor enablement is a project setting (CLI: --no-anchor), not a global option.
 max_anchors = 5
 min_anchor_duration_sec = 3
 max_model_requests = 3

@@ -31,6 +31,7 @@ class ExecuteManagedWorkflowCommand:
     music_material: str = ""
     project_name: str = "CutMaster CLI"
     target_output_length_sec: float = 60.0
+    anchor_enabled: bool = True
     target_shot_length_sec: float = 4.0
     prompt_type: str = "event"
     video_title: str = ""
@@ -41,6 +42,8 @@ class ExecuteManagedWorkflowCommand:
     music_material_name: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.anchor_enabled, bool):
+            raise TypeError("anchor_enabled must be a boolean")
         if (self.video_path is None) == (not self.video_material):
             raise ValueError(
                 "Exactly one of video_path or video_material must be supplied"

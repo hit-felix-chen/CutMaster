@@ -202,6 +202,7 @@ class Planners:
             ),
         )
         context.set_artifact("video_description", video_description)
+        context.set_artifact("anchor_enabled", request.brief.anchor_enabled)
         context.set_artifact("video_summary", video_summary)
         team = ASTERTeam(
             request.video_path,

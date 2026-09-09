@@ -29,6 +29,8 @@ def _add_video_metadata(parser: argparse.ArgumentParser) -> None:
 def _add_planners_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--target-duration", type=float, default=60.0)
+    parser.add_argument("--anchor", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable original-dialogue anchors for this project (default: enabled).")
     parser.add_argument("--target-shot-length", type=float, default=4.0)
     parser.add_argument("--prompt-type", default="event")
     parser.add_argument("--max-clip-duration", type=float)
@@ -169,6 +171,7 @@ def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
             prompt=args.prompt,
             project_name=args.project_name,
             target_output_length_sec=args.target_duration,
+            anchor_enabled=args.anchor,
             target_shot_length_sec=args.target_shot_length,
             prompt_type=args.prompt_type,
             max_clip_duration_sec=args.max_clip_duration,
@@ -188,6 +191,7 @@ def _run_command(args: argparse.Namespace, config_path: Path) -> Any:
                 music_material=args.music_material or "",
                 project_name=args.project_name,
                 target_output_length_sec=args.target_duration,
+                anchor_enabled=args.anchor,
                 target_shot_length_sec=args.target_shot_length,
                 prompt_type=args.prompt_type,
                 video_title=args.video_title,

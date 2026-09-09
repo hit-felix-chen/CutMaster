@@ -25,10 +25,14 @@ Trajectory 是整组 Slot 的一条完整方案，不是一个 Slot 的单独候
 
 无 Anchor：
 
-```toml
-[planners.dialogue_anchors]
-enabled = false
+```sh
+cutmaster plan --no-anchor ...
 ```
+
+Anchor 开关属于项目 Creative Brief 的 `anchor_enabled`，默认 `true`；Web 项目设置
+可切换，CLI 和 Benchmark 使用 `--anchor` / `--no-anchor`。旧项目缺少字段时启用。
+启动 Run 时快照该值；Retry/Resume/Run again 沿用原 Run，不受项目后续修改影响。
+旧 TOML 中的 `planners.dialogue_anchors.enabled` 仅为兼容读取而接受，不再生效。
 
 Story Editor 不调用 anchor 模型，清除 anchor 固定候选，并按普通 Slot 构建
 规划分区/分组。只适用于新规划，不应续跑包含旧 Anchor 的历史检查点。
@@ -43,7 +47,7 @@ target_trajectories_per_group = 1
 selection_mode = "first"
 ```
 
-完整版保持 `enabled = true`、`target_trajectories_per_group = 3`、
+完整版保持项目 Anchor 启用、`target_trajectories_per_group = 3`、
 `selection_mode = "beam"`。首选模式不改变正常失败校验与重规划机制。
 
 ## 通过 Benchmark 启动无 Anchor 生成
@@ -51,8 +55,8 @@ selection_mode = "first"
 在 Mashup-Benchmark 根目录，使用其现有适配器，配置路径替换为实际完整配置：
 
 ```sh
-python scripts/run_cutmaster.py --all --run-id cutmaster_no_anchor \
-  --cutmaster-config /absolute/path/to/no-anchor.toml
+python scripts/run_cutmaster.py --all --run-id cutmaster_no_anchor --no-anchor \
+  --cutmaster-config /absolute/path/to/config.toml
 ```
 
 为避免 Anchor 原声带来的音频模式混杂，对照与消融应评估相同音频模式

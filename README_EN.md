@@ -163,6 +163,14 @@ before deciding which exact source windows fill it.
 
 ### 3. Source dialogue as story anchors
 
+Anchor selection is a per-project setting, enabled by default, including legacy projects
+without the field. Toggle **Enable dialogue anchors** in Web Project Setup, or use
+`--anchor` / `--no-anchor` with CLI `plan` / `run` and Benchmark `scripts/run_cutmaster.py`.
+The Creative Brief / Setup API accepts `anchor_enabled: true | false`. Each Run snapshots
+the setting; Retry, Resume, and Run again retain it. Project changes affect only new Runs
+started from Project Setup. The old global `planners.dialogue_anchors.enabled` is no
+longer effective. This planning option is independent of the render audio mode.
+
 The Story Editor selects a small number of high-value dialogue passages from Material Memory and binds them to their source-synchronous visuals. These anchors preserve essential plot points, character relations, and prompt intent within a visual montage.
 
 When an Anchor falls inside a multi-Slot group, its Slot leaves ordinary

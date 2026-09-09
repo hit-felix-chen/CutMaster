@@ -16,7 +16,7 @@ def test_ablation_switches(tmp_path, enabled, mode):
         f'[planners.beam_search]\nselection_mode = "{mode}"\n'
     )
     config = load_config(path)
-    assert config.planners.dialogue_anchors.enabled is enabled
+    assert not hasattr(config.planners.dialogue_anchors, "enabled")
     assert config.planners.beam_search.selection_mode == mode
 
 

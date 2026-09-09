@@ -94,6 +94,7 @@ export interface MaterialSubmission {
 export interface CreativeBrief {
   editing_intent: string
   target_duration_sec: number
+  anchor_enabled?: boolean
 }
 
 export interface ProjectSummary {
