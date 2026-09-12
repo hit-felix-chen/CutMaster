@@ -1,3 +1,4 @@
+import { WriteButton } from '@/components/ui/WriteControls'
 import {
   useInfiniteQuery,
   useMutation,
@@ -297,7 +298,7 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
         }).format(new Date(attempt.updated_at))}
       </time>
       {stoppable ? (
-        <button
+        <WriteButton
           className="button button--secondary activity-row__action"
           type="button"
           disabled={stop.isPending || recovery.isPending}
@@ -312,10 +313,10 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
             <Square size={13} aria-hidden="true" />
           )}
           {t('activity.stopAttempt')}
-        </button>
+        </WriteButton>
       ) : null}
       {recoveryAction && recoverySupported ? (
-        <button
+        <WriteButton
           className="button button--secondary activity-row__action"
           type="button"
           disabled={recovery.isPending || stop.isPending}
@@ -336,7 +337,7 @@ function AttemptRow({ item, locale }: { item: ActivityItem; locale: string }) {
               ? 'activity.retryAttempt'
               : 'activity.resumeAttempt',
           )}
-        </button>
+        </WriteButton>
       ) : null}
       {attempt.error_message ? (
         <ExecutionFailure

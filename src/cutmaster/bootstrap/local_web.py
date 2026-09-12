@@ -152,7 +152,7 @@ def serve(
         timer = threading.Timer(0.7, webbrowser.open, args=(url,))
         timer.daemon = True
         timer.start()
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", proxy_headers=False)
 
 
 __all__ = ["create_local_web_app", "serve"]

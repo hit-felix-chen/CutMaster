@@ -1,6 +1,7 @@
 import { Navigate, RouterProvider, type RouteObject } from 'react-router-dom'
 
 import { ApplicationGate } from '@/app/ApplicationGate'
+import { AccessProvider } from '@/app/AccessProvider'
 import { createAppRouter } from '@/app/router'
 import { ActivityPage } from '@/pages/ActivityPage'
 import { InvalidMaterialRoutePage } from '@/pages/InvalidMaterialRoutePage'
@@ -59,5 +60,9 @@ const router = createAppRouter([
 ])
 
 export function App() {
-  return <RouterProvider router={router} />
+  return (
+    <AccessProvider>
+      <RouterProvider router={router} />
+    </AccessProvider>
+  )
 }

@@ -1,4 +1,5 @@
 {
+  "remote_read_only": "远程访问为只读模式，请在服务器本机通过 127.0.0.1 打开页面进行修改。",
   "generic": "操作未能完成，请检查当前状态后重试。",
   "application_error": "应用无法完成此操作。",
   "request_validation_failed": "部分输入不符合要求，请检查后重试。",

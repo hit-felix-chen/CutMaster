@@ -62,6 +62,7 @@
     "unknownTask": "Uncategorised task"
   },
   "shell": {
+    "readOnly": "Read-only",
     "narrowTitle": "Make the window wider",
     "narrowBody": "The CutMaster editing workspace requires a viewport at least 1280 pixels wide."
   },

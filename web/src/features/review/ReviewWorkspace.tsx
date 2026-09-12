@@ -1,3 +1,4 @@
+import { WriteButton, WriteSelect } from '@/components/ui/WriteControls'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
@@ -184,14 +185,14 @@ function CandidateCard({
           {t('review.previewSource')}
         </button>
         {!original || !active ? (
-          <button
+          <WriteButton
             className="button button--primary"
             type="button"
             disabled={disabled || active || !trajectory.eligible_for_replacement}
             onClick={onChoose}
           >
             {t('review.useTrajectory')}
-          </button>
+          </WriteButton>
         ) : null}
       </footer>
     </article>
@@ -260,10 +261,14 @@ function SlotInspector({
             <p>{t('review.trajectoryCount', { count: trajectories.length })}</p>
           </div>
           {draft[slot.group_id] ? (
-            <button className="button button--secondary" type="button" onClick={onUndo}>
+            <WriteButton
+              className="button button--secondary"
+              type="button"
+              onClick={onUndo}
+            >
               <Undo2 size={14} aria-hidden="true" />
               {t('review.undoGroup')}
-            </button>
+            </WriteButton>
           ) : null}
         </header>
         {slot.is_anchor ? (
@@ -784,7 +789,7 @@ export function ReviewWorkspace() {
         <div className="review-toolbar__selectors">
           <label>
             <span>{t('review.frozenEdit')}</span>
-            <select
+            <WriteSelect
               aria-label={t('review.frozenEdit')}
               value={data.edit.edit_id}
               onChange={(event) =>
@@ -805,11 +810,11 @@ export function ReviewWorkspace() {
                     : ''}
                 </option>
               ))}
-            </select>
+            </WriteSelect>
           </label>
           <label>
             <span>{t('review.renderVariant')}</span>
-            <select
+            <WriteSelect
               aria-label={t('review.renderVariant')}
               value={selectedVariant?.render_variant_id ?? ''}
               onChange={(event) => {
@@ -828,12 +833,12 @@ export function ReviewWorkspace() {
                   {t(`renders.status.${variant.status}`)}
                 </option>
               ))}
-            </select>
+            </WriteSelect>
           </label>
         </div>
         <div className="review-toolbar__actions">
           {dirty ? <span className="dirty-label">{t('common.unsaved')}</span> : null}
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={!dirty || save.isPending}
@@ -844,8 +849,8 @@ export function ReviewWorkspace() {
           >
             <RotateCcw size={15} aria-hidden="true" />
             {t('common.undoChanges')}
-          </button>
-          <button
+          </WriteButton>
+          <WriteButton
             className="button button--primary"
             type="button"
             disabled={!dirty || save.isPending}
@@ -853,7 +858,7 @@ export function ReviewWorkspace() {
           >
             <Save size={15} aria-hidden="true" />
             {save.isPending ? t('review.savingRevision') : t('common.save')}
-          </button>
+          </WriteButton>
         </div>
       </header>
 
@@ -867,7 +872,7 @@ export function ReviewWorkspace() {
             <p>{t('renders.targetHelp')}</p>
           </div>
           <div className="review-render-console__create">
-            <button
+            <WriteButton
               className="button button--secondary"
               type="button"
               disabled={dirty || renderOperation}
@@ -875,8 +880,8 @@ export function ReviewWorkspace() {
             >
               <Clapperboard size={15} aria-hidden="true" />
               {t('renders.renderDialoguePreview')}
-            </button>
-            <button
+            </WriteButton>
+            <WriteButton
               className="button button--secondary"
               type="button"
               disabled={dirty || renderOperation}
@@ -884,7 +889,7 @@ export function ReviewWorkspace() {
             >
               <Music2 size={15} aria-hidden="true" />
               {t('renders.createBgmOnly')}
-            </button>
+            </WriteButton>
           </div>
         </header>
         {dirty ? <p className="render-hint">{t('renders.saveRevisionFirst')}</p> : null}

@@ -311,6 +311,22 @@ npm --prefix web ci
 uv run cutmaster serve --config config.toml
 ```
 
+For read-only LAN sharing, allow port 8000 through the host firewall and run:
+
+```bash
+uv run cutmaster serve --config config.toml --host 0.0.0.0 --port 8000 --no-open
+```
+
+Manage locally at `http://127.0.0.1:8000`; other machines browse at
+`http://HOST_LAN_IP:8000`. Only direct loopback peers can write. Other peers may
+use GET/HEAD/OPTIONS; writes return `403 remote_read_only`. Remote pages hide
+write actions, disable edit fields, and show “Read-only” beside the sidebar sync
+status at the same font size. Even the host is read-only when using its LAN IP.
+This mode assumes a trusted LAN and direct connections, not proxies. Never forward
+the local write endpoint to remote users. Existing media, settings, and logs remain
+readable; this is not login-based access control or data isolation. Do not expose it
+directly to the public internet.
+
 In a source checkout, `serve` checks `web/dist` before opening the browser and
 runs a production build automatically when the assets are missing or older than
 the frontend sources. You can still run `npm --prefix web run build` manually at

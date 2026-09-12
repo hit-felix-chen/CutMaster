@@ -1,3 +1,4 @@
+import { WriteButton, WriteInput } from '@/components/ui/WriteControls'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowRight,
@@ -292,7 +293,7 @@ export function DataRootMigrationPanel({
       {current.isError ? <OperationProblem error={current.error} /> : null}
       {migration ? <MigrationSummary migration={migration} /> : null}
       {migration && canCancel ? (
-        <button
+        <WriteButton
           className="button button--secondary"
           type="button"
           disabled={cancel.isPending}
@@ -304,7 +305,7 @@ export function DataRootMigrationPanel({
             <XCircle size={15} aria-hidden="true" />
           )}
           {t('settings.dataRootMigration.cancel')}
-        </button>
+        </WriteButton>
       ) : null}
       {cancel.isError ? <OperationProblem error={cancel.error} /> : null}
       {!migrationBlocksNew && current.isSuccess ? (
@@ -313,7 +314,7 @@ export function DataRootMigrationPanel({
             <span>{t('settings.dataRootMigration.destination')}</span>
             <div className="data-root-migration__input">
               <FolderInput size={16} aria-hidden="true" />
-              <input
+              <WriteInput
                 id="data-root-destination"
                 type="text"
                 value={destination}
@@ -331,7 +332,7 @@ export function DataRootMigrationPanel({
               {t('settings.dataRootMigration.absolutePathRequired')}
             </p>
           ) : null}
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={preflight.isPending || !normalizedInput}
@@ -343,7 +344,7 @@ export function DataRootMigrationPanel({
               <ShieldAlert size={15} aria-hidden="true" />
             )}
             {t('settings.dataRootMigration.preflight')}
-          </button>
+          </WriteButton>
           {preflight.isError ? <OperationProblem error={preflight.error} /> : null}
           {applicablePreflight ? (
             <div className="data-root-migration__preflight" aria-live="polite">
@@ -376,7 +377,7 @@ export function DataRootMigrationPanel({
               {applicablePreflight.eligible ? (
                 <div className="data-root-migration__start">
                   <p>{t('settings.dataRootMigration.startWarning')}</p>
-                  <button
+                  <WriteButton
                     className="button button--primary"
                     type="button"
                     disabled={start.isPending}
@@ -390,7 +391,7 @@ export function DataRootMigrationPanel({
                     {armedDestination === applicablePreflight.destination_root
                       ? t('settings.dataRootMigration.confirmStart')
                       : t('settings.dataRootMigration.start')}
-                  </button>
+                  </WriteButton>
                 </div>
               ) : null}
             </div>

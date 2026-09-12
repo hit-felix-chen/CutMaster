@@ -62,6 +62,7 @@
     "unknownTask": "未分类任务"
   },
   "shell": {
+    "readOnly": "只读模式",
     "narrowTitle": "需要更宽的窗口",
     "narrowBody": "CutMaster 剪辑工作台需要至少 1280 像素宽度。"
   },

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Navigate, useLocation } from 'react-router-dom'
 
 import { setupReturnTarget } from '@/app/setup-return'
+import { useCanWrite } from '@/app/access-context'
 import { useApplicationHealth } from '@/app/use-application-health'
 import { LoadingState } from '@/components/ui/AsyncState'
 import { OperationProblem } from '@/components/ui/OperationProblem'
@@ -13,6 +14,7 @@ import { ProviderSettingsEditor } from '@/features/settings/ProviderSettingsEdit
 const CAPABILITIES: ProviderCapability[] = ['llm', 'vlm', 'asr']
 
 export function SetupPage() {
+  const canWrite = useCanWrite()
   const { t } = useTranslation('common')
   const location = useLocation()
   const returnTo = setupReturnTarget(location.state)
@@ -23,8 +25,10 @@ export function SetupPage() {
   const settings = useQuery({
     queryKey: ['settings'],
     queryFn: api.settings.get,
-    enabled: health.isSuccess && !ready,
+    enabled: canWrite && health.isSuccess && !ready,
   })
+
+  if (!canWrite) return <Navigate to="/projects" replace />
 
   if (health.isPending) {
     return (

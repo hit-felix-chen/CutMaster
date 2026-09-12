@@ -1,3 +1,4 @@
+import { WriteButton, WriteInput, WriteSelect } from '@/components/ui/WriteControls'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
@@ -301,7 +302,7 @@ export function ProviderSettingsEditor({
           </p>
         </div>
         <div className="settings-connections-header__actions">
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={!dirty || save.isPending}
@@ -309,8 +310,8 @@ export function ProviderSettingsEditor({
           >
             <RotateCcw size={16} aria-hidden="true" />
             {t('common.undoChanges')}
-          </button>
-          <button
+          </WriteButton>
+          <WriteButton
             className="button button--primary"
             type="button"
             disabled={!dirty || save.isPending}
@@ -322,7 +323,7 @@ export function ProviderSettingsEditor({
               <Save size={16} aria-hidden="true" />
             )}
             {t(setupMode ? 'setup.saveAndCheck' : 'common.save')}
-          </button>
+          </WriteButton>
         </div>
       </header>
 
@@ -330,7 +331,7 @@ export function ProviderSettingsEditor({
         <legend>{t('settings.profile')}</legend>
         {(['cost_saving', 'simple', 'custom'] as ProviderProfile[]).map((item) => (
           <label key={item} className={profile === item ? 'active' : ''}>
-            <input
+            <WriteInput
               type="radio"
               name="provider-profile"
               value={item}
@@ -430,7 +431,7 @@ function ProviderCard({
       <div className="settings-field-grid">
         <label>
           <span>{t('settings.fields.model')}</span>
-          <input
+          <WriteInput
             required
             value={value.model}
             onChange={(event) => onChange({ ...value, model: event.target.value })}
@@ -438,7 +439,7 @@ function ProviderCard({
         </label>
         <label>
           <span>{t('settings.fields.baseUrl')}</span>
-          <input
+          <WriteInput
             required
             type="url"
             value={value.base_url}
@@ -447,7 +448,7 @@ function ProviderCard({
         </label>
         <label>
           <span>{t('settings.fields.apiKeyEnv')}</span>
-          <input
+          <WriteInput
             required
             value={value.api_key_env}
             onChange={(event) =>
@@ -457,7 +458,7 @@ function ProviderCard({
         </label>
         <label>
           <span>{t('settings.fields.timeout')}</span>
-          <input
+          <WriteInput
             required
             min="0.1"
             step="0.1"
@@ -472,7 +473,7 @@ function ProviderCard({
       <details className="provider-advanced">
         <summary>{t('settings.advanced')}</summary>
         <label className="settings-checkbox">
-          <input
+          <WriteInput
             type="checkbox"
             checked={value.enable_thinking}
             onChange={(event) =>
@@ -485,7 +486,7 @@ function ProviderCard({
           {MODEL_NUMBER_FIELDS.map((field) => (
             <label key={field.key}>
               <span>{t(`settings.fields.${field.key}`)}</span>
-              <input
+              <WriteInput
                 required
                 min={field.min}
                 step={field.step}
@@ -553,18 +554,18 @@ function AsrProviderCard({
       <div className="settings-field-grid">
         <label>
           <span>{t('settings.fields.backend')}</span>
-          <select
+          <WriteSelect
             value={value.backend}
             onChange={(event) =>
               onChange({ ...value, backend: event.target.value as 'bailian' })
             }
           >
             <option value="bailian">Bailian</option>
-          </select>
+          </WriteSelect>
         </label>
         <label>
           <span>{t('settings.fields.apiKeyEnv')}</span>
-          <input
+          <WriteInput
             required
             value={value.api_key_env}
             onChange={(event) =>
@@ -575,7 +576,7 @@ function AsrProviderCard({
         {numberFields.map((field) => (
           <label key={field.key}>
             <span>{t(`settings.fields.${field.key}`)}</span>
-            <input
+            <WriteInput
               required
               min={field.min}
               step={field.step}
@@ -589,7 +590,7 @@ function AsrProviderCard({
         ))}
       </div>
       <label className="settings-checkbox">
-        <input
+        <WriteInput
           type="checkbox"
           checked={value.reuse}
           onChange={(event) => onChange({ ...value, reuse: event.target.checked })}
@@ -666,7 +667,7 @@ function CredentialEditor({
             <span className="sr-only">
               {t('settings.credentialAction', { provider: capability.toUpperCase() })}
             </span>
-            <select
+            <WriteSelect
               aria-label={t('settings.credentialAction', {
                 provider: capability.toUpperCase(),
               })}
@@ -678,12 +679,12 @@ function CredentialEditor({
               <option value="keep">{t('settings.credentialActions.keep')}</option>
               <option value="set">{t('settings.credentialActions.set')}</option>
               <option value="clear">{t('settings.credentialActions.clear')}</option>
-            </select>
+            </WriteSelect>
           </label>
           {value.action === 'set' ? (
             <label className="credential-editor__secret">
               <span>{t('settings.apiKey')}</span>
-              <input
+              <WriteInput
                 required
                 autoComplete="new-password"
                 type="password"
@@ -717,7 +718,7 @@ function ConnectionTestRow({
           ? t('settings.notTested')
           : t('settings.connectedLatency', { latency })}
       </span>
-      <button
+      <WriteButton
         className="button button--secondary"
         type="button"
         disabled={pending || disabled}
@@ -725,7 +726,7 @@ function ConnectionTestRow({
       >
         {pending ? <LoaderCircle className="spin" size={15} /> : null}
         {t('settings.testConnection')}
-      </button>
+      </WriteButton>
     </footer>
   )
 }

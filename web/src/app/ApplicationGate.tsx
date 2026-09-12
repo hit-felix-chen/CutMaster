@@ -1,10 +1,12 @@
 import { Navigate, useLocation } from 'react-router-dom'
 
 import { useApplicationHealth } from '@/app/use-application-health'
+import { useCanWrite } from '@/app/access-context'
 import { AppShell } from '@/components/layout/AppShell'
 import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
 
 export function ApplicationGate() {
+  const canWrite = useCanWrite()
   const health = useApplicationHealth()
   const location = useLocation()
 
@@ -22,7 +24,10 @@ export function ApplicationGate() {
       </main>
     )
   }
-  if (Object.values(health.data.configured).some((configured) => !configured)) {
+  if (
+    canWrite &&
+    Object.values(health.data.configured).some((configured) => !configured)
+  ) {
     return (
       <Navigate
         to="/setup"

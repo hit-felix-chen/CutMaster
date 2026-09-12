@@ -7,9 +7,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+
+from cutmaster.adapters.web.access import can_write
 
 from cutmaster.adapters.web.data_root_migration_supervisor import (
     DataRootMigrationSupervisor,
@@ -118,7 +120,7 @@ def create_app(
             return await call_next(request)
         state = cutmaster.data_root_coordinator.state()
         migration_path = path.startswith("/api/settings/storage/migrations")
-        health_path = path == "/api/health"
+        health_path = path in {"/api/health", "/api/access"}
         if state.restart_required and not (migration_path or health_path):
             return problem_response(
                 request,
@@ -140,6 +142,24 @@ def create_app(
             response.headers["Retry-After"] = "5"
             return response
         return await call_next(request)
+    @app.middleware("http")
+    async def remote_read_only_gate(request: Request, call_next):
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not can_write(request):
+            return problem_response(
+                request,
+                status=403,
+                code="remote_read_only",
+                title="Remote access is read-only",
+                detail="Open CutMaster through a loopback address on the server to make changes.",
+                retryable=False,
+            )
+        return await call_next(request)
+
+    @app.get("/api/access")
+    def access(request: Request, response: Response) -> dict[str, bool]:
+        response.headers["Cache-Control"] = "no-store"
+        return {"can_write": can_write(request)}
+
     for router in (
         health_router,
         logs_router,

@@ -1,3 +1,4 @@
+import { WriteButton, WriteForm, WriteInput } from '@/components/ui/WriteControls'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowRight,
@@ -69,14 +70,14 @@ export function ProjectsLanding() {
           <h1>{t('projects.title')}</h1>
           <p>{t('projects.subtitle')}</p>
         </div>
-        <button
+        <WriteButton
           className="button button--primary"
           type="button"
           onClick={() => setCreateOpen(true)}
         >
           <FolderPlus size={16} aria-hidden="true" />
           {t('projects.new')}
-        </button>
+        </WriteButton>
       </header>
       <div className="toolbar">
         <label className="search-control">
@@ -177,7 +178,7 @@ export function ProjectsLanding() {
                     </footer>
                   </div>
                 </Link>
-                <button
+                <WriteButton
                   className="icon-button project-card__menu-button"
                   type="button"
                   aria-label={t('projects.projectActions', { name: project.name })}
@@ -189,10 +190,10 @@ export function ProjectsLanding() {
                   }
                 >
                   <MoreHorizontal size={18} aria-hidden="true" />
-                </button>
+                </WriteButton>
                 {menuOpen ? (
                   <div className="project-card__menu" role="menu">
-                    <button
+                    <WriteButton
                       type="button"
                       role="menuitem"
                       onClick={() => {
@@ -202,8 +203,8 @@ export function ProjectsLanding() {
                     >
                       <Pencil size={15} aria-hidden="true" />
                       {t('projects.rename')}
-                    </button>
-                    <button
+                    </WriteButton>
+                    <WriteButton
                       className="project-card__menu-danger"
                       type="button"
                       role="menuitem"
@@ -214,7 +215,7 @@ export function ProjectsLanding() {
                     >
                       <Trash2 size={15} aria-hidden="true" />
                       {t('projects.delete')}
-                    </button>
+                    </WriteButton>
                   </div>
                 ) : null}
               </article>
@@ -263,7 +264,7 @@ function RenameProjectDialog({
   })
   return (
     <div className="dialog-layer" role="presentation">
-      <form
+      <WriteForm
         className="dialog"
         role="dialog"
         aria-labelledby="rename-project-title"
@@ -285,7 +286,7 @@ function RenameProjectDialog({
         </header>
         <label className="field">
           <span>{t('projects.projectName')}</span>
-          <input
+          <WriteInput
             required
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -296,7 +297,7 @@ function RenameProjectDialog({
           <button className="button button--secondary" type="button" onClick={onClose}>
             {t('common.cancel')}
           </button>
-          <button
+          <WriteButton
             className="button button--primary"
             disabled={!name.trim() || name.trim() === project.name || rename.isPending}
             type="submit"
@@ -305,9 +306,9 @@ function RenameProjectDialog({
               <LoaderCircle className="spin" size={15} aria-hidden="true" />
             ) : null}
             {t('projects.rename')}
-          </button>
+          </WriteButton>
         </footer>
-      </form>
+      </WriteForm>
     </div>
   )
 }
@@ -358,7 +359,7 @@ function DeleteProjectDialog({
           >
             {t('common.cancel')}
           </button>
-          <button
+          <WriteButton
             className="button button--danger"
             type="button"
             disabled={remove.isPending}
@@ -370,7 +371,7 @@ function DeleteProjectDialog({
               <Trash2 size={15} aria-hidden="true" />
             )}
             {t('projects.confirmDelete')}
-          </button>
+          </WriteButton>
         </footer>
       </div>
     </div>
@@ -443,7 +444,7 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
         if (event.currentTarget === event.target) onClose()
       }}
     >
-      <form
+      <WriteForm
         className="dialog"
         role="dialog"
         aria-labelledby="create-project-title"
@@ -465,7 +466,7 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
         </header>
         <label className="field">
           <span>{t('projects.projectName')}</span>
-          <input
+          <WriteInput
             required
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -476,15 +477,15 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
           <button className="button button--secondary" type="button" onClick={onClose}>
             {t('common.cancel')}
           </button>
-          <button
+          <WriteButton
             className="button button--primary"
             disabled={!name.trim() || create.isPending}
             type="submit"
           >
             {t(create.isPending ? 'projects.creating' : 'projects.create')}
-          </button>
+          </WriteButton>
         </footer>
-      </form>
+      </WriteForm>
     </div>
   )
 }

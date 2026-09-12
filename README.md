@@ -283,6 +283,19 @@ npm --prefix web ci
 uv run cutmaster serve --config config.toml
 ```
 
+局域网只读共享（需放行主机防火墙的 8000 端口）：
+
+```bash
+uv run cutmaster serve --config config.toml --host 0.0.0.0 --port 8000 --no-open
+```
+
+本机使用 `http://127.0.0.1:8000` 管理；其他机器使用 `http://主机局域网IP:8000`
+浏览。服务按直连 IP 判断权限：回环地址允许读写，其余地址只允许 GET/HEAD/OPTIONS，
+写请求返回 `403 remote_read_only`。远程页面隐藏写操作、禁用编辑字段，并在侧边栏
+“实时同步”右侧显示同字号的“只读模式”。本机通过局域网 IP 访问也为只读。
+此模式用于可信局域网直连，不支持通过代理区分访问者；不要把本地写入口转发给远程。
+只读仍可查看已有素材、成片、设置及日志，不提供用户登录或数据隔离，请勿直接暴露到公网。
+
 在源码工作树中，`serve` 会在打开浏览器前检查 `web/dist`；当产物缺失或落后于
 前端源码时会自动执行生产构建。也可以随时手动运行
 `npm --prefix web run build`。已打开的旧页面在构建更新后需要刷新一次。

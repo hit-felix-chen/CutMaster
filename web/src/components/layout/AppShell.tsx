@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 
 import { EventStreamStatus } from '@/app/providers/EventStreamProvider'
+import { useCanWrite } from '@/app/access-context'
 import { appPaths } from '@/app/routes'
 import { useApplicationHealth } from '@/app/use-application-health'
 import {
@@ -17,6 +18,7 @@ const navigation = [
 ] as const
 
 export function AppShell() {
+  const canWrite = useCanWrite()
   const { t } = useTranslation('common')
   const location = useLocation()
   const health = useApplicationHealth()
@@ -94,7 +96,12 @@ export function AppShell() {
             <Settings size={19} aria-hidden="true" />
             <span>{t('nav.settings')}</span>
           </NavLink>
-          <EventStreamStatus />
+          <div className="rail-status-row">
+            <EventStreamStatus />
+            {!canWrite ? (
+              <span className="rail-read-only">{t('shell.readOnly')}</span>
+            ) : null}
+          </div>
         </aside>
         <main id="main-content" className="app-main">
           {rootBlocked ? (

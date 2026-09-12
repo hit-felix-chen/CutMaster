@@ -1,3 +1,10 @@
+import {
+  WriteInput,
+  WriteForm,
+  WriteSelect,
+  WriteTextarea,
+  WriteButton,
+} from '@/components/ui/WriteControls'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AudioWaveform,
@@ -242,7 +249,7 @@ function TargetDurationField({
       <legend>{t('projects.targetDuration')}</legend>
       <div className="target-duration-modes">
         <label>
-          <input
+          <WriteInput
             type="radio"
             name={`${idPrefix}-mode`}
             value="custom"
@@ -253,7 +260,7 @@ function TargetDurationField({
           <span>{t('brief.customDuration')}</span>
         </label>
         <label>
-          <input
+          <WriteInput
             type="radio"
             name={`${idPrefix}-mode`}
             value="music"
@@ -268,7 +275,7 @@ function TargetDurationField({
         <div className="target-duration-inputs">
           <label htmlFor={`${idPrefix}-minutes`}>
             <span>{t('brief.minutes')}</span>
-            <input
+            <WriteInput
               id={`${idPrefix}-minutes`}
               type="number"
               inputMode="numeric"
@@ -285,7 +292,7 @@ function TargetDurationField({
           </span>
           <label htmlFor={`${idPrefix}-seconds`}>
             <span>{t('brief.seconds')}</span>
-            <input
+            <WriteInput
               id={`${idPrefix}-seconds`}
               type="number"
               inputMode="numeric"
@@ -435,7 +442,7 @@ export function ProjectOverview() {
         />
       ) : null}
       {!videos.isPending && !music.isPending ? (
-        <form
+        <WriteForm
           className="project-setup__form"
           onSubmit={(event) => {
             event.preventDefault()
@@ -453,7 +460,10 @@ export function ProjectOverview() {
             <div className="setup-material-grid">
               <label className="field">
                 <span>{t('projects.selectedVideo')}</span>
-                <select value={videoId} onChange={(e) => setVideoId(e.target.value)}>
+                <WriteSelect
+                  value={videoId}
+                  onChange={(e) => setVideoId(e.target.value)}
+                >
                   <option value="">{t('projects.noVideo')}</option>
                   {videoItems
                     .filter((item) => item.condition.toLowerCase() === 'ready')
@@ -462,11 +472,11 @@ export function ProjectOverview() {
                         {item.name} · {item.condition}
                       </option>
                     ))}
-                </select>
+                </WriteSelect>
               </label>
               <label className="field">
                 <span>{t('projects.selectedMusic')}</span>
-                <select
+                <WriteSelect
                   value={musicId}
                   onChange={(event) => {
                     duration.setMode(duration.mode)
@@ -485,7 +495,7 @@ export function ProjectOverview() {
                         {item.name} · {item.condition}
                       </option>
                     ))}
-                </select>
+                </WriteSelect>
               </label>
             </div>
           </section>
@@ -499,7 +509,7 @@ export function ProjectOverview() {
             </header>
             <label className="field">
               <span>{t('projects.editingIntent')}</span>
-              <textarea
+              <WriteTextarea
                 rows={6}
                 required
                 value={intent}
@@ -510,7 +520,7 @@ export function ProjectOverview() {
             <TargetDurationField idPrefix="setup-target-duration" editor={duration} />
             <label className="field field--anchor">
               <span className="field__checkbox-row">
-                <input
+                <WriteInput
                   type="checkbox"
                   checked={anchorEnabled}
                   onChange={(event) => setAnchorEnabled(event.target.checked)}
@@ -545,15 +555,15 @@ export function ProjectOverview() {
               <OperationProblem error={save.error ?? start.error} />
             ) : null}
             <footer className="project-setup__actions">
-              <button
+              <WriteButton
                 className="button button--secondary"
                 type="submit"
                 disabled={!dirty || !valid || save.isPending}
               >
                 <Save size={16} />
                 {t('projects.saveSetup')}
-              </button>
-              <button
+              </WriteButton>
+              <WriteButton
                 className="button button--primary button--start"
                 type="button"
                 disabled={!valid || !materialsReady || start.isPending}
@@ -564,10 +574,10 @@ export function ProjectOverview() {
               >
                 <Rocket size={17} />
                 {start.isPending ? t('projects.starting') : t('projects.startEditing')}
-              </button>
+              </WriteButton>
             </footer>
           </aside>
-        </form>
+        </WriteForm>
       ) : null}
       {blocker.state === 'blocked' || startGuardOpen ? (
         <div className="dialog-layer">
@@ -662,7 +672,7 @@ export function ProjectMaterials() {
         />
       ) : null}
       {!videos.isPending && !music.isPending ? (
-        <form
+        <WriteForm
           className="material-picker"
           onSubmit={(event) => {
             event.preventDefault()
@@ -671,7 +681,7 @@ export function ProjectMaterials() {
         >
           <label className="field">
             <span>{t('projects.selectedVideo')}</span>
-            <select
+            <WriteSelect
               value={videoId}
               onChange={(event) => setVideoId(event.target.value)}
             >
@@ -683,11 +693,11 @@ export function ProjectMaterials() {
                     {item.name} · {item.condition}
                   </option>
                 ))}
-            </select>
+            </WriteSelect>
           </label>
           <label className="field">
             <span>{t('projects.selectedMusic')}</span>
-            <select
+            <WriteSelect
               value={musicId}
               onChange={(event) => setMusicId(event.target.value)}
             >
@@ -699,20 +709,20 @@ export function ProjectMaterials() {
                     {item.name} · {item.condition}
                   </option>
                 ))}
-            </select>
+            </WriteSelect>
           </label>
           {save.isError ? <OperationProblem error={save.error} /> : null}
           <div className="form-actions">
-            <button
+            <WriteButton
               className="button button--primary"
               type="submit"
               disabled={!changed || save.isPending}
             >
               <Save size={16} />
               {t('common.save')}
-            </button>
+            </WriteButton>
           </div>
-        </form>
+        </WriteForm>
       ) : null}
       {blocker.state === 'blocked' ? (
         <div className="dialog-layer">
@@ -831,7 +841,7 @@ export function CreativeBrief() {
         </div>
         {dirty ? <span className="dirty-label">{t('common.unsaved')}</span> : null}
       </header>
-      <form
+      <WriteForm
         className="brief-form"
         onSubmit={(event) => {
           event.preventDefault()
@@ -840,7 +850,7 @@ export function CreativeBrief() {
       >
         <label className="field">
           <span>{t('projects.editingIntent')}</span>
-          <textarea
+          <WriteTextarea
             rows={8}
             required
             value={intent}
@@ -851,7 +861,7 @@ export function CreativeBrief() {
         <TargetDurationField idPrefix="target-duration" editor={duration} />
         <label className="field field--anchor">
           <span className="field__checkbox-row">
-            <input
+            <WriteInput
               type="checkbox"
               checked={anchorEnabled}
               onChange={(event) => setAnchorEnabled(event.target.checked)}
@@ -862,16 +872,16 @@ export function CreativeBrief() {
         </label>
         {save.isError ? <OperationProblem error={save.error} /> : null}
         <div className="form-actions">
-          <button
+          <WriteButton
             className="button button--primary"
             type="submit"
             disabled={!dirty || !valid || save.isPending}
           >
             <Save size={16} />
             {t('brief.saveChanges')}
-          </button>
+          </WriteButton>
         </div>
-      </form>
+      </WriteForm>
       {blocker.state === 'blocked' ? (
         <div className="dialog-layer">
           <div className="dialog">
@@ -972,7 +982,7 @@ function RunActions({
     return (
       <div className="run-actions">
         <div className="run-actions__buttons">
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={stopping || stop.isPending}
@@ -984,7 +994,7 @@ function RunActions({
               <Square size={14} aria-hidden="true" />
             )}
             {stopping ? t('projects.stoppingRun') : t('projects.stopRun')}
-          </button>
+          </WriteButton>
         </div>
         {stop.isError ? <OperationProblem error={stop.error} /> : null}
       </div>
@@ -996,7 +1006,7 @@ function RunActions({
     <div className={compact ? 'run-actions run-actions--compact' : 'run-actions'}>
       <div className="run-actions__buttons">
         {status === 'failed' ? (
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={pending}
@@ -1008,10 +1018,10 @@ function RunActions({
               <RefreshCcw size={15} aria-hidden="true" />
             )}
             {t('projects.retryRun')}
-          </button>
+          </WriteButton>
         ) : null}
         {status === 'interrupted' ? (
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={pending}
@@ -1023,10 +1033,10 @@ function RunActions({
               <RefreshCcw size={15} aria-hidden="true" />
             )}
             {t('projects.resumeRun')}
-          </button>
+          </WriteButton>
         ) : null}
         {['complete', 'completed'].includes(status) ? (
-          <button
+          <WriteButton
             className="button button--secondary"
             type="button"
             disabled={pending}
@@ -1038,9 +1048,9 @@ function RunActions({
               <Repeat2 size={15} aria-hidden="true" />
             )}
             {t('projects.runAgain')}
-          </button>
+          </WriteButton>
         ) : null}
-        <button
+        <WriteButton
           className={deleteArmed ? 'button button--danger' : 'button button--secondary'}
           type="button"
           disabled={pending}
@@ -1061,7 +1071,7 @@ function RunActions({
             <Trash2 size={15} aria-hidden="true" />
           )}
           {deleteArmed ? t('projects.confirmDelete') : t('projects.delete')}
-        </button>
+        </WriteButton>
       </div>
       {deleteArmed && !remove.isPending ? (
         <small className="run-actions__confirm">{t('projects.deleteRunAgain')}</small>

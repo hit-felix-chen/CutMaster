@@ -1,4 +1,5 @@
 {
+  "remote_read_only": "Remote access is read-only. Open the page through 127.0.0.1 on the server to make changes.",
   "generic": "The operation could not be completed. Check the current state and try again.",
   "application_error": "The application could not complete this operation.",
   "request_validation_failed": "Some inputs are invalid. Check them and try again.",

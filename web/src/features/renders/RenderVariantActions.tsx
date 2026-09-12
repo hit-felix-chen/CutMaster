@@ -1,3 +1,4 @@
+import { WriteButton } from '@/components/ui/WriteControls'
 import { Download, OctagonX, Play, RotateCcw, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -66,7 +67,7 @@ export function RenderVariantActions({
         </a>
       ) : null}
       {recovery ? (
-        <button
+        <WriteButton
           className="button button--secondary"
           type="button"
           disabled={busy}
@@ -74,10 +75,10 @@ export function RenderVariantActions({
         >
           <RotateCcw size={14} aria-hidden="true" />
           {t(`renders.${recovery}`)}
-        </button>
+        </WriteButton>
       ) : null}
       {active && execution ? (
-        <button
+        <WriteButton
           className="button button--secondary"
           type="button"
           disabled={busy || execution.attempt.status === 'stopping'}
@@ -87,10 +88,10 @@ export function RenderVariantActions({
           {execution.attempt.status === 'stopping'
             ? t('renders.stopping')
             : t('renders.stop')}
-        </button>
+        </WriteButton>
       ) : null}
       {!active ? (
-        <button
+        <WriteButton
           className={`button ${deleteArmed ? 'button--danger' : 'button--secondary'}`}
           type="button"
           disabled={busy}
@@ -101,7 +102,7 @@ export function RenderVariantActions({
         >
           <Trash2 size={14} aria-hidden="true" />
           {deleteArmed ? t('renders.confirmDelete') : t('renders.delete')}
-        </button>
+        </WriteButton>
       ) : null}
     </div>
   )

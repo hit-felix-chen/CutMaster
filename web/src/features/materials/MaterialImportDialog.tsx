@@ -1,3 +1,4 @@
+import { WriteForm, WriteInput, WriteButton } from '@/components/ui/WriteControls'
 import { AlertTriangle, CheckCircle2, LoaderCircle, UploadCloud, X } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -151,12 +152,12 @@ export function MaterialImportDialog({
           </button>
         </header>
 
-        <form noValidate onSubmit={(event) => void submit(event)}>
+        <WriteForm noValidate onSubmit={(event) => void submit(event)}>
           <fieldset className="material-import-types" disabled={uploading}>
             <legend>{t('materials.materialType')}</legend>
             {(['video', 'music'] as const).map((value) => (
               <label key={value}>
-                <input
+                <WriteInput
                   type="radio"
                   name="material-type"
                   value={value}
@@ -174,7 +175,7 @@ export function MaterialImportDialog({
 
           <label className="field" htmlFor="material-import-name">
             <span>{t('materials.materialName')}</span>
-            <input
+            <WriteInput
               ref={nameRef}
               id="material-import-name"
               aria-label={t('materials.materialName')}
@@ -193,7 +194,7 @@ export function MaterialImportDialog({
 
           <label className="field material-file-field" htmlFor="material-import-source">
             <span>{t('materials.sourceFile')}</span>
-            <input
+            <WriteInput
               id="material-import-source"
               aria-label={t('materials.sourceFile')}
               type="file"
@@ -217,7 +218,7 @@ export function MaterialImportDialog({
               htmlFor="material-import-subtitle"
             >
               <span>{t('materials.subtitleFile')}</span>
-              <input
+              <WriteInput
                 id="material-import-subtitle"
                 aria-label={t('materials.subtitleFile')}
                 type="file"
@@ -296,7 +297,7 @@ export function MaterialImportDialog({
             >
               {t('common.cancel')}
             </button>
-            <button
+            <WriteButton
               className="button button--primary"
               type="submit"
               disabled={submitDisabled}
@@ -307,9 +308,9 @@ export function MaterialImportDialog({
                 <UploadCloud size={16} aria-hidden="true" />
               )}
               {uploading ? t('materials.uploading') : t('materials.importAndAnalyse')}
-            </button>
+            </WriteButton>
           </footer>
-        </form>
+        </WriteForm>
       </div>
     </div>
   )

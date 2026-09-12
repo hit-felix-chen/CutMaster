@@ -1,3 +1,4 @@
+import { WriteButton } from '@/components/ui/WriteControls'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   Database,
@@ -139,7 +140,7 @@ export function SettingsWorkspace() {
                   {formatBytes(storage.data.total_size_bytes, i18n.language)}
                 </strong>
                 {storage.data.reveal_supported ? (
-                  <button
+                  <WriteButton
                     className="button button--secondary"
                     type="button"
                     disabled={revealStorage.isPending || rootBlocked}
@@ -151,7 +152,7 @@ export function SettingsWorkspace() {
                       <FolderOpen size={15} />
                     )}
                     {t('settings.openInFinder')}
-                  </button>
+                  </WriteButton>
                 ) : null}
               </div>
               {revealStorage.isSuccess ? (

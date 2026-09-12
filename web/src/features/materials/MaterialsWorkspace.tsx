@@ -1,3 +1,4 @@
+import { WriteButton } from '@/components/ui/WriteControls'
 import {
   useInfiniteQuery,
   useMutation,
@@ -232,10 +233,10 @@ function EmptyMaterials({
       <Icon size={28} aria-hidden="true" />
       <h2>{t(type === 'video' ? 'materials.emptyVideo' : 'materials.emptyMusic')}</h2>
       <p>{t('materials.emptyImportHelp')}</p>
-      <button className="button button--primary" type="button" onClick={onImport}>
+      <WriteButton className="button button--primary" type="button" onClick={onImport}>
         <UploadCloud size={16} aria-hidden="true" />
         {t('materials.import')}
-      </button>
+      </WriteButton>
     </section>
   )
 }
@@ -804,7 +805,7 @@ function MaterialDrawerContent({
         <h3>{t('materials.actions')}</h3>
         <div className="material-actions__buttons">
           {executionStatus === 'failed' ? (
-            <button
+            <WriteButton
               className="button button--secondary"
               type="button"
               disabled={operationPending}
@@ -816,10 +817,10 @@ function MaterialDrawerContent({
                 <RefreshCcw size={15} aria-hidden="true" />
               )}
               {t('common.retry')}
-            </button>
+            </WriteButton>
           ) : null}
           {executionStatus === 'interrupted' ? (
-            <button
+            <WriteButton
               className="button button--secondary"
               type="button"
               disabled={operationPending}
@@ -831,10 +832,10 @@ function MaterialDrawerContent({
                 <RefreshCcw size={15} aria-hidden="true" />
               )}
               {t('materials.resumeAnalysis')}
-            </button>
+            </WriteButton>
           ) : null}
           {active && execution ? (
-            <button
+            <WriteButton
               className="button button--secondary"
               type="button"
               disabled={operationPending || executionStatus === 'stopping'}
@@ -848,9 +849,9 @@ function MaterialDrawerContent({
               {executionStatus === 'stopping'
                 ? t('activity.stopping')
                 : t('activity.stopAttempt')}
-            </button>
+            </WriteButton>
           ) : null}
-          <button
+          <WriteButton
             className="button material-delete-button"
             type="button"
             disabled={operationPending || knownDeleteBlocker}
@@ -862,7 +863,7 @@ function MaterialDrawerContent({
               <Trash2 size={15} aria-hidden="true" />
             )}
             {deleteArmed ? t('materials.confirmDelete') : t('materials.delete')}
-          </button>
+          </WriteButton>
         </div>
         {active ? (
           <p className="truthful-note">{t('materials.deleteBlockedActive')}</p>
@@ -1299,14 +1300,14 @@ export function MaterialsWorkspace() {
           <h1>{t('materials.title')}</h1>
           <p>{t('materials.subtitle')}</p>
         </div>
-        <button
+        <WriteButton
           className="button button--primary"
           type="button"
           onClick={() => setImportOpen(true)}
         >
           <UploadCloud size={16} aria-hidden="true" />
           {t('materials.import')}
-        </button>
+        </WriteButton>
       </header>
       <div className="material-type-tabs">
         <Link

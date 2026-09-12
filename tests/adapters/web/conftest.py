@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import wraps
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,19 @@ api_key_env = "CUTMASTER_WEB_TEST_VLM_KEY"
 [analyser.asr]
 api_key_env = "CUTMASTER_WEB_TEST_ASR_KEY"
 """.strip()
+
+
+@pytest.fixture(autouse=True)
+def local_web_test_peer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing route tests exercise local management unless a peer is explicit."""
+    original = TestClient.__init__
+
+    @wraps(original)
+    def initialize(self, *args, **kwargs):
+        kwargs.setdefault("client", ("127.0.0.1", 50000))
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(TestClient, "__init__", initialize)
 
 
 @pytest.fixture
