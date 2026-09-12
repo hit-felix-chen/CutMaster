@@ -16,6 +16,28 @@ from cutmaster.configuration.schema import (
 )
 
 
+def test_trajectory_window_can_shift_beyond_former_semantic_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "cutmaster.workflow.planners.tools.source_window_optimizer._detect_used_segment_cuts",
+        lambda *_args, **_kwargs: ((13.0,), 30.0, 60.0),
+    )
+    item = {
+        "group_id": "group_01", "trajectory_id": "trajectory_01",
+        "timestamp": "00:00:10,000-00:00:14,000",
+        "output_frame_range": [0, 120], "planning_segment_end_ms": 14000,
+    }
+    result = optimize_script_source_windows(
+        tmp_path / "source.mp4", tmp_path / "segments", [item], [1.5], {},
+        output_fps=30, detection_config=ShotDetectionConfig(),
+        optimization_config=SourceWindowOptimizationConfig(),
+    )[0]
+    audit = result["cut_optimization"]
+    assert audit["source_shift_sec"] == pytest.approx(1.5)
+    assert audit["max_beat_distance_sec"] == pytest.approx(0.0)
+    assert audit["fallback_level"] == 0
+    assert result["output_frame_range"] == [0, 120]
+
+
 def test_detect_source_cuts_filters_near_duplicate_frames(monkeypatch, tmp_path) -> None:
     frames = [
         np.full((8, 8, 3), value, dtype=np.uint8)
@@ -122,7 +144,7 @@ def test_choose_source_window_never_moves_backward() -> None:
     assert 10.0 <= result.source_start_sec <= 12.0
 
 
-def test_choose_source_window_tolerates_millisecond_timecode_rounding_at_cap() -> None:
+def test_choose_source_window_preserves_already_aligned_millisecond_start() -> None:
     result = choose_source_window(
         original_start_sec=6902.567,
         clip_duration_sec=4.0,
@@ -132,7 +154,6 @@ def test_choose_source_window_tolerates_millisecond_timecode_rounding_at_cap() -
         beat_times=[1.433],
         source_duration_sec=7200.0,
         frame_rate=30.0,
-        latest_source_start_sec=6902.566667,
     )
 
     assert result.source_start_sec == pytest.approx(6902.567)
@@ -161,23 +182,6 @@ def test_choose_source_window_distinguishes_float_tail_error_from_overflow(
     else:
         with pytest.raises(ValueError, match="No forward source-window search range"):
             choose()
-
-
-def test_choose_source_window_rejects_real_existing_boundary_overflow() -> None:
-    with pytest.raises(
-        ValueError,
-        match="Existing source window exceeds its chronological or evidence boundary",
-    ):
-        choose_source_window(
-            original_start_sec=10.0,
-            clip_duration_sec=4.0,
-            output_start_sec=0.0,
-            internal_source_cuts_sec=[11.0],
-            beat_times=[1.0],
-            source_duration_sec=60.0,
-            frame_rate=30.0,
-            latest_source_start_sec=9.998,
-        )
 
 
 def test_choose_source_window_relaxes_edge_constraint_when_strict_search_is_impossible() -> None:
@@ -336,9 +340,9 @@ def test_trajectory_clips_are_beat_optimized_without_losing_identity(
     )
     second_start, _ = parse_range(optimized[1]["timestamp"])
 
-    assert first_start == pytest.approx(10.0)
-    assert first_end <= second_start
-    assert 14.0 < second_start <= 14.4
+    assert 10.0 < first_start <= 12.0
+    assert first_end - first_start == pytest.approx(4.0)
+    assert 14.0 < second_start <= 16.0
     assert [item["candidate_id"] for item in optimized] == [
         "candidate_01",
         "candidate_02",
@@ -352,20 +356,11 @@ def test_trajectory_clips_are_beat_optimized_without_losing_identity(
         "group_001_trajectory_01",
     ]
     assert optimized[0]["cut_optimization"]["mode"] == "beat_optimized"
-    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+    assert optimized[0]["cut_optimization"]["source_shift_sec"] > 0.0
     second_optimization = optimized[1]["cut_optimization"]
-    assert 0.0 < second_optimization["source_shift_sec"] <= 0.4
-    assert second_optimization["visual_sample_frames"] == 4
-    assert second_optimization["visual_guard_start_sec"] == pytest.approx(14.5)
-    assert second_optimization["semantic_shift_cap_sec"] == pytest.approx(0.4)
-    original_sample_times = [
-        14.0 + 4.0 * (index + 0.5) / 4
-        for index in range(4)
-    ]
-    assert all(
-        second_start <= sample_time <= second_start + 4.0
-        for sample_time in original_sample_times
-    )
+    assert 0.0 < second_optimization["source_shift_sec"] <= 2.0
+    assert "semantic_shift_cap_sec" not in second_optimization
+    assert "visual_guard_start_sec" not in second_optimization
     assert all(
         item["cut_optimization"].get("mode") != "trajectory_locked"
         for item in optimized
@@ -413,7 +408,7 @@ def test_dialogue_anchor_is_the_only_trajectory_clip_that_stays_locked(
     }
 
 
-def test_last_trajectory_clip_cannot_move_past_its_source_segment_end(
+def test_last_trajectory_clip_can_move_past_its_source_segment_end(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -451,11 +446,11 @@ def test_last_trajectory_clip_cannot_move_past_its_source_segment_end(
         optimization_config=SourceWindowOptimizationConfig(),
     )
 
-    assert optimized[0]["timestamp"] == item["timestamp"]
-    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+    assert optimized[0]["timestamp"] != item["timestamp"]
+    assert 0.0 < optimized[0]["cut_optimization"]["source_shift_sec"] <= 2.0
 
 
-def test_trajectory_clip_cannot_move_into_an_unverified_shot(
+def test_trajectory_clip_can_move_into_an_unverified_shot(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -503,11 +498,11 @@ def test_trajectory_clip_cannot_move_into_an_unverified_shot(
         optimization_config=SourceWindowOptimizationConfig(),
     )
 
-    assert optimized[0]["timestamp"] == item["timestamp"]
-    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+    assert optimized[0]["timestamp"] != item["timestamp"]
+    assert 0.0 < optimized[0]["cut_optimization"]["source_shift_sec"] <= 2.0
 
 
-def test_trajectory_clip_cannot_move_past_its_planning_segment_end(
+def test_trajectory_clip_can_move_past_its_planning_segment_end(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -552,8 +547,8 @@ def test_trajectory_clip_cannot_move_past_its_planning_segment_end(
         optimization_config=SourceWindowOptimizationConfig(),
     )
 
-    assert optimized[0]["timestamp"] == item["timestamp"]
-    assert optimized[0]["cut_optimization"]["source_shift_sec"] == 0.0
+    assert optimized[0]["timestamp"] != item["timestamp"]
+    assert 0.0 < optimized[0]["cut_optimization"]["source_shift_sec"] <= 2.0
 
 
 def test_cutless_used_segment_preserves_source_window(

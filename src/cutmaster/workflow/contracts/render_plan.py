@@ -207,11 +207,22 @@ class RenderPlan:
                         f"RenderPlan contains duplicate Candidate {normalized_candidate_id}"
                     )
                 candidate_ids.add(normalized_candidate_id)
-                if previous_source_end is not None and source_start < previous_source_end:
+                # Chronology belongs to the selected trajectory, before the
+                # independent beat-window shifts (which may overlap).
+                optimization = clip.get("cut_optimization") or {}
+                shift = (
+                    float(optimization.get("source_shift_sec", 0.0))
+                    if optimization.get("mode") == "beat_optimized"
+                    else 0.0
+                )
+                if (
+                    previous_source_end is not None
+                    and source_start - shift < previous_source_end - 0.001001
+                ):
                     raise ValueError(
                         f"Render clip {index} creates a source overlap or reversal"
                     )
-                previous_source_end = source_end
+                previous_source_end = source_end - shift
             anchor = clip.get("dialogue_anchor")
             if anchor is not None:
                 if not isinstance(anchor, dict):

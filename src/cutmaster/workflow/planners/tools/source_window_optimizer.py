@@ -19,9 +19,6 @@ from cutmaster.workflow.shared.shot_detection import detect_source_cuts
 from cutmaster.workflow.shared.timecode import format_range, parse_range
 
 
-_TIMECODE_QUANTIZATION_TOLERANCE_SEC = 0.001001
-
-
 @dataclass(frozen=True)
 class SourceWindowOptimization:
     source_start_sec: float
@@ -45,72 +42,6 @@ def _trajectory_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     if not has_group:
         return None
     return group_id.strip(), trajectory_id.strip()
-
-
-def _source_window_end_cap(
-    item: dict[str, Any],
-    video_description: dict[str, Any],
-) -> float | None:
-    caps: list[float] = []
-    planning_end_ms = item.get("planning_segment_end_ms")
-    if planning_end_ms is not None:
-        if (
-            isinstance(planning_end_ms, bool)
-            or not isinstance(planning_end_ms, int)
-            or planning_end_ms <= 0
-        ):
-            raise ValueError("planning_segment_end_ms must be a positive integer")
-        caps.append(planning_end_ms / 1000.0)
-
-    source_segment_id = item.get("source_segment_id")
-    if source_segment_id is None:
-        if item.get("source_shot_ids") is not None:
-            raise ValueError("source_shot_ids require source_segment_id")
-        return min(caps) if caps else None
-    if not isinstance(source_segment_id, str) or not source_segment_id.strip():
-        raise ValueError("source_segment_id must be a non-empty string")
-    source_segment_id = source_segment_id.strip()
-    segment = next(
-        (
-            raw
-            for raw in video_description.get("segments", [])
-            if str(raw.get("segment_id") or "") == source_segment_id
-        ),
-        None,
-    )
-    if segment is None:
-        raise ValueError(f"Unknown source Segment: {source_segment_id}")
-    caps.append(float(segment["time_range"]["end_sec"]))
-
-    raw_shot_ids = item.get("source_shot_ids")
-    if raw_shot_ids is None:
-        return min(caps)
-    if not isinstance(raw_shot_ids, list) or not raw_shot_ids:
-        raise ValueError("source_shot_ids must be a non-empty array")
-    source_shot_ids = {
-        shot_id.strip()
-        for shot_id in raw_shot_ids
-        if isinstance(shot_id, str) and shot_id.strip()
-    }
-    if len(source_shot_ids) != len(raw_shot_ids):
-        raise ValueError("source_shot_ids must contain unique non-empty strings")
-    shots_by_id = {
-        str(shot.get("shot_id") or ""): shot
-        for shot in segment.get("shots", [])
-    }
-    missing = source_shot_ids - set(shots_by_id)
-    if missing:
-        raise ValueError(
-            f"Unknown source Shot(s) for {source_segment_id}: "
-            + ", ".join(sorted(missing))
-        )
-    caps.append(
-        max(
-            float(shots_by_id[shot_id]["time_range"]["end_sec"])
-            for shot_id in source_shot_ids
-        )
-    )
-    return min(caps)
 
 
 def _merge_intervals(
@@ -266,7 +197,6 @@ def choose_source_window(
     frame_rate: float,
     search_margin_sec: float = 2.0,
     min_boundary_distance_sec: float = 1.0,
-    latest_source_start_sec: float | None = None,
 ) -> SourceWindowOptimization:
     initial_cuts = sorted(internal_source_cuts_sec)
     available_cuts = sorted(
@@ -274,14 +204,6 @@ def choose_source_window(
     )
     beats = sorted(float(beat) for beat in beat_times)
     epsilon = 1e-6
-    if (
-        latest_source_start_sec is not None
-        and latest_source_start_sec
-        < original_start_sec - _TIMECODE_QUANTIZATION_TOLERANCE_SEC
-    ):
-        raise ValueError(
-            "Existing source window exceeds its chronological or evidence boundary"
-        )
     if not available_cuts:
         output_cuts = tuple(output_start_sec + cut - original_start_sec for cut in initial_cuts)
         max_distance = max((_nearest_beat_distance(cut, beats) for cut in output_cuts), default=0.0)
@@ -300,8 +222,6 @@ def choose_source_window(
         source_duration_sec - clip_duration_sec,
         original_start_sec + search_margin_sec,
     )
-    if latest_source_start_sec is not None:
-        upper = min(upper, max(original_start_sec, latest_source_start_sec))
     if upper < lower - epsilon:
         raise ValueError("No forward source-window search range is available")
     # Subtracting legal decimal timestamps can put an exact-tail upper bound
@@ -397,9 +317,6 @@ def _optimize_item(
     frame_rate: float,
     output_fps: int,
     optimization_config: SourceWindowOptimizationConfig,
-    visual_sample_frames: int,
-    next_source_start_sec: float | None,
-    source_window_end_sec: float | None,
 ) -> dict[str, Any]:
     if item.get("dialogue_anchor") is not None:
         result = dict(item)
@@ -422,25 +339,6 @@ def _optimize_item(
         source_end - source_start
         if trajectory_identity is not None
         else render_duration
-    )
-    latest_source_starts = [
-        boundary - clip_duration
-        for boundary in (next_source_start_sec, source_window_end_sec)
-        if boundary is not None
-    ]
-    visual_guard_start_sec: float | None = None
-    semantic_shift_cap_sec: float | None = None
-    if trajectory_identity is not None:
-        sample_count = max(1, visual_sample_frames)
-        visual_guard_start_sec = source_start + clip_duration / (2 * sample_count)
-        semantic_latest_start = max(
-            source_start,
-            visual_guard_start_sec - 1.0 / frame_rate,
-        )
-        semantic_shift_cap_sec = semantic_latest_start - source_start
-        latest_source_starts.append(semantic_latest_start)
-    latest_source_start_sec = (
-        min(latest_source_starts) if latest_source_starts else None
     )
     detection_start = source_start
     detection_end = min(
@@ -471,7 +369,6 @@ def _optimize_item(
         min_boundary_distance_sec=(
             optimization_config.min_boundary_distance_sec
         ),
-        latest_source_start_sec=latest_source_start_sec,
     )
 
     result = dict(item)
@@ -502,14 +399,6 @@ def _optimize_item(
         ],
         "max_beat_distance_sec": round(optimized.max_beat_distance_sec, 6),
     }
-    if visual_guard_start_sec is not None and semantic_shift_cap_sec is not None:
-        cut_optimization.update(
-            {
-                "visual_sample_frames": max(1, visual_sample_frames),
-                "visual_guard_start_sec": round(visual_guard_start_sec, 6),
-                "semantic_shift_cap_sec": round(semantic_shift_cap_sec, 6),
-            }
-        )
     result["cut_optimization"] = cut_optimization
     return result
 
@@ -524,26 +413,12 @@ def optimize_script_source_windows(
     output_fps: int,
     detection_config: ShotDetectionConfig,
     optimization_config: SourceWindowOptimizationConfig,
-    visual_sample_frames: int = 4,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
 
     for item in items:
         _trajectory_identity(item)
-    next_source_starts = [
-        parse_range(str(items[index + 1]["timestamp"]))[0]
-        if index + 1 < len(items)
-        else None
-        for index in range(len(items))
-    ]
-    source_window_ends = [
-        None
-        if item.get("dialogue_anchor") is not None
-        else _source_window_end_cap(item, video_description)
-        for item in items
-    ]
-
     source_cuts, frame_rate, source_duration_sec = _detect_used_segment_cuts(
         source_video,
         segment_cache_directory,
@@ -568,9 +443,6 @@ def optimize_script_source_windows(
                 frame_rate,
                 output_fps,
                 optimization_config,
-                max(1, visual_sample_frames),
-                next_source_starts[index],
-                source_window_ends[index],
             ): index
             for index, item in enumerate(items)
         }

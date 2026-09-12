@@ -295,7 +295,7 @@ def test_real_frozen_exact_eof_off_source_frame_grid_has_exact_frame_count(
 
 
 @pytest.mark.parametrize("seed", [127, 811, 20260902])
-def test_seeded_compilation_preserves_bounds_samples_and_frame_grid(
+def test_seeded_compilation_preserves_media_bounds_and_frame_grid(
     tmp_path, monkeypatch, seed,
 ) -> None:
     randomizer = random.Random(seed)
@@ -405,13 +405,9 @@ def test_seeded_compilation_preserves_bounds_samples_and_frame_grid(
             assert clip["trajectory_id"] == raw["trajectory_id"]
             assert clip["group_id"] == raw["group_id"]
             assert after_start >= before_start - 1e-9
-            assert after_end <= min(source_duration, cap) + 1e-9
-            assert after_start >= prior_source_end - 1e-9
+            assert after_end <= source_duration + 1e-9
+            assert after_start - before_start <= 2.0 + 1e-9
             assert after_end - after_start == pytest.approx(before_end - before_start)
-            assert all(
-                after_start <= sample <= after_end
-                for sample in sampled[raw["candidate_id"]]
-            )
             render_frames = clip["output_frame_range"][1] - clip["output_frame_range"][0]
             assert abs((after_end - after_start) - render_frames / fps) <= 0.001001
             if raw.get("dialogue_anchor") is not None:
